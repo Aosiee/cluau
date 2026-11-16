@@ -113,9 +113,29 @@ class Player {
 - `static Name = expression` is a member of the module table, not of an
   instance (the class's own `Name`, shared by every instance). It is how a
   class carries tables a host reads from the module, e.g. TinyEngine's
-  `static Signals = { "Collect" }` or `static Server = { Reset = ... }`.
+  `static Server = { Reset = ... }`.
   A static's expression is translated like any other (braces, operators);
   a `function (...) { ... }` value inside it is an ordinary function.
+- `signal Name(param: Type, ...)` declares a signal the class emits, with
+  its payload's types (every parameter typed). The names become the module
+  table's signal list (`Class.Signals = { "Name", ... }`, the member the
+  host's profile names); a host uses the declarations to type its emit and
+  connect calls - TinyEngine types every `Emit`, `On` and `Multicast` in
+  the workspace from them, so an undeclared name or a wrong payload is a
+  type error. A class with signal declarations has no `static Signals`.
+
+  ```
+  class Coin {
+  	signal Collected(position: vec3)
+
+  	function OnStart() {
+  		World.Emit("Collected", self.Entity.Transform.Position)
+  	}
+  }
+  ```
+- A host may spell a field's type differently in Luau (its profile's
+  `FieldType`): TinyEngine's `AssetRef<Scene>` field is a `string` (the
+  asset's path) to the type checker, and an asset picker in the inspector.
 
 ## Strict typing
 

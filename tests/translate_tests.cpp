@@ -214,3 +214,44 @@ TEST("if-expressions: a missing else or parenthesis is reported")
 	CHECK(HasError(cluau::Translate("let x = if a 1 else 2"), "parenthesised"));
 	CHECK(!cluau::Translate("let x = if (a) 1 else 2\n").HasErrors());
 }
+
+TEST("classes: signal declarations list their names on the class line, keeping every line")
+{
+	const std::string src =
+		"class Coin {\n"
+		"\tsignal Collect()\n"
+		"\tsignal Collected(position: vec3, by: Entity)\n"
+		"\tSpeed: number = 1\n"
+		"}\n";
+	const cluau::TranslateResult r = cluau::Translate(src);
+	CHECK(!r.HasErrors());
+	CHECK_EQ(Lines(r.Luau), Lines(src));
+	CHECK(r.Class.has_value() && r.Class->Signals.size() == (size_t)2);
+	if (!r.Class || r.Class->Signals.size() != 2)
+		return;
+	CHECK_EQ(r.Class->Signals[0].Name, std::string("Collect"));
+	CHECK_EQ(r.Class->Signals[0].Params, std::string(""));
+	CHECK_EQ(r.Class->Signals[1].Params, std::string("position: vec3, by: Entity"));
+	CHECK_EQ(r.Class->Signals[1].At.Begin.Line, 2);
+	CHECK(r.Luau.find("; Coin.Signals = { \"Collect\", \"Collected\" }") != std::string::npos);
+	CHECK(r.Luau.find("signal") == std::string::npos);
+	CHECK(HasError(cluau::Translate("class C {\n\tsignal Hit(amount)\n}\n"), "declare their types"));
+	CHECK(HasError(cluau::Translate("class C {\n\tsignal A()\n\tsignal A()\n}\n"), "declared twice"));
+	CHECK(HasError(cluau::Translate("class C {\n\tstatic Signals = { \"A\" }\n\tsignal A()\n}\n"), "not `static Signals`"));
+	// A field named `signal` stays a field.
+	const cluau::TranslateResult field = cluau::Translate("class C {\n\tsignal: number = 1\n}\n");
+	CHECK(!field.HasErrors());
+	CHECK(field.Class->Fields.size() == (size_t)1);
+}
+
+TEST("classes: a profile's FieldType spells a field's Luau type")
+{
+	cluau::ClassProfile profile;
+	profile.FieldType = [](const cluau::ClassField& f) -> std::string {
+		return f.Type.rfind("AssetRef<", 0) == 0 ? std::string("string") : f.Type;
+	};
+	cluau::TranslateOptions options;
+	options.Profile = &profile;
+	const std::string luau = Luau("class C {\n\tPrefab: AssetRef<Scene> = \"a/b.tasset\"\n\tN: number = 1\n}\n", options);
+	CHECK(luau.find("export type C = { Prefab: string, N: number, }") != std::string::npos);
+}

@@ -91,6 +91,16 @@ namespace cluau {
 		int BodyEndLine = 0;
 	};
 
+	// `signal Name(param: Type, ...)` in a class body (CLUAU_PLAN §5 Q13): a
+	// signal the class emits, with its payload's types. A host types its
+	// emit / connect calls from these; the module table lists the names.
+	struct ClassSignal
+	{
+		std::string Name;
+		std::string Params; // the parameter list's text, without the parentheses
+		Range At;           // the signal's name
+	};
+
 	struct ClassInfo
 	{
 		std::string Name;
@@ -100,6 +110,7 @@ namespace cluau {
 		std::vector<ClassField> Fields;
 		std::vector<ClassMethod> Methods;
 		std::vector<std::string> Statics; // `static Name = value` members (of the module table)
+		std::vector<ClassSignal> Signals;
 	};
 
 	// What a class lowers to beyond cluau's generic shape (a module table, a
@@ -116,6 +127,13 @@ namespace cluau {
 		// the module table (it is still part of the type). The default
 		// lowering is "$Class.Fields.<Name> = <Default>".
 		std::function<std::string(const ClassField&, const std::string& className, std::string& error)> LowerField;
+		// A field's Luau type in the class type (null = its declared type),
+		// e.g. a host type spelled differently in Luau.
+		std::function<std::string(const ClassField&)> FieldType;
+		// The module-table member the signal names are listed in (`signal`
+		// declarations lower to `$Class.<SignalsMember> = { "A", ... }` on
+		// the class line); "" = signals are not allowed.
+		std::string SignalsMember = "Signals";
 	};
 
 	struct TranslateOptions

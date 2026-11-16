@@ -802,7 +802,10 @@ namespace cluau {
 				// class line.
 				std::string type = "export type " + m_ClassName + " = { " + ExpandClass(m_Profile->BaseMembers, m_ClassName);
 				for (const ClassField& field : info.Fields)
-					type += field.Name + ": " + (field.Type.empty() ? "any" : field.Type) + ", ";
+				{
+					const std::string luauType = m_Profile->FieldType ? m_Profile->FieldType(field) : field.Type;
+					type += field.Name + ": " + (luauType.empty() ? "any" : luauType) + ", ";
+				}
 				for (const ClassMethod& m : info.Methods)
 				{
 					type += m.Name + ": (self: " + m_ClassName + MethodParamTypes(m.Params) + ") -> ";
@@ -812,7 +815,24 @@ namespace cluau {
 				type += "}";
 				m_Repl[i] = "local";
 				const std::string head = m_ClassName + " = " + ExpandClass(m_Profile->TableInit, m_ClassName) + "; ";
-				m_Repl[nameTok] = head + type;
+				std::string signals;
+				if (!info.Signals.empty())
+				{
+					const std::string& member = m_Profile->SignalsMember;
+					if (member.empty())
+						Error(m_Toks[nameTok], "this host's classes declare no signals");
+					else
+					{
+						for (const std::string& name : info.Statics)
+							if (name == member)
+								Error(m_Toks[nameTok], "declare the signals with `signal Name(...)`, not `static " + member + "`");
+						signals = "; " + m_ClassName + "." + member + " = {";
+						for (size_t k = 0; k < info.Signals.size(); k++)
+							signals += (k ? ", \"" : " \"") + info.Signals[k].Name + "\"";
+						signals += " }";
+					}
+				}
+				m_Repl[nameTok] = head + type + signals;
 				m_GeneratedAt[nameTok] = { head.size(), type.size() };
 				m_Repl[brace] = "";
 				m_Stack.push_back({ Frame::Class, BlockKind::Plain, brace });
@@ -884,6 +904,11 @@ namespace cluau {
 					if (m_Toks[j].Is("static"))
 					{
 						j = ScanStatic(j, end, info);
+						continue;
+					}
+					if (m_Toks[j].Is("signal") && m_Toks[Sig(j + 1)].Kind == TokenKind::Name)
+					{
+						j = ScanSignal(j, end, info);
 						continue;
 					}
 					if (m_Toks[j].Kind != TokenKind::Name)
@@ -977,6 +1002,55 @@ namespace cluau {
 				return Sig(v);
 			}
 
+			// `signal Name(a: T, ...)`: every parameter typed (the payload's
+			// types are the point of the declaration).
+			size_t ScanSignal(size_t j, size_t end, ClassInfo& info)
+			{
+				const size_t nameTok = Sig(j + 1);
+				const size_t open = Sig(nameTok + 1);
+				if (!m_Toks[open].Is("("))
+				{
+					Error(m_Toks[j], "a signal is: signal Name(param: Type, ...)");
+					return Sig(nameTok + 1);
+				}
+				const size_t close = MatchClose(open);
+				ClassSignal signal;
+				signal.Name = std::string(m_Toks[nameTok].Text);
+				signal.Params = Collapse(SourceText(open + 1, close));
+				signal.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
+				int depth = 0;
+				bool typed = true;
+				size_t paramStart = open + 1;
+				for (size_t k = open + 1; k <= close; k++)
+				{
+					const Token& t = m_Toks[k];
+					if (t.Is("(") || t.Is("{") || t.Is("[") || t.Is("<"))
+						depth++;
+					else if ((t.Is(")") || t.Is("}") || t.Is("]") || t.Is(">")) && k != close)
+						depth--;
+					if ((t.Is(",") && depth == 0) || k == close)
+					{
+						if (k > paramStart)
+						{
+							bool colon = false;
+							for (size_t m = paramStart; m < k; m++)
+								colon = colon || m_Toks[m].Is(":");
+							typed = typed && colon;
+						}
+						paramStart = k + 1;
+					}
+				}
+				if (!typed)
+					Error(m_Toks[nameTok], "a signal's parameters declare their types: signal " + signal.Name + "(param: Type)");
+				for (const ClassSignal& other : info.Signals)
+					if (other.Name == signal.Name)
+						Error(m_Toks[nameTok], "signal " + signal.Name + " is declared twice");
+				info.Signals.push_back(std::move(signal));
+				m_SignalSpans.push_back({ j, Sig(close + 1) });
+				(void)end;
+				return Sig(close + 1);
+			}
+
 			size_t PrevSig(size_t j) const
 			{
 				while (j > 0)
@@ -1052,6 +1126,19 @@ namespace cluau {
 
 			void ClassItem(size_t i)
 			{
+				for (const SignalSpan& span : m_SignalSpans)
+				{
+					if (span.Begin != i)
+						continue;
+					for (size_t k = i; k < span.End; k++)
+						if (!m_Toks[k].IsComment())
+						{
+							m_Repl[k] = "";
+							m_Skip[k] = 1;
+						}
+					m_PrevSig = span.End > 0 ? span.End - 1 : i;
+					return;
+				}
 				for (const StaticSpan& span : m_StaticSpans)
 				{
 					if (span.Begin != i)
@@ -1333,6 +1420,12 @@ namespace cluau {
 				size_t End = 0;   // exclusive
 			};
 			std::vector<StaticSpan> m_StaticSpans;
+			struct SignalSpan
+			{
+				size_t Begin = 0; // `signal`
+				size_t End = 0;   // exclusive
+			};
+			std::vector<SignalSpan> m_SignalSpans;
 			size_t m_StaticEnd = npos;
 			std::map<size_t, std::pair<size_t, size_t>> m_GeneratedAt; // token -> (offset, length) in its replacement
 			std::string m_ClassName;
@@ -1413,7 +1506,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.3.0";
+		return "0.4.0";
 	}
 
 } // namespace cluau
