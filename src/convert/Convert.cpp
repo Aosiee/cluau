@@ -272,7 +272,7 @@ namespace cluau {
 					return !(p.Is(")") || p.Is("]") || p.Is("}") || p.Is(";"));
 				if (p.K == Kind::Name)
 				{
-					static constexpr std::string_view kExpr[] = { "return", "and", "or", "not", "in", "until" };
+					static constexpr std::string_view kExpr[] = { "return", "and", "or", "not", "in", "until", "if", "elseif", "while" };
 					for (std::string_view w : kExpr)
 						if (p.Text == w)
 							return true;
@@ -316,10 +316,7 @@ namespace cluau {
 				if (w == "if")
 				{
 					if (ExpressionContext(i))
-					{
 						m_Stack.push_back({ Block::IfExpr, true, i + 1 });
-						Error(t, "an if-expression has no cluau form yet: rewrite it as an if statement (left as written)");
-					}
 					else
 						m_Stack.push_back({ Block::If, true, i + 1 });
 				}
@@ -327,7 +324,9 @@ namespace cluau {
 				{
 					if (top && top->B == Block::IfExpr)
 					{
+						Replace(t, "else if");
 						top->Awaiting = true;
+						top->CondStart = i + 1;
 						m_LastIfExprWord = i;
 					}
 					else if (top && top->B == Block::If)
@@ -343,6 +342,14 @@ namespace cluau {
 				{
 					if (top && top->B == Block::IfExpr && top->Awaiting)
 					{
+						// `if (c) a`: the condition parenthesised, `then` gone
+						// (with the space before it when on the same line).
+						Parenthesise(top->CondStart, i);
+						const Tok& prev = At(i - 1);
+						if (i > 0 && prev.Line == t.Line)
+							m_Edits.push_back({ prev.End, t.End, "" });
+						else
+							Replace(t, "");
 						top->Awaiting = false;
 						m_LastIfExprWord = i;
 					}
@@ -539,9 +546,28 @@ namespace cluau {
 				size_t last = first;
 				int depth = 0;
 				int blocks = 0; // a function value's body (and the blocks in it) inside the condition
+				int ifExprs = 0; // if-expressions in the condition waiting for their else
 				for (size_t j = first; j < m_Toks.size(); j++)
 				{
 					const Tok& k = m_Toks[j];
+					// The next statement ends the condition (before a `do` or
+					// `if` it starts is counted as a block inside it).
+					if (depth == 0 && blocks == 0 && j > first)
+					{
+						bool stop = k.Is(";") || k.Line != m_Toks[j - 1].Line;
+						for (std::string_view w : kStop)
+							stop = stop || (k.K == Kind::Name && k.Text == w && !(w == "if" && ExpressionContext(j))
+								&& !((w == "else" || w == "elseif") && ifExprs > 0));
+						if (stop)
+							break;
+					}
+					if (blocks == 0)
+					{
+						if (k.Is("if") && ExpressionContext(j))
+							ifExprs++;
+						else if (k.Is("else") && ifExprs > 0)
+							ifExprs--;
+					}
 					if (k.K == Kind::Name)
 					{
 						if (k.Is("function") || k.Is("do") || k.Is("repeat") || (k.Is("if") && !ExpressionContext(j)))
@@ -558,14 +584,6 @@ namespace cluau {
 						last = j;
 						continue;
 					}
-					if (depth == 0 && j > first)
-					{
-						bool stop = k.Is(";") || k.Line != m_Toks[j - 1].Line;
-						for (std::string_view w : kStop)
-							stop = stop || (k.K == Kind::Name && k.Text == w);
-						if (stop)
-							break;
-					}
 					if (k.Is("(") || k.Is("[") || k.Is("{"))
 						depth++;
 					else if (k.Is(")") || k.Is("]") || k.Is("}"))
@@ -577,12 +595,14 @@ namespace cluau {
 					Error(t, "'until' without a condition");
 					return;
 				}
+				// The source's own `;` ends the do-while (Luau refuses `;;`).
+				const char* semi = At(last + 1).Is(";") ? "" : ";";
 				// `until not (c)` reads best as `while (c)`.
 				if (At(first).Is("not") && At(first + 1).Is("(") && m_Match[first + 1] == last && At(first + 1).Line == t.Line)
 				{
 					m_Skip[first] = true;
 					m_Edits.push_back({ t.Begin, At(first + 1).Begin, "} while " });
-					Insert(At(last).End, ";");
+					Insert(At(last).End, semi);
 				}
 				else
 				{
@@ -590,7 +610,7 @@ namespace cluau {
 					// Through the space to the condition, when it is on this line.
 					const size_t to = At(first).Line == t.Line ? At(first).Begin : t.End;
 					m_Edits.push_back({ t.Begin, to, grouped ? "} while (!" : "} while (!(" });
-					Insert(At(last).End, grouped ? ");" : "));");
+					Insert(At(last).End, std::string(grouped ? ")" : "))") + semi);
 				}
 			}
 
@@ -632,6 +652,13 @@ namespace cluau {
 				if (t.Is("not") && !out.empty() && out.back().Is("not"))
 				{
 					out.pop_back();
+					continue;
+				}
+				// An if-expression's `else if c then` is `elseif c then` (cluau
+				// writes both as `else if`).
+				if (t.Is("if") && !out.empty() && out.back().Is("else"))
+				{
+					out.back().Text = "elseif";
 					continue;
 				}
 				out.push_back(t);

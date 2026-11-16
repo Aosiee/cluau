@@ -110,20 +110,51 @@ namespace cluau {
 			return nullptr;
 		}
 
-		// An expression's text with cluau's operators rewritten (field
-		// defaults, interpolation segments).
+		// An expression's text with cluau's operators and if-expressions
+		// rewritten (field defaults, interpolation segments).
 		std::string TranslateExpressionText(std::string_view text)
 		{
 			std::vector<Diagnostic> ignored;
 			std::vector<Token> tokens = detail::Lex(text, ignored);
+			// An if-expression's condition is `if (` ... `)`: its `)` gains `then`.
+			std::vector<uint8_t> conditionClose(tokens.size(), 0);
+			for (size_t k = 0; k + 1 < tokens.size(); k++)
+			{
+				if (!tokens[k].Is("if") || !tokens[k + 1].Is("("))
+					continue;
+				int depth = 0;
+				for (size_t m = k + 1; m < tokens.size(); m++)
+				{
+					if (tokens[m].Is("(") || tokens[m].Is("[") || tokens[m].Is("{"))
+						depth++;
+					else if ((tokens[m].Is(")") || tokens[m].Is("]") || tokens[m].Is("}")) && --depth == 0)
+					{
+						conditionClose[m] = 1;
+						break;
+					}
+				}
+			}
 			std::string out;
 			size_t pos = 0;
-			for (const Token& t : tokens)
+			for (size_t k = 0; k < tokens.size(); k++)
 			{
+				const Token& t = tokens[k];
 				if (t.Kind == TokenKind::Eof)
 					break;
 				out.append(text.substr(pos, t.Begin - pos));
 				pos = t.End;
+				if (conditionClose[k])
+				{
+					out += ") then";
+					continue;
+				}
+				if (t.Is("else") && k + 1 < tokens.size() && tokens[k + 1].Is("if"))
+				{
+					out += "elseif";
+					pos = tokens[k + 1].End;
+					k++;
+					continue;
+				}
 				if (t.Kind == TokenKind::Op)
 				{
 					if (const char* r = OperatorReplacement(t.Text))
@@ -217,6 +248,7 @@ namespace cluau {
 				m_ClosedBlock.assign(n, 0);
 				m_ClosedIf.assign(n, 0);
 				m_ClosedRepeat.assign(n, 0);
+				m_ExprIfClose.assign(n, 0);
 				m_Skip.assign(n, 0);
 				Classify();
 				Emit();
@@ -460,7 +492,12 @@ namespace cluau {
 					return;
 				const std::string_view w = t.Text;
 				if (w == "if")
-					Header(i, BlockKind::If, "then", true);
+				{
+					if (IsExpressionPosition())
+						ExpressionIf(i);
+					else
+						Header(i, BlockKind::If, "then", true);
+				}
 				else if (w == "while")
 				{
 					if (m_PrevSig != npos && m_ClosedRepeat[m_PrevSig])
@@ -550,7 +587,17 @@ namespace cluau {
 			void Else(size_t i)
 			{
 				const Token& t = m_Toks[i];
-				if (m_PrevSig == npos || !m_ClosedIf[m_PrevSig])
+				const bool afterIfBlock = m_PrevSig != npos && m_ClosedIf[m_PrevSig];
+				if (!m_ExprIfs.empty() && m_ExprIfs.back().Depth == m_Stack.size())
+				{
+					if (!afterIfBlock)
+					{
+						ExpressionElse(i);
+						return;
+					}
+					MissingElse();
+				}
+				if (!afterIfBlock)
 					Error(t, "else without an if block before it");
 				const size_t next = Sig(i + 1);
 				if (m_Toks[next].Is("if"))
@@ -568,6 +615,71 @@ namespace cluau {
 					return;
 				}
 				MarkBlock(brace, BlockKind::Else, "");
+			}
+
+			// An `if` where an expression is expected (after `=`, `(`, `,`,
+			// an operator, `return`, ...) is an if-expression (CLUAU_PLAN §5
+			// Q12): `if (c) a else if (d) b else e` lowers to Luau's
+			// `if (c) then a elseif (d) then b else e`, every token in place.
+			bool IsExpressionPosition() const
+			{
+				if (m_PrevSig == npos || m_OpenedBlock[m_PrevSig] || m_ClosedBlock[m_PrevSig])
+					return false;
+				if (m_ExprIfClose[m_PrevSig])
+					return true; // if (a) if (b) 1 else 2 else 3
+				const Token& p = m_Toks[m_PrevSig];
+				if (p.Kind == TokenKind::Op)
+					return !(p.Is(")") || p.Is("]") || p.Is("}") || p.Is(";"));
+				if (p.Kind == TokenKind::Name)
+					return p.Is("return") || p.Is("and") || p.Is("or") || p.Is("not") || p.Is("in");
+				return false;
+			}
+
+			bool ExpressionCondition(size_t ifToken)
+			{
+				const size_t c = Sig(ifToken + 1);
+				if (!m_Toks[c].Is("("))
+				{
+					Error(m_Toks[ifToken], "an if-expression's condition is parenthesised: if (c) a else b");
+					return false;
+				}
+				const size_t close = MatchClose(c);
+				m_Repl[close] = ") then";
+				m_ExprIfClose[close] = 1;
+				return true;
+			}
+
+			void ExpressionIf(size_t i)
+			{
+				if (ExpressionCondition(i))
+					m_ExprIfs.push_back({ m_Stack.size(), i });
+			}
+
+			void ExpressionElse(size_t i)
+			{
+				const size_t next = Sig(i + 1);
+				if (m_Toks[next].Is("if"))
+				{
+					m_Repl[i] = "elseif";
+					m_Repl[next] = "";
+					m_Skip[next] = 1;
+					if (ExpressionCondition(next))
+						return;
+				}
+				m_ExprIfs.pop_back();
+			}
+
+			// The pending if-expression ended without its `else`.
+			void MissingElse()
+			{
+				Error(m_Toks[m_ExprIfs.back().If], "an if-expression needs an else: if (c) a else b");
+				m_ExprIfs.pop_back();
+			}
+
+			void EndExpressionIfsAbove(size_t depth)
+			{
+				while (!m_ExprIfs.empty() && m_ExprIfs.back().Depth > depth)
+					MissingElse();
 			}
 
 			void Function(size_t i)
@@ -1021,6 +1133,7 @@ namespace cluau {
 						return;
 					}
 					m_Stack.pop_back();
+					EndExpressionIfsAbove(m_Stack.size());
 					return;
 				}
 				if (op == "{")
@@ -1039,6 +1152,8 @@ namespace cluau {
 				const Token& p = m_Toks[m_PrevSig];
 				if (p.Is(";") || m_OpenedBlock[m_PrevSig] || m_ClosedBlock[m_PrevSig])
 					return true;
+				if (m_ExprIfClose[m_PrevSig])
+					return false;
 				if (p.Line == m_Toks[i].Line)
 					return false;
 				return EndsExpression(p);
@@ -1078,6 +1193,7 @@ namespace cluau {
 				}
 				const Open open = m_Stack.back();
 				m_Stack.pop_back();
+				EndExpressionIfsAbove(m_Stack.size());
 				if (open.Kind == Frame::Table)
 					return;
 				m_ClosedBlock[i] = 1;
@@ -1116,6 +1232,8 @@ namespace cluau {
 
 			void CloseAtEnd()
 			{
+				while (!m_ExprIfs.empty())
+					MissingElse();
 				while (!m_Stack.empty())
 				{
 					const Open open = m_Stack.back();
@@ -1198,7 +1316,14 @@ namespace cluau {
 			std::vector<uint8_t> m_ClosedBlock;
 			std::vector<uint8_t> m_ClosedIf;
 			std::vector<uint8_t> m_ClosedRepeat;
+			std::vector<uint8_t> m_ExprIfClose; // an if-expression condition's `)`
 			std::vector<uint8_t> m_Skip;
+			struct ExprIf
+			{
+				size_t Depth = 0; // m_Stack's size at the `if`: its `else` is at the same depth
+				size_t If = 0;
+			};
+			std::vector<ExprIf> m_ExprIfs; // if-expressions waiting for their `else`
 			std::vector<Open> m_Stack;
 			std::vector<FieldSpan> m_FieldSpans;
 			struct StaticSpan
@@ -1288,7 +1413,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.2.0";
+		return "0.3.0";
 	}
 
 } // namespace cluau

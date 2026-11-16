@@ -48,6 +48,23 @@ strings and string interpolation, `#`, `..`, 1-based arrays, `nil`,
 
 `and`, `or` and `not` are also accepted.
 
+### If-expressions
+
+An `if` where an expression is expected yields a value:
+
+```
+let speed = if (boosted) 2 else 1
+let label = if (n == 0) "none" else if (n == 1) "one" else "many"
+```
+
+The condition is parenthesised and there are no braces; `else` is
+required. It is Luau's if-expression (`if c then a elseif d then b else e`):
+only the branch taken is evaluated, and unlike `c && a || b` it works when
+`a` is `false` or `nil`. The last branch extends as far as an expression
+can, so `if (c) 1 else 2 + x` adds `x` to the `else` branch only. C's
+`c ? a : b` is not cluau: `?` and `:` already mean optional types,
+annotations and method calls.
+
 ## Comments
 
 | cluau | Luau |
@@ -131,9 +148,10 @@ cluau spelling (`--` comments become `//`, `--[[ ]]` becomes `/* */`), and
 `do { ... } while (!(c));`. It does not restructure code: a module table
 stays a module table.
 
-Two things have no cluau form yet and are reported, left as written: an
-if-expression (`local x = if a then b else c`) and an identifier that is a
-cluau keyword (`let`, `const`, `class`).
+An if-expression becomes cluau's (`if a then b elseif c then d else e`
+-> `if (a) b else if (c) d else e`). An identifier that is a cluau keyword
+(`let`, `const`, `class`) has no cluau form and is reported, left as
+written.
 
 `--verify` translates the result back and checks it is the input's tokens
 again (comments, parentheses and doubled `not`s aside).

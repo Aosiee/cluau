@@ -181,3 +181,36 @@ TEST("mode comments are refused")
 	CHECK(HasError(r, "mode comments"));
 	CHECK(r.Luau.rfind("-- !nonstrict", 0) == 0);
 }
+
+TEST("if-expressions: if (c) a else b where an expression is expected")
+{
+	CHECK_EQ(Luau("let s = if (b) 2 else 1"), std::string("local s = if (b) then 2 else 1"));
+	CHECK_EQ(Luau("let l = if (n == 0) \"none\" else if (n == 1) \"one\" else \"many\""),
+		std::string("local l = if (n == 0) then \"none\" elseif  (n == 1) then \"one\" else \"many\""));
+	CHECK_EQ(Luau("return if (a && !b) x else y"), std::string("return if (a  and  not b) then x else y"));
+	// A `{` after the condition or the else is a table, not a block.
+	CHECK_EQ(Luau("f(if (a) { 1 } else {}, 2)"), std::string("f(if (a) then { 1 } else {}, 2)"));
+	CHECK_EQ(Luau("x = if (a) if (b) 1 else 2 else 3"), std::string("x = if (a) then if (b) then 1 else 2 else 3"));
+	CHECK_EQ(Luau("x = { k = if (a) 1 else 2 }"), std::string("x = { k = if (a) then 1 else 2 }"));
+	// A statement if after an if-expression, and one inside a branch's function.
+	CHECK_EQ(Luau("x = if (a) 1 else 2\nif (x) { y() } else { z() }\n"),
+		std::string("x = if (a) then 1 else 2\nif (x) then y()  else  z() end\n"));
+	const cluau::TranslateResult inner = cluau::Translate("g = if (a) function() { if (c) { p() } else { q() } } else nil\n");
+	CHECK(!inner.HasErrors());
+	CHECK_EQ(inner.Luau, std::string("g = if (a) then function()  if (c) then p()  else  q() end end else nil\n"));
+	// Lines stay put across a multi-line if-expression.
+	const std::string multi = "let v = if (a)\n\t1\nelse if (b)\n\t2\nelse\n\t3\n";
+	CHECK_EQ(Luau(multi), std::string("local v = if (a) then\n\t1\nelseif  (b) then\n\t2\nelse\n\t3\n"));
+	// Field defaults and interpolation segments translate theirs too.
+	CHECK(Luau("class C {\n\tY: number = if (a) 1 else 2\n}\n").find("C.Fields.Y = if (a) then 1 else 2") != std::string::npos);
+	CHECK_EQ(Luau("s = `{if (a) \"x\" else \"y\"}`"), std::string("s = `{if (a) then \"x\" else \"y\"}`"));
+}
+
+TEST("if-expressions: a missing else or parenthesis is reported")
+{
+	CHECK(HasError(cluau::Translate("let x = if (a) 1\n"), "needs an else"));
+	CHECK(HasError(cluau::Translate("f(if (a) 1)"), "needs an else"));
+	CHECK(HasError(cluau::Translate("let x = if (a) 1\nif (b) { } else { }\n"), "needs an else"));
+	CHECK(HasError(cluau::Translate("let x = if a 1 else 2"), "parenthesised"));
+	CHECK(!cluau::Translate("let x = if (a) 1 else 2\n").HasErrors());
+}

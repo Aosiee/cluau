@@ -40,6 +40,7 @@ TEST("convert: blocks become braces, conditions get parentheses")
 	CHECK_EQ(Cluau("do local y = 2 end"), std::string("{ let y = 2 }"));
 	CHECK_EQ(Cluau("repeat n += 1 until n >= 3"), std::string("do { n += 1 } while (!(n >= 3));"));
 	CHECK_EQ(Cluau("repeat n += 1 until not (n < 3)"), std::string("do { n += 1 } while (n < 3);"));
+	CHECK_EQ(Cluau("repeat until x; f()"), std::string("do { } while (!(x)); f()"));
 }
 
 TEST("convert: functions, signatures and return types")
@@ -69,9 +70,6 @@ TEST("convert: operators and comments")
 
 TEST("convert: what has no cluau form is reported")
 {
-	const cluau::ConvertResult ifExpr = cluau::Convert("local x = if a then 1 else 2");
-	CHECK(HasError(ifExpr, "if-expression"));
-	CHECK_EQ(ifExpr.Cluau, std::string("let x = if a then 1 else 2"));
 	CHECK(HasError(cluau::Convert("local let = 1"), "cluau keyword"));
 	CHECK(HasError(cluau::Convert("if a then"), "not closed"));
 	CHECK(HasError(cluau::Convert("end"), "does not close"));
@@ -118,6 +116,22 @@ TEST("convert: the corners Luau's conformance suite found")
 	CHECK(RoundTrips("local f do local a = 1 f = function() return a end end local b = 2\n"));
 	// An until condition holding a function value (its own end).
 	CHECK(RoundTrips("repeat\n\tcontinue\nuntil function() if x then return end end\n"));
+	// A do-block on the line after an until condition is the next statement.
+	CHECK(RoundTrips("repeat\n\tf()\nuntil g(x)\ndo end\nrepeat until a and if b then c else d\n"));
 	// `\z` and escaped newlines continue a string.
 	CHECK(RoundTrips("s = \"a\\z\n   b\"\nt = \"c\\\nd\"\n"));
+}
+
+TEST("convert: if-expressions take the cluau form")
+{
+	CHECK_EQ(Cluau("local x = if a then 1 else 2"), std::string("let x = if (a) 1 else 2"));
+	CHECK_EQ(Cluau("local l = if n == 0 then \"none\" elseif n == 1 then \"one\" else \"many\""),
+		std::string("let l = if (n == 0) \"none\" else if (n == 1) \"one\" else \"many\""));
+	CHECK_EQ(Cluau("return if (a) then f() else g()"), std::string("return if (a) f() else g()"));
+	CHECK_EQ(Cluau("x = if a then if b then 1 else 2 else 3"), std::string("x = if (a) if (b) 1 else 2 else 3"));
+	CHECK_EQ(Cluau("local v = if a\n\tthen 1\n\telse 2"), std::string("let v = if (a)\n\t 1\n\telse 2"));
+	CHECK(RoundTrips("local x = if a then 1 elseif b then 2 else 3\nlocal t = { k = if a then { 1 } else {} }\n"));
+	CHECK_EQ(Cluau("x = if if c then false else true then 10 else 20"), std::string("x = if (if (c) false else true) 10 else 20"));
+	CHECK(RoundTrips("while if a then b else c do f() end\nif if a then b else c then g() end\n"));
+	CHECK(RoundTrips("local f = function() return if a then 1 else 2 end\nif x then y = if z then 1 else 2 end\n"));
 }

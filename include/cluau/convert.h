@@ -9,9 +9,9 @@
 // module table stays a module table (turning one into a `class` is the
 // author's call, because the class shape is the host's).
 //
-// What has no cluau form is reported as an error and left as written: an
-// if-expression, and an identifier that is a cluau keyword (`let`, `const`,
-// `class`).
+// An if-expression becomes cluau's `if (c) a else if (d) b else e`. What
+// has no cluau form is reported as an error and left as written: an
+// identifier that is a cluau keyword (`let`, `const`, `class`).
 
 #include "cluau/cluau.h"
 
