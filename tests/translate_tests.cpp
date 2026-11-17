@@ -255,3 +255,16 @@ TEST("classes: a profile's FieldType spells a field's Luau type")
 	const std::string luau = Luau("class C {\n\tPrefab: AssetRef<Scene> = \"a/b.tasset\"\n\tN: number = 1\n}\n", options);
 	CHECK(luau.find("export type C = { Prefab: string, N: number, }") != std::string::npos);
 }
+
+TEST("classes: a profile's SignalType makes each signal a member of the class type")
+{
+	cluau::ClassProfile profile;
+	profile.SignalType = [](const cluau::ClassSignal& s) -> std::string { return "Signal<(" + s.Params + ")>"; };
+	cluau::TranslateOptions options;
+	options.Profile = &profile;
+	const std::string luau = Luau("class C {\n\tsignal Hit(by: number)\n\tN: number = 1\n}\n", options);
+	CHECK(luau.find("export type C = { N: number, Hit: Signal<(by: number)>, }") != std::string::npos);
+	CHECK(luau.find("C.Signals = { \"Hit\" }") != std::string::npos);
+	// Without the hook, signals stay out of the type.
+	CHECK(Luau("class C {\n\tsignal Hit(by: number)\n}\n").find("Hit: ") == std::string::npos);
+}

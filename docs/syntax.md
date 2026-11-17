@@ -136,6 +136,10 @@ class Player {
 - A host may spell a field's type differently in Luau (its profile's
   `FieldType`): TinyEngine's `AssetRef<Scene>` field is a `string` (the
   asset's path) to the type checker, and an asset picker in the inspector.
+- A host whose instances carry their signals as objects sets its profile's
+  `SignalType`, and each declared signal becomes a member of the class type
+  (TinyEngine: `Collected: Signal<vec3>`, so `self.Collected:Emit(...)`
+  checks against the declaration).
 
 ## Strict typing
 

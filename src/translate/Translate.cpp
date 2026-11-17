@@ -806,6 +806,9 @@ namespace cluau {
 					const std::string luauType = m_Profile->FieldType ? m_Profile->FieldType(field) : field.Type;
 					type += field.Name + ": " + (luauType.empty() ? "any" : luauType) + ", ";
 				}
+				if (m_Profile->SignalType)
+					for (const ClassSignal& signal : info.Signals)
+						type += signal.Name + ": " + m_Profile->SignalType(signal) + ", ";
 				for (const ClassMethod& m : info.Methods)
 				{
 					type += m.Name + ": (self: " + m_ClassName + MethodParamTypes(m.Params) + ") -> ";
@@ -1506,7 +1509,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.4.0";
+		return "0.5.0";
 	}
 
 } // namespace cluau

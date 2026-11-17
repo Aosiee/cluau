@@ -130,6 +130,10 @@ namespace cluau {
 		// A field's Luau type in the class type (null = its declared type),
 		// e.g. a host type spelled differently in Luau.
 		std::function<std::string(const ClassField&)> FieldType;
+		// A signal's member type in the class type (null = signals are not
+		// members), e.g. "Signal<vec3>" - a host whose instances carry their
+		// signals as objects (`self.Collected:Emit(...)`).
+		std::function<std::string(const ClassSignal&)> SignalType;
 		// The module-table member the signal names are listed in (`signal`
 		// declarations lower to `$Class.<SignalsMember> = { "A", ... }` on
 		// the class line); "" = signals are not allowed.
