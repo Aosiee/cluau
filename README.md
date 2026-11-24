@@ -51,6 +51,12 @@ cmake -S . -B build && cmake --build build && ./build/cluau_tests
 ./build/cluau convert --verify file.luau
 ```
 
+`hamr run` runs the same checks as a [hamr](https://github.com/Aosiee/hamr)
+suite (`hamr.cluau`): the tests in a release and a debug build and the
+syntax guide's examples through the tool; `hamr run --tier nightly --set
+luauDir=<a Luau checkout>` also builds the strict checker. Each build lives
+in its own `build-hamr-<name>` directory.
+
 A host embeds the translator with `add_subdirectory` (CMake) or its own build
 manifest over `src/translate/*.cpp` (plus `src/convert/*.cpp` for the
 converter), and supplies a `ClassProfile` for what

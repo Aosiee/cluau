@@ -1,0 +1,89 @@
+// cluau's suite for hamr (github.com/Aosiee/hamr): `hamr run` here.
+//
+// The translator's tests in a release and a debug build, the command-line
+// tool on the docs' examples, and (nightly, with --set luauDir=<a Luau
+// checkout>) the strict checker built against a host's Luau.
+
+const hamr = require("@hamr")
+type Context = hamr.Context
+
+const suite = hamr.suite("cluau", { budgets = { fast = 60, nightly = 300 } })
+const cxx = suite:var("cxx", "c++")
+const luauDir = suite:var("luauDir", "")
+
+const kPaths = { "include/**", "src/**", "tests/**", "tools/**", "CMakeLists.txt" }
+
+for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
+	const name = c[1]
+	const dir = `build-hamr-{name}`
+	suite:step(`build:{name}`, {
+		doc = `Configures and builds cluau ({c[2]}) with its tests.`,
+		resources = { exclusive = true },
+		timeout = 600,
+		budget = 30,
+		paths = kPaths,
+		run = function(ctx: Context) {
+			ctx:run({ "cmake", "-S", ".", "-B", dir, "-G", "Ninja", `-DCMAKE_BUILD_TYPE={c[2]}`, `-DCMAKE_CXX_COMPILER={cxx}`,
+				"-DCLUAU_BUILD_TESTS=ON" })
+			ctx:run({ "cmake", "--build", dir, "-j", tostring(host.cores()) })
+		},
+	})
+	suite:step(`tests:{name}`, {
+		doc = "The translator's and the converter's tests.",
+		needs = { `build:{name}` },
+		run = { `{dir}/cluau_tests` },
+		findings = hamr.findings.failLines("test", "FAIL"),
+		timeout = 300,
+		budget = 10,
+		paths = kPaths,
+	})
+}
+
+// Every code block the syntax guide marks as cluau translates without an
+// error.
+suite:step("docs-examples", {
+	doc = "Translates every cluau example in docs/syntax.md with the built tool.",
+	needs = { "build:release" },
+	timeout = 120,
+	budget = 5,
+	paths = { "docs/**", "src/**" },
+	run = function(ctx: Context) {
+		const text = host.read(host.join(ctx.root, "docs", "syntax.md")) or ""
+		let index = 0
+		for (block in string.gmatch(text, "```\n(.-)```")) {
+			// The guide's tables of Luau equivalents are prose; its fenced
+			// blocks are cluau (the class and if-expression examples).
+			if (string.find(block, "class ", 1, true) || string.find(block, "let ", 1, true)) {
+				index += 1
+				const file = host.join(ctx.out, `syntax-example-{index}.cluau`)
+				host.write(file, block)
+				ctx:run({ "build-hamr-release/cluau", "translate", file })
+			}
+		}
+		if (index == 0) {
+			ctx:fail("found no cluau example in docs/syntax.md")
+		}
+	},
+})
+
+// The strict checker compiles against a host's Luau (it is tested in the
+// hosts, which link it).
+suite:step("check-builds", {
+	tier = "nightly",
+	doc = "Builds cluau_check against the Luau checkout --set luauDir names.",
+	resources = { exclusive = true },
+	timeout = 900,
+	budget = 60,
+	run = function(ctx: Context) {
+		if (luauDir == "") {
+			ctx:fail("name a Luau checkout: --set luauDir=<dir>")
+			return
+		}
+		const dir = "build-hamr-check"
+		ctx:run({ "cmake", "-S", ".", "-B", dir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", `-DCMAKE_CXX_COMPILER={cxx}`,
+			`-DCLUAU_LUAU_DIR={luauDir}` })
+		ctx:run({ "cmake", "--build", dir, "-j", tostring(host.cores()), "--target", "cluau_check" })
+	},
+})
+
+return suite
