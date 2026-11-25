@@ -59,8 +59,8 @@ namespace cluau_test {
 #define CHECK_EQ(a, b)                                                                     \
 	do                                                                                     \
 	{                                                                                      \
-		const auto& va = (a);                                                              \
-		const auto& vb = (b);                                                              \
+		const auto va = (a); /* copies: (a) may refer into a temporary */                  \
+		const auto vb = (b);                                                               \
 		if (!(va == vb))                                                                   \
 		{                                                                                  \
 			std::ostringstream os;                                                         \
