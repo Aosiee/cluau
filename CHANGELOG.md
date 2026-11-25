@@ -2,6 +2,17 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.27.0: @std/term, @std/url and @std/tar
+
+- `@std/term`: whether a stream is a terminal, the terminal's size, and
+  colours and styles (left out when the output is not a terminal or
+  `NO_COLOR` is set; Windows consoles switched to escape sequences).
+- `@std/url`: parsing and formatting addresses, resolving one against a
+  base (RFC 3986), percent-encoding and query strings.
+- `@std/tar`: tar archives, plain or gzip-compressed, read and made as
+  `@std/zip` does; `extract` refuses an entry that would land outside its
+  directory.
+
 ## 0.26.0: @std/server and @std/websocket
 
 - `@std/server`: an HTTP/1.1 server (`serve`, keep-alive, chunked

@@ -272,6 +272,24 @@ return m :: {
 	create: (path: string?) -> Writer,
 }
 )LUAU" },
+				{ "term", R"LUAU(
+export type Stream = "stdout" | "stderr" | "stdin"
+type Styler = (text: string) -> string
+local m: any = nil
+return m :: {
+	isTerminal: (stream: Stream?) -> boolean,
+	colors: (stream: Stream?) -> boolean,
+	size: () -> { columns: number, rows: number }?,
+	style: (text: string, ...string) -> string,
+	strip: (text: string) -> string,
+	bold: Styler, dim: Styler, italic: Styler, underline: Styler, inverse: Styler, strike: Styler,
+	black: Styler, red: Styler, green: Styler, yellow: Styler, blue: Styler, magenta: Styler, cyan: Styler, white: Styler,
+	gray: Styler, grey: Styler, brightRed: Styler, brightGreen: Styler, brightYellow: Styler, brightBlue: Styler,
+	brightMagenta: Styler, brightCyan: Styler, brightWhite: Styler,
+	bgBlack: Styler, bgRed: Styler, bgGreen: Styler, bgYellow: Styler, bgBlue: Styler, bgMagenta: Styler, bgCyan: Styler,
+	bgWhite: Styler, bgGray: Styler,
+}
+)LUAU" },
 				{ "regex", R"LUAU(
 export type Match = {
 	text: string,

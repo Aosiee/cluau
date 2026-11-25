@@ -1,0 +1,217 @@
+// @std/url: web addresses (RFC 3986): parsed into their parts and put back
+// together, resolved against a base, and their parts percent-encoded.
+//
+//   const url = require("@std/url")
+//   const u = url.parse("https://ada@example.com:8443/docs/a%20b?q=1#top")
+//   print(u.scheme, u.host, u.port, u.path)        // https example.com 8443 /docs/a b
+//   print(url.resolve("https://example.com/a/b", "../c?x=1"))  // https://example.com/c?x=1
+//   print(url.encodeQuery({ q = "two words", page = "2" }))   // page=2&q=two%20words
+
+export type Url = {
+	scheme: string,   // "https" ("" for a relative address)
+	user: string,     // "" when there is none
+	password: string,
+	host: string,     // without the brackets of an IPv6 address
+	port: number?,    // nil when the address gives none
+	path: string,     // decoded
+	query: string,    // as written, without the ?
+	fragment: string, // as written, without the #
+}
+
+// Percent-encodes everything but the unreserved characters (letters,
+// digits, - . _ ~); `keep` names more to leave as they are ("/" for a path).
+const encode = function(text: string, keep: string?): string {
+	const extra = keep or ""
+	const encoded = string.gsub(text, "[^%w%-%._~]", function(c: string): string {
+		if (string.find(extra, c, 1, true) != nil) {
+			return c
+		}
+		return string.format("%%%02X", string.byte(c))
+	})
+	return encoded
+}
+
+// %XX back to its byte; `plus` also reads + as a space (a query's form).
+const decode = function(text: string, plus: boolean?): string {
+	const spaced = if (plus) string.gsub(text, "+", " ") else text
+	const decoded = string.gsub(spaced, "%%(%x%x)", function(hex: string): string {
+		return string.char(tonumber(hex, 16) or 0)
+	})
+	return decoded
+}
+
+// A query string's names and values (decoded; a later repeat wins).
+const parseQuery = function(text: string): { [string]: string } {
+	const out: { [string]: string } = {}
+	const trimmed = if (string.sub(text, 1, 1) == "?") string.sub(text, 2) else text
+	for (pair in string.gmatch(trimmed, "[^&;]+")) {
+		const name, value = string.match(pair, "^([^=]*)=?(.*)$")
+		if (name != nil && name != "") {
+			out[decode(name, true)] = decode(value or "", true)
+		}
+	}
+	return out
+}
+
+// A query string from names and values, in the names' order.
+const encodeQuery = function(values: { [string]: string | number | boolean }): string {
+	const names: { string } = {}
+	for (name in values) {
+		table.insert(names, name)
+	}
+	table.sort(names)
+	const parts: { string } = {}
+	for (_, name in names) {
+		table.insert(parts, encode(name) .. "=" .. encode(tostring(values[name])))
+	}
+	return table.concat(parts, "&")
+}
+
+const parse = function(text: string): Url {
+	const u: Url = { scheme = "", user = "", password = "", host = "", port = nil, path = "", query = "", fragment = "" }
+	let rest = text
+	const fragmentAt = string.find(rest, "#", 1, true)
+	if (fragmentAt != nil) {
+		u.fragment = string.sub(rest, fragmentAt + 1)
+		rest = string.sub(rest, 1, fragmentAt - 1)
+	}
+	const queryAt = string.find(rest, "?", 1, true)
+	if (queryAt != nil) {
+		u.query = string.sub(rest, queryAt + 1)
+		rest = string.sub(rest, 1, queryAt - 1)
+	}
+	const scheme, afterScheme = string.match(rest, "^(%a[%w+%-.]*):(.*)$")
+	if (scheme != nil && afterScheme != nil) {
+		u.scheme = string.lower(scheme)
+		rest = afterScheme
+	}
+	if (string.sub(rest, 1, 2) == "//") {
+		const authority = string.match(rest, "^//([^/]*)") or ""
+		rest = string.sub(rest, 3 + #authority)
+		const userinfo, hostport = string.match(authority, "^(.*)@(.*)$")
+		let where = authority
+		if (userinfo != nil && hostport != nil) {
+			where = hostport
+			const user, password = string.match(userinfo, "^([^:]*):?(.*)$")
+			u.user = decode(user or "")
+			u.password = decode(password or "")
+		}
+		const bracketed, bracketPort = string.match(where, "^%[([^%]]*)%]:?(%d*)$")
+		if (bracketed != nil) {
+			u.host = bracketed
+			if (bracketPort != nil && bracketPort != "") {
+				u.port = tonumber(bracketPort)
+			}
+		} else {
+			const host, port = string.match(where, "^([^:]*):(%d+)$")
+			if (host != nil) {
+				u.host = string.lower(host)
+				u.port = tonumber(port)
+			} else {
+				u.host = string.lower(string.gsub(where, ":$", ""))
+			}
+		}
+	}
+	u.path = decode(rest)
+	return u
+}
+
+// The address again, from its parts (the path encoded as a path).
+const format = function(u: Url): string {
+	const parts: { string } = {}
+	if (u.scheme != "") {
+		table.insert(parts, u.scheme .. ":")
+	}
+	if (u.host != "" || u.scheme == "file") {
+		table.insert(parts, "//")
+		if (u.user != "") {
+			table.insert(parts, encode(u.user))
+			if (u.password != "") {
+				table.insert(parts, ":" .. encode(u.password))
+			}
+			table.insert(parts, "@")
+		}
+		table.insert(parts, if (string.find(u.host, ":", 1, true) != nil) `[{u.host}]` else u.host)
+		if (u.port != nil) {
+			table.insert(parts, ":" .. tostring(u.port))
+		}
+	}
+	table.insert(parts, encode(u.path, "/:@!$&'()*+,;="))
+	if (u.query != "") {
+		table.insert(parts, "?" .. u.query)
+	}
+	if (u.fragment != "") {
+		table.insert(parts, "#" .. u.fragment)
+	}
+	return table.concat(parts)
+}
+
+// A path's "." and ".." taken out (RFC 3986, 5.2.4).
+const RemoveDots = function(path: string): string {
+	const out: { string } = {}
+	const absolute = string.sub(path, 1, 1) == "/"
+	const trailing = string.sub(path, -1) == "/" || string.match(path, "/%.%.?$") != nil || path == "." || path == ".."
+	for (segment in string.gmatch(path, "[^/]+")) {
+		if (segment == "..") {
+			if (#out > 0) {
+				table.remove(out)
+			}
+		} else if (segment != ".") {
+			table.insert(out, segment)
+		}
+	}
+	let joined = table.concat(out, "/")
+	if (absolute) {
+		joined = "/" .. joined
+	}
+	if (trailing && #out > 0) {
+		joined ..= "/"
+	}
+	return joined
+}
+
+// `relative` resolved against `base` (RFC 3986, 5.2).
+const resolve = function(base: string, relative: string): string {
+	const b = parse(base)
+	const r = parse(relative)
+	const t: Url = { scheme = "", user = "", password = "", host = "", port = nil, path = "", query = "", fragment = r.fragment }
+	const hasAuthority = string.sub(string.match(relative, "^[%a][%w+%-.]*:(.*)$") or relative, 1, 2) == "//"
+	if (r.scheme != "") {
+		t.scheme = r.scheme
+		t.user, t.password, t.host, t.port = r.user, r.password, r.host, r.port
+		t.path = RemoveDots(r.path)
+		t.query = r.query
+	} else {
+		t.scheme = b.scheme
+		if (hasAuthority) {
+			t.user, t.password, t.host, t.port = r.user, r.password, r.host, r.port
+			t.path = RemoveDots(r.path)
+			t.query = r.query
+		} else {
+			t.user, t.password, t.host, t.port = b.user, b.password, b.host, b.port
+			if (r.path == "") {
+				t.path = b.path
+				t.query = if (r.query != "") r.query else b.query
+			} else {
+				if (string.sub(r.path, 1, 1) == "/") {
+					t.path = RemoveDots(r.path)
+				} else {
+					const dir = string.match(b.path, "^(.*/)") or (if (b.host != "") "/" else "")
+					t.path = RemoveDots(dir .. r.path)
+				}
+				t.query = r.query
+			}
+		}
+	}
+	return format(t)
+}
+
+return {
+	parse = parse,
+	format = format,
+	resolve = resolve,
+	encode = encode,
+	decode = decode,
+	parseQuery = parseQuery,
+	encodeQuery = encodeQuery,
+}

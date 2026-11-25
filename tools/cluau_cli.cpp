@@ -95,7 +95,7 @@ namespace {
 		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
 		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/net,\n"
 		"@std/sqlite, @std/regex, @std/task, @std/crypto, @std/encoding, @std/compress, @std/zip,\n"
-		"@std/server, @std/websocket, @std/args and @std/csv.\n";
+		"@std/tar, @std/server, @std/websocket, @std/term, @std/url, @std/args and @std/csv.\n";
 
 	bool g_Sandbox = false; // --sandbox
 	bool g_Native = true;   // --no-native turns it off

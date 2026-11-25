@@ -1,0 +1,70 @@
+// @std/term, @std/url and @std/tar.
+const term = require("@std/term")
+const url = require("@std/url")
+const tar = require("@std/tar")
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+
+// The test's output is a pipe: no colours, unless FORCE_COLOR says so.
+print("terminal", term.isTerminal(), term.colors())
+print(term.red("plain"), term.style("plain too", "bold", "underline"))
+print(term.strip("\27[1m\27[31mred\27[39m\27[22m and plain"))
+const forced = process.run({ process.executable, "-e", `require("@std/io").write(require("@std/term").green("go"))` }, { env = { FORCE_COLOR = "1" } })
+print("forced", forced.output == "\27[32mgo\27[39m")
+print(pcall(term.style, "x", "sparkly"))
+
+const u = url.parse("HTTPS://ada:secret@Example.com:8443/docs/a%20b?q=1&x=two+words#top")
+print(u.scheme, u.user, u.password, u.host, u.port, u.path, u.query, u.fragment)
+print(url.format(u))
+const v6 = url.parse("http://[::1]:8080/")
+print(v6.host, v6.port)
+print(url.parse("relative/path?x").path, url.parse("mailto:ada@example.com").path)
+for (_, case in {
+	{ "http://a/b/c/d;p?q", "g" }, { "http://a/b/c/d;p?q", "./g" }, { "http://a/b/c/d;p?q", "g/" },
+	{ "http://a/b/c/d;p?q", "/g" }, { "http://a/b/c/d;p?q", "//g" }, { "http://a/b/c/d;p?q", "?y" },
+	{ "http://a/b/c/d;p?q", "#s" }, { "http://a/b/c/d;p?q", "../g" }, { "http://a/b/c/d;p?q", "../../g" },
+	{ "http://a/b/c/d;p?q", "../../../g" }, { "http://a/b/c/d;p?q", "g?y#s" }, { "http://a/b/c/d;p?q", "https://x/y" },
+}) {
+	print(case[2], "->", url.resolve(case[1], case[2]))
+}
+print(url.encode("a b/c&d=é"), url.encode("a b/c", "/"), url.decode("a%20b%2Fc"))
+const q = url.parseQuery("?name=ada+lovelace&lang=cluau&empty=&flag")
+print(q.name, q.lang, q.empty == "", q.flag == "")
+print(url.encodeQuery({ q = "two words", page = 2, ok = true }))
+
+// tar: made, read back, gzip found by its first bytes, a long name, and an
+// entry that would escape.
+const dir = path.join(fs.tempDir(), `cluau-tar-test-{math.floor(os.clock() * 1e6)}`)
+fs.mkdir(dir)
+fs.write(path.join(dir, "source.txt"), "from a file")
+const long = string.rep("deep/", 30) .. "file.txt"
+const writer = tar.create(path.join(dir, "out.tar.gz"))
+writer:add("a.txt", "first"):addFile("copied.txt", path.join(dir, "source.txt")):addDirectory("empty"):add(long, "far down")
+writer:finish()
+const archive = tar.open(path.join(dir, "out.tar.gz"))
+for (_, entry in archive:entries()) {
+	print("entry", if (#entry.name > 40) `{#entry.name} characters` else entry.name, entry.size, entry.directory)
+}
+print(archive:read("a.txt"), archive:read(long))
+print("extracted", archive:extract(path.join(dir, "out")))
+print(fs.read(path.join(dir, "out", "copied.txt")), fs.read(path.join(dir, "out", long)))
+const plain = tar.create()
+plain:add("../escape.txt", "no")
+const bytes = plain:finish()
+if (bytes != nil) {
+	print("plain", #bytes % 512 == 0, string.sub(bytes, 258, 262))
+	const refused, why = pcall(function() {
+		tar.fromString(bytes):extract(path.join(dir, "evil"))
+	})
+	print("escape", refused, string.find(tostring(why), "outside the directory", 1, true) != nil)
+}
+// What the system's tar makes reads too, where there is one.
+const made = process.run({ "tar", "-cf", path.join(dir, "system.tar"), "-C", dir, "source.txt" })
+if (made.code == 0) {
+	print("system tar", tar.open(path.join(dir, "system.tar")):read("source.txt"))
+} else {
+	print("system tar", "from a file")
+}
+print(pcall(tar.fromString, string.rep("x", 1024)))
+fs.remove(dir, true)

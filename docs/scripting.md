@@ -67,8 +67,9 @@ before the script (`cluau --no-native script.cluau`) interprets it instead.
 network or other programs: for a script from somewhere else, or one that
 only computes.
 
-- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite` and `@std/zip` are
-  not available (`require` raises an error saying so).
+- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite`, `@std/zip` and
+  `@std/tar` are not available (`require` raises an error saying so), nor
+  what is built on them (`@std/server`, `@std/websocket`).
 - `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
   environment variables, the working directory and running commands are
   left out.
@@ -76,8 +77,8 @@ only computes.
   directory, its `cluau_modules` and the search path (`CLUAU_PATH`).
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
   `@std/path` (text only), `@std/regex`, `@std/task`, `@std/crypto`,
-  `@std/encoding`, `@std/compress`, `@std/args`, `@std/csv` and `@std/test`
-  work as usual, as do Luau's own libraries, which have no file or process access.
+  `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
+  `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1110,6 +1111,42 @@ for (message in ws:messages()) {
 }
 ```
 
+### `@std/term`
+
+The terminal. Colours and styles are escape sequences, and they are left
+out (the text comes back as it is) when standard output is not a terminal,
+`NO_COLOR` is set, or `TERM` is `dumb`; `FORCE_COLOR` keeps them. On
+Windows the console is switched to escape sequences when they are first
+used.
+
+| function | is |
+|---|---|
+| `isTerminal(stream?): boolean` | whether `"stdout"` (the default), `"stderr"` or `"stdin"` is a terminal |
+| `colors(stream?): boolean` | whether colours go to the stream |
+| `size(): { columns, rows }?` | the terminal's size (`nil` when there is no terminal) |
+| `style(text, ...): string` | the text in each style named |
+| `strip(text): string` | the text without its escape sequences |
+| `bold`, `dim`, `italic`, `underline`, `inverse`, `strike`; `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, the `bright` ones (`brightRed`, ...), the backgrounds (`bgRed`, ...) | `term.red(text)`: the text in that style |
+
+```
+const term = require("@std/term")
+print(term.green("ok"), term.style("3 failed", "bold", "red"))
+```
+
+### `@std/url`
+
+Web addresses (RFC 3986).
+
+| function | is |
+|---|---|
+| `parse(text): Url` | `{ scheme, user, password, host, port, path, query, fragment }`: the scheme and host in lowercase, the path decoded, `port` `nil` when the address has none |
+| `format(url): string` | the address from its parts |
+| `resolve(base, relative): string` | `relative` read against `base`, as a browser follows a link (`"../c"`, `"?q=1"`, `"//host/x"`) |
+| `encode(text, keep?): string` | percent-encoded but for letters, digits and `- . _ ~` (and the characters in `keep`: `"/"` for a path) |
+| `decode(text, plus?): string` | `%XX` back to its byte (and `+` to a space, with `plus`) |
+| `parseQuery(text): {[string]: string}` | a query string's names and values, decoded |
+| `encodeQuery(values): string` | a query string from a table, its names in order |
+
 ### `@std/crypto`
 
 Hashes, HMACs and randomness, on mbedTLS (built in). `data` is a string or
@@ -1202,6 +1239,25 @@ for (_, entry in archive:entries()) {
 }
 archive:extract("unpacked")
 ```
+
+### `@std/tar`
+
+Tar archives (POSIX ustar, with GNU and PAX long names when reading),
+plain or gzip-compressed: a `.tar.gz` or `.tgz` is found by its first
+bytes. The same calls as `@std/zip`:
+
+| function | is |
+|---|---|
+| `open(path): Archive` | the archive in a file |
+| `fromString(data): Archive` | the archive in a string or `buffer` |
+| `create(path?, options?): Writer` | a new archive, gzip-compressed when `options.gzip` says so or the path ends in `.gz` or `.tgz` (with no path, `finish()` returns it) |
+
+An `Archive` has `entries()` (each `{ name, size, directory, link, mode,
+modified }`; `link` is a link's target), `read(name)`, `extract(directory)`
+(refusing an entry that would land outside it; links are left out) and
+`close()`. A `Writer` has `add(name, data, options?)`, `addFile(name, path,
+options?)` (`options.mode`, 0644 by default), `addDirectory(name)` and
+`finish()`.
 
 ### `@std/sqlite`
 

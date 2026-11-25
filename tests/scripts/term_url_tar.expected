@@ -1,0 +1,36 @@
+terminal	false	false
+plain	plain too
+red and plain
+forced	true
+false	term.style: no style 'sparkly' (bold, dim, italic, underline, inverse, strike, the colours, bg<Colour>)
+https	ada	secret	example.com	8443	/docs/a b	q=1&x=two+words	top
+https://ada:secret@example.com:8443/docs/a%20b?q=1&x=two+words#top
+::1	8080
+relative/path	ada@example.com
+g	->	http://a/b/c/g
+./g	->	http://a/b/c/g
+g/	->	http://a/b/c/g/
+/g	->	http://a/g
+//g	->	http://g
+?y	->	http://a/b/c/d;p?y
+#s	->	http://a/b/c/d;p?q#s
+../g	->	http://a/b/g
+../../g	->	http://a/g
+../../../g	->	http://a/g
+g?y#s	->	http://a/b/c/g?y#s
+https://x/y	->	https://x/y
+a%20b%2Fc%26d%3D%C3%A9	a%20b/c	a b/c
+ada lovelace	cluau	true	true
+ok=true&page=2&q=two%20words
+entry	a.txt	5	false
+entry	copied.txt	11	false
+entry	empty/	0	true
+entry	158 characters	8	false
+first	far down
+extracted	3
+from a file	far down
+plain	true	ustar
+escape	false	true
+system tar	from a file
+false	tar: the data is not a tar archive (a header's checksum does not match at byte 0)
+exit: 0

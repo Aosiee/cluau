@@ -59,6 +59,9 @@ namespace cluau::runtime::detail {
 	// Pushes @std/encoding's table (base64, hex).
 	void OpenEncoding(lua_State* L);
 
+	// Pushes @std/term's table (the terminal, colours).
+	void OpenTerm(lua_State* L);
+
 	// Pushes @std/compress's and @std/zip's tables (when the runtime is built with them).
 	void OpenCompress(lua_State* L);
 	void OpenZip(lua_State* L);

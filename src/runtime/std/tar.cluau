@@ -1,0 +1,293 @@
+// @std/tar: tar archives (POSIX ustar; GNU and PAX long names read), plain
+// or gzip-compressed (.tar.gz, .tgz: found by their first bytes). Like
+// @std/zip: an archive is read whole, a new one built whole and written.
+//
+//   const tar = require("@std/tar")
+//   const release = tar.create("release.tar.gz")
+//   release:addFile("cluau/README.md", "README.md"):add("cluau/VERSION", "1.0\n")
+//   release:finish()
+//   tar.open("release.tar.gz"):extract("unpacked")
+
+const fs = require("@std/fs")
+const path = require("@std/path")
+const compress = require("@std/compress")
+
+export type Entry = {
+	name: string,
+	size: number,
+	directory: boolean,
+	link: string?,     // a symbolic link's target (links are not extracted)
+	mode: number,
+	modified: number,  // a time, as @std/time has them
+}
+
+type Stored = { Entry: Entry, Offset: number }
+
+const Octal = function(field: string): number {
+	// Base-256 (a size of 8 GiB or more): the first byte's high bit set.
+	if (#field > 0 && bit32.band(string.byte(field, 1), 128) != 0) {
+		let n = bit32.band(string.byte(field, 1), 127)
+		for (i = 2, #field) {
+			n = n * 256 + string.byte(field, i)
+		}
+		return n
+	}
+	const digits = string.match(field, "^%s*([0-7]*)") or ""
+	return tonumber(digits, 8) or 0
+}
+
+const Field = function(block: string, from: number, length: number): string {
+	const raw = string.sub(block, from + 1, from + length)
+	return string.match(raw, "^([^%z]*)") or ""
+}
+
+// The PAX records (`length key=value\n` ...) in a header's data.
+const Pax = function(data: string): { [string]: string } {
+	const records: { [string]: string } = {}
+	let at = 1
+	while (at <= #data) {
+		const length = tonumber(string.match(data, "^(%d+) ", at) or "")
+		if (length == nil || length <= 0) {
+			break
+		}
+		const record = string.sub(data, at, at + length - 1)
+		const key, value = string.match(record, "^%d+ ([^=]+)=(.*)\n$")
+		if (key != nil && value != nil) {
+			records[key] = value
+		}
+		at += length
+	}
+	return records
+}
+
+class Archive {
+	Data: string = ""
+	Entries: { Stored } = {}
+	Open: boolean = true
+
+	function Init(data: string, what: string) {
+		// gzip's first two bytes: unpacked first.
+		self.Data = if (string.sub(data, 1, 2) == "\31\139") compress.gunzip(data) else data
+		let at = 0
+		let longName: string? = nil
+		let pax: { [string]: string } = {}
+		while (at + 512 <= #self.Data) {
+			const block = string.sub(self.Data, at + 1, at + 512)
+			if (string.find(block, "^%z+$") != nil) {
+				break // the end: zero blocks
+			}
+			// The header's checksum: its bytes, the checksum field as spaces.
+			let sum = 0
+			for (i = 1, 512) {
+				sum += if (i > 148 && i <= 156) 32 else string.byte(block, i)
+			}
+			if (sum != Octal(string.sub(block, 149, 156))) {
+				error(`tar: {what} is not a tar archive (a header's checksum does not match at byte {at})`, 4)
+			}
+			const typeflag = string.sub(block, 157, 157)
+			const size = Octal(string.sub(block, 125, 136))
+			const dataAt = at + 512
+			at = dataAt + math.ceil(size / 512) * 512
+			if (at > #self.Data + 511) {
+				error(`tar: {what} ends inside an entry`, 4)
+			}
+			if (typeflag == "L") {
+				longName = string.match(string.sub(self.Data, dataAt + 1, dataAt + size), "^([^%z]*)")
+			} else if (typeflag == "x") {
+				pax = Pax(string.sub(self.Data, dataAt + 1, dataAt + size))
+			} else if (typeflag == "g") {
+				// global PAX records: nothing here uses them
+			} else {
+				let name = Field(block, 0, 100)
+				const prefix = if (string.sub(block, 258, 262) == "ustar") Field(block, 345, 155) else ""
+				if (prefix != "") {
+					name = prefix .. "/" .. name
+				}
+				name = pax["path"] or longName or name
+				const link = Field(block, 157, 100)
+				table.insert(self.Entries, {
+					Entry = {
+						name = name,
+						size = if (pax["size"] != nil) tonumber(pax["size"]) or size else size,
+						directory = typeflag == "5" || string.sub(name, -1) == "/",
+						link = if (typeflag == "2" || typeflag == "1") (pax["linkpath"] or link) else nil,
+						mode = Octal(string.sub(block, 101, 108)),
+						modified = if (pax["mtime"] != nil) tonumber(pax["mtime"]) or 0 else Octal(string.sub(block, 137, 148)),
+					},
+					Offset = dataAt,
+				})
+				longName = nil
+				pax = {}
+			}
+		}
+	}
+
+	function entries(): { Entry } {
+		const out: { Entry } = {}
+		for (_, stored in self.Entries) {
+			table.insert(out, stored.Entry)
+		}
+		return out
+	}
+
+	// An entry's contents (the last entry of that name, as tar has it).
+	function read(name: string): string {
+		for (i = #self.Entries, 1, -1) {
+			const stored = self.Entries[i]
+			if (stored.Entry.name == name) {
+				return string.sub(self.Data, stored.Offset + 1, stored.Offset + stored.Entry.size)
+			}
+		}
+		error(`archive:read: no '{name}' in the archive`, 2)
+	}
+
+	// Every file and directory under `directory`; an entry whose name would
+	// leave it is refused, and links are left out. Returns the files written.
+	function extract(directory: string): number {
+		fs.mkdir(directory)
+		let written = 0
+		for (_, stored in self.Entries) {
+			const entry = stored.Entry
+			const parts: { string } = {}
+			for (part in string.gmatch(entry.name, "[^/]+")) {
+				if (part == ".." || string.find(part, "\\", 1, true) != nil || string.find(part, ":", 1, true) != nil) {
+					error(`archive:extract: '{entry.name}' would be written outside the directory: nothing more extracted`, 2)
+				}
+				if (part != ".") {
+					table.insert(parts, part)
+				}
+			}
+			if (string.sub(entry.name, 1, 1) == "/") {
+				error(`archive:extract: '{entry.name}' would be written outside the directory: nothing more extracted`, 2)
+			}
+			if (#parts > 0 && entry.link == nil) {
+				const target = path.join(directory, table.unpack(parts))
+				if (entry.directory) {
+					fs.mkdir(target)
+				} else {
+					fs.mkdir(path.dirname(target))
+					fs.write(target, string.sub(self.Data, stored.Offset + 1, stored.Offset + entry.size))
+					written += 1
+				}
+			}
+		}
+		return written
+	}
+
+	function close() {
+		self.Data = ""
+		self.Entries = {}
+	}
+}
+
+const Octals = function(n: number, width: number): string {
+	return string.format(`%0{width - 1}o`, n) .. "\0"
+}
+
+// A ustar header (and before it, for a long name, a PAX header of its own).
+const Header = function(name: string, size: number, typeflag: string, mode: number, modified: number): string {
+	let prefix = ""
+	let short = name
+	if (#name > 100) {
+		// ustar's prefix holds the start of a long name, split at a slash.
+		const cut = string.find(string.sub(name, 1, 156), "/[^/]*$")
+		if (cut != nil && #name - cut <= 100 && cut - 1 <= 155) {
+			prefix = string.sub(name, 1, cut - 1)
+			short = string.sub(name, cut + 1)
+		}
+	}
+	const Pad = function(text: string, width: number): string {
+		return string.sub(text, 1, width) .. string.rep("\0", width - math.min(#text, width))
+	}
+	let header = Pad(short, 100) .. Octals(mode, 8) .. Octals(0, 8) .. Octals(0, 8) .. Octals(size, 12) .. Octals(modified, 12) ..
+		"        " .. typeflag .. Pad("", 100) .. "ustar\00000" .. Pad("", 32) .. Pad("", 32) .. Octals(0, 8) .. Octals(0, 8) ..
+		Pad(prefix, 155) .. string.rep("\0", 12)
+	let sum = 0
+	for (i = 1, 512) {
+		sum += string.byte(header, i)
+	}
+	header = string.sub(header, 1, 148) .. string.format("%06o", sum) .. "\0 " .. string.sub(header, 157)
+	if (#short > 100 || (#name > 100 && prefix == "")) {
+		// No split fits: the name as a PAX record before the header.
+		// A record's length counts its own digits.
+		const record = " path=" .. name .. "\n"
+		let length = #record + #tostring(#record)
+		length = #record + #tostring(length)
+		const pax = tostring(length) .. record
+		const paxHeader = string.sub(Header("PaxHeader", #pax, "x", 420, modified), 1, 512)
+		return paxHeader .. pax .. string.rep("\0", (512 - #pax % 512) % 512) .. string.sub(header, 1, 512)
+	}
+	return header
+}
+
+class Writer {
+	Path: string = ""
+	Gzip: boolean = false
+	Parts: { string } = {}
+	Finished: boolean = false
+
+	function Init(target: string, gzip: boolean) {
+		self.Path = target
+		self.Gzip = gzip
+	}
+
+	function Add(name: string, data: string, typeflag: string, mode: number) {
+		if (self.Finished) {
+			error("writer: the archive is finished", 3)
+		}
+		table.insert(self.Parts, Header(name, #data, typeflag, mode, math.floor(os.time())))
+		table.insert(self.Parts, data)
+		table.insert(self.Parts, string.rep("\0", (512 - #data % 512) % 512))
+	}
+
+	function add(name: string, data: string | buffer, options: { mode: number? }?): Writer {
+		const bytes = if (type(data) == "buffer") buffer.tostring(data) else data :: string
+		self:Add(name, bytes, "0", if (options != nil && options.mode != nil) options.mode else 420)
+		return self
+	}
+
+	function addFile(name: string, file: string, options: { mode: number? }?): Writer {
+		self:Add(name, fs.read(file), "0", if (options != nil && options.mode != nil) options.mode else 420)
+		return self
+	}
+
+	function addDirectory(name: string): Writer {
+		self:Add(if (string.sub(name, -1) == "/") name else name .. "/", "", "5", 493)
+		return self
+	}
+
+	// Writes the archive to its path (or returns it, with no path).
+	function finish(): string? {
+		self.Finished = true
+		table.insert(self.Parts, string.rep("\0", 1024))
+		let archive = table.concat(self.Parts)
+		if (self.Gzip) {
+			archive = compress.gzip(archive)
+		}
+		if (self.Path == "") {
+			return archive
+		}
+		fs.write(self.Path, archive)
+		return nil
+	}
+}
+
+// The archive in a file (gzip-compressed or not).
+const open = function(file: string): Archive {
+	return Archive(fs.read(file), `'{file}'`)
+}
+
+const fromString = function(data: string | buffer): Archive {
+	return Archive(if (type(data) == "buffer") buffer.tostring(data) else data :: string, "the data")
+}
+
+// A new archive, gzip-compressed when options.gzip says so or the path ends
+// in .gz or .tgz.
+const create = function(file: string?, options: { gzip: boolean? }?): Writer {
+	const target = file or ""
+	const gzip = if (options != nil && options.gzip != nil) options.gzip :: boolean
+		else (string.match(target, "%.t?gz$") != nil)
+	return Writer(target, gzip)
+}
+
+return { open = open, fromString = fromString, create = create }

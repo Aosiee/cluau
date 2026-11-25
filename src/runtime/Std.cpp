@@ -2129,7 +2129,7 @@ namespace cluau::runtime::detail {
 
 	bool SandboxLeavesOut(const std::string& name)
 	{
-		return name == "fs" || name == "http" || name == "net" || name == "sqlite" || name == "zip" || name == "_packages";
+		return name == "fs" || name == "http" || name == "net" || name == "sqlite" || name == "zip" || name == "tar" || name == "_packages";
 	}
 
 	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox)
@@ -2219,6 +2219,8 @@ namespace cluau::runtime::detail {
 #endif
 		OpenEncoding(L);
 		lua_setfield(L, -2, "encoding");
+		OpenTerm(L);
+		lua_setfield(L, -2, "term");
 #ifdef CLUAU_HAS_COMPRESS
 		OpenCompress(L);
 		lua_setfield(L, -2, "compress");
@@ -2249,7 +2251,7 @@ namespace cluau::runtime::detail {
 
 	const char* StdNames()
 	{
-		static const std::string names = std::string("@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/encoding")
+		static const std::string names = std::string("@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/encoding, @std/term, @std/url")
 #ifdef CLUAU_HAS_CRYPTO
 										 + ", @std/crypto"
 #endif
@@ -2266,7 +2268,7 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_SQLITE
 										 + ", @std/sqlite"
 #endif
-										 + ", @std/server, @std/websocket, @std/task, @std/args, @std/csv";
+										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv";
 		return names.c_str();
 	}
 
