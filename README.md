@@ -31,7 +31,7 @@ class Player {
 It is also a scripting language on its own: `cluau script.cluau` runs a
 script the way `python script.py` does, with a REPL, `require` for other
 files and a standard library for files, paths, processes, JSON, times,
-command-line arguments and CSV, and
+HTTP, command-line arguments and CSV, and
 `cluau check script.cluau` type-checks it (and the modules it requires)
 without running it.
 
@@ -55,7 +55,9 @@ for (_, file in fs.walk(process.args[1] or ".")) {
   Luau-to-cluau converter, `include/cluau/convert.h`) has no dependencies.
 - `cluau_runtime` (`include/cluau/runtime.h`, the script runner and checker
   behind the `cluau` tool) runs on Luau's VM, compiler and analysis, which
-  CMake fetches (or `-DCLUAU_LUAU_DIR=<a Luau checkout>`).
+  CMake fetches (or `-DCLUAU_LUAU_DIR=<a Luau checkout>`), and `@std/http` on
+  libcurl and mbedTLS, fetched and linked in too (`-DCLUAU_HTTP=OFF` leaves
+  them out).
 - `cluau_check` (the strict-typing rules: strict mode, no `any` without a
   line exemption, required annotations) runs over Luau's analysis and builds
   against the host's Luau.
@@ -124,7 +126,8 @@ The build fetches Luau 0.748 for the runtime and the checker (`-DCLUAU_LUAU_VERS
 and convert commands with no Luau at all. `ctest` runs the translator's
 tests, the script tests (`tests/scripts/*.cluau` against their `.expected`
 output, and `cluau check` on each) and the checker's tests
-(`tests/check/*.cluau` against their `.checked` output), and on Linux
+(`tests/check/*.cluau` against their `.checked` output), `@std/http`
+against a local HTTP and HTTPS server (`tests/http/run.py`), and on Linux
 and macOS the prompt driven in a pseudo-terminal (`tests/repl_terminal.py`).
 
 `hamr run` runs the same checks as a [hamr](https://github.com/Aosiee/hamr)

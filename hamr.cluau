@@ -37,9 +37,9 @@ for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 		paths = kPaths,
 	})
 	suite:step(`scripts:{name}`, {
-		doc = "Runs tests/scripts/*.cluau and checks them and tests/check/*.cluau with the built tool, comparing the output with the expected files, and drives the prompt in a terminal.",
+		doc = "Runs tests/scripts/*.cluau and checks them and tests/check/*.cluau with the built tool, comparing the output with the expected files, runs @std/http against a local server, and drives the prompt in a terminal.",
 		needs = { `build:{name}` },
-		run = { "ctest", "--test-dir", dir, "-R", "^(script|check|repl):", "--output-on-failure" },
+		run = { "ctest", "--test-dir", dir, "-R", "^(script|check|repl|http):", "--output-on-failure" },
 		findings = hamr.findings.failLines("script", "FAIL"),
 		timeout = 300,
 		budget = 10,

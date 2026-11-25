@@ -791,6 +791,8 @@ __cluau_meta = {
 
 	} // namespace
 
+	bool detail::InterruptPending() { return g_Interrupt != 0; }
+
 	void detail::RaiseIfInterrupted(lua_State* L)
 	{
 		if (!g_Interrupt)

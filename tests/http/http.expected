@@ -1,0 +1,22 @@
+get:	200	true	hello	yes	text/plain	a=1
+404:	404	false
+503:	503	false
+followed:	200	hello	/hello
+not followed:	302	/hello
+post:	POST body="plain text" type="text/plain" agent=cluau custom=""
+post json:	POST body="{\"list\":[1,2],\"name\":\"cluau\"}" type="application/json" agent=cluau custom=""
+put:	PUT body="replaced" type="" agent=cluau custom="mine"
+delete:	DELETE body="" type="" agent=cluau custom=""
+head:	200	""	5
+big:	1048576
+download:	true	1048576	""
+download 404:	404	false
+timeout:	false	true
+https:	200	hello
+https untrusted:	false	true
+error:	false	http.get: GET http://127.0.0.1:1/
+error:	false	http.request: options.url is the address
+error:	false	http.get: options.timeout is a number of seconds
+error:	false	http.post: options.body and options.json are each a body: give one
+error:	false	http.get: GET file:///etc/passwd
+exit: 0

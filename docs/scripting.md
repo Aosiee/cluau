@@ -4,7 +4,7 @@ The `cluau` tool runs cluau as a scripting language, the way `python` runs
 Python: no host, no build step. A script is translated in *script mode*,
 compiled by Luau and run on Luau's VM, with `require` for other files and a
 standard library for files, paths, processes, standard input and output,
-JSON, dates and times, command-line arguments and CSV.
+JSON, dates and times, HTTP, command-line arguments and CSV.
 
 ```
 #!/usr/bin/env cluau
@@ -469,6 +469,53 @@ const due = time.parse("2026-12-01") + 7 * 24 * 3600
 print("due", time.format(due, "%A %d %B", { utc = true }), "took", time.monotonic() - start)
 ```
 
+### `@std/http`
+
+HTTP and HTTPS requests:
+
+```
+const http = require("@std/http")
+const json = require("@std/json")
+
+const release = http.get("https://api.github.com/repos/Aosiee/cluau/releases/latest", {
+	headers = { Accept = "application/vnd.github+json" },
+	timeout = 30,
+})
+if (release.ok) {
+	print((json.decode(release.body) :: { tag_name: string }).tag_name)
+}
+http.post("https://example.com/hooks", nil, { json = { event = "built" } })
+http.download("https://example.com/data.zip", "data.zip")
+```
+
+| function | is |
+|---|---|
+| `get(url, options?): Response` | a GET request |
+| `post(url, body?, options?): Response` | a POST with `body` (text) or `options.json` |
+| `request(options): Response` | any method: `options.url`, `options.method` (`"PUT"`, `"DELETE"`, `"HEAD"`, ...) |
+| `download(url, path, options?): Response` | the body into a file, written as it arrives; the file is replaced only when the response is a 2xx |
+
+The options: `headers` (`{ [name] = value }`), `body` (text), `json` (a
+value sent as JSON, with `Content-Type: application/json`), `timeout`
+(seconds for the whole request), `followRedirects` (true by default, up to
+10), `caFile` (a certificate bundle to trust instead of the system's). A
+body goes with its own `Content-Type` header; without one, none is sent.
+
+A `Response` is `{ status, ok, headers, body, url }`: `ok` is a 2xx status,
+`headers` has lower-case names (one value per name, repeated ones joined
+with `, `), and `url` is the address the answer came from after
+redirects. A 4xx or 5xx status is a response, not an error; a request that
+gets no answer (an unknown host, a refused connection, a timeout, a
+certificate that is not trusted) is an error naming the request and why.
+Ctrl-C stops a request in progress.
+
+HTTPS certificates are checked against the system's trusted ones: the
+Windows certificate store, macOS's `/etc/ssl/cert.pem`, and on Linux the
+bundle the distribution keeps (`/etc/ssl/certs/ca-certificates.crt`,
+`/etc/pki/tls/certs/ca-bundle.crt`, ...). `SSL_CERT_FILE` and `SSL_CERT_DIR`
+name others, as they do for other tools. Proxies come from `https_proxy`,
+`http_proxy` and `no_proxy`.
+
 ### `@std/args`
 
 A script's command line, parsed against what it declares it takes, with a
@@ -533,6 +580,8 @@ The runtime is a library (`cluau_runtime`, `include/cluau/runtime.h`):
 host to add its own globals; `cluau::runtime::Check` is `cluau check`. It
 builds against Luau's VM, compiler and analysis: the checkout
 `CLUAU_LUAU_DIR` names, else the Luau release cluau pins, which CMake
-fetches (`CLUAU_LUAU_VERSION` picks another). `CLUAU_BUILD_RUNTIME` is on for a standalone build
+fetches (`CLUAU_LUAU_VERSION` picks another). `@std/http` adds libcurl
+8.23.0 over mbedTLS 3.6.8, fetched and linked in the same way;
+`-DCLUAU_HTTP=OFF` builds without it. `CLUAU_BUILD_RUNTIME` is on for a standalone build
 and off under `add_subdirectory`, so a host that embeds only the translator
 needs no Luau.

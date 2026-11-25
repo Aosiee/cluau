@@ -29,6 +29,16 @@ namespace cluau::runtime::detail {
 	// by name: loaded on their first require, typed from their source.
 	const std::map<std::string, std::string>& StdSources();
 
+	// The value at `index` as JSON text (@std/json's encoding), for
+	// @std/http's `json` option.
+	std::string JsonEncodeValue(lua_State* L, int index);
+
+	// A Ctrl-C is waiting to stop the script (a long transfer checks).
+	bool InterruptPending();
+
+	// Pushes @std/http's table (when the runtime is built with it).
+	void OpenHttp(lua_State* L);
+
 	// After a read of standard input came back empty-handed: when a Ctrl-C
 	// stopped it, raises the `interrupted` error (and does not return).
 	void RaiseIfInterrupted(lua_State* L);

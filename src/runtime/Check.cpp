@@ -147,6 +147,40 @@ return m :: {
 	array: (<T>(value: T) -> T) & (() -> { unknown }),
 }
 )LUAU" },
+				{ "http", R"LUAU(
+export type Options = {
+	headers: { [string]: string }?,
+	body: string?,
+	json: unknown?,
+	timeout: number?,
+	followRedirects: boolean?,
+	caFile: string?,
+}
+export type RequestOptions = {
+	url: string,
+	method: string?,
+	headers: { [string]: string }?,
+	body: string?,
+	json: unknown?,
+	timeout: number?,
+	followRedirects: boolean?,
+	caFile: string?,
+}
+export type Response = {
+	status: number,
+	ok: boolean,
+	headers: { [string]: string },
+	body: string,
+	url: string,
+}
+local m: any = nil
+return m :: {
+	request: (options: RequestOptions) -> Response,
+	get: (url: string, options: Options?) -> Response,
+	post: (url: string, body: string?, options: Options?) -> Response,
+	download: (url: string, path: string, options: Options?) -> Response,
+}
+)LUAU" },
 				{ "time", R"LUAU(
 export type Options = { utc: boolean? }
 export type Parts = {

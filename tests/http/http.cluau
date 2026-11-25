@@ -1,0 +1,76 @@
+// @std/http against the local test server (run.py starts it and names its
+// addresses).
+const http = require("@std/http")
+const json = require("@std/json")
+const process = require("@std/process")
+const fs = require("@std/fs")
+const path = require("@std/path")
+
+const base = process.env("CLUAU_TEST_HTTP") or "http://127.0.0.1:1"
+const secure = process.env("CLUAU_TEST_HTTPS") or "https://localhost:1"
+const ca = process.env("CLUAU_TEST_CA") or ""
+
+type Echo = { method: string, body: string, type: string, agent: string, custom: string }
+
+function Echoed(response: http.Response): string {
+	const e = json.decode(response.body) :: Echo
+	return `{e.method} body={repr(e.body)} type={repr(e.type)} agent={e.agent} custom={repr(e.custom)}`
+}
+
+// GET: status, body, headers (lower-case names).
+let r = http.get(`{base}/hello`)
+print("get:", r.status, r.ok, r.body, r.headers["x-test"], r.headers["content-type"], r.headers["set-cookie"])
+
+// Statuses other than 2xx are responses, not errors.
+r = http.get(`{base}/status/404`)
+print("404:", r.status, r.ok)
+r = http.get(`{base}/status/503`)
+print("503:", r.status, r.ok)
+
+// Redirects: followed (the final address in url), or not.
+r = http.get(`{base}/redirect`)
+print("followed:", r.status, r.body, string.sub(r.url, -6))
+r = http.get(`{base}/redirect`, { followRedirects = false })
+print("not followed:", r.status, r.headers.location)
+
+// Bodies: text, JSON, other methods, headers.
+print("post:", Echoed(http.post(`{base}/echo`, "plain text", { headers = { ["Content-Type"] = "text/plain" } })))
+print("post json:", Echoed(http.post(`{base}/echo`, nil, { json = { name = "cluau", list = { 1, 2 } } })))
+print("put:", Echoed(http.request({ url = `{base}/echo`, method = "put", body = "replaced", headers = { ["X-Custom"] = "mine" } })))
+print("delete:", Echoed(http.request({ url = `{base}/echo`, method = "DELETE" })))
+r = http.request({ url = `{base}/hello`, method = "HEAD" })
+print("head:", r.status, repr(r.body), r.headers["content-length"])
+
+// A large body, and a download (into place only when it succeeds).
+r = http.get(`{base}/big`)
+print("big:", #r.body)
+const target = path.join(fs.tempDir(), `cluau-http-test-{math.floor(os.clock() * 1e6)}.bin`)
+r = http.download(`{base}/big`, target)
+print("download:", r.ok, fs.size(target), repr(r.body))
+r = http.download(`{base}/status/404`, target .. ".missing")
+print("download 404:", r.status, fs.exists(target .. ".missing"))
+fs.remove(target)
+
+// Time limits.
+const ok, slow = pcall(http.get, `{base}/slow`, { timeout = 0.5 })
+print("timeout:", ok, string.find(tostring(slow), "no answer within", 1, true) != nil)
+
+// HTTPS with the test certificate trusted, and refused without it.
+r = http.get(`{secure}/hello`, { caFile = ca })
+print("https:", r.status, r.body)
+const trusted, refused = pcall(http.get, `{secure}/hello`)
+print("https untrusted:", trusted, string.find(tostring(refused), "certificate", 1, true) != nil)
+
+// Mistakes are errors naming the call.
+for (_, attempt in {
+	function() { return http.get("http://127.0.0.1:1/") },
+	function() { return http.request({ method = "GET" }) },
+	function() { return http.get(`{base}/hello`, { timeout = -1 }) },
+	function() { return http.post(`{base}/echo`, "x", { json = {} }) },
+	function() { return http.get("file:///etc/passwd") },
+}) {
+	const done, problem = pcall(attempt)
+	// The call and what it was about (a system's own words after that vary).
+	const message = string.match(tostring(problem), "(http%.%a+: .*)$") or tostring(problem)
+	print("error:", done, string.match(message, "^(http%.%a+: %u+ %S+):") or message)
+}

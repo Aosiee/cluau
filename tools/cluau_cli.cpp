@@ -72,7 +72,7 @@ namespace {
 		"--loose leaves out cluau's strict rules, --lint adds Luau's lint warnings.\n"
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
 		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
-		"@std/process, @std/io, @std/json, @std/time, @std/args and @std/csv.\n";
+		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/args and @std/csv.\n";
 
 	int Usage(int status = 2)
 	{

@@ -54,6 +54,58 @@ if(CLUAU_BUILD_RUNTIME)
             set_property(DIRECTORY ${luau_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
         endif()
     endif()
+    # @std/http: libcurl (HTTP and HTTPS only) over mbedTLS, both fetched at
+    # pinned releases and linked in, so the tool stays one file. The
+    # certificates come from the system at run time (src/runtime/Http.cpp).
+    option(CLUAU_HTTP "Build @std/http (fetches libcurl and mbedTLS)" ON)
+    if(CLUAU_HTTP)
+        include(FetchContent)
+        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+        set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+        set(GEN_FILES OFF CACHE BOOL "" FORCE)
+        set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+        FetchContent_Declare(mbedtls
+            URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.8/mbedtls-3.6.8.tar.bz2
+            URL_HASH SHA256=bc54b818e87f49c0b3281dd85d24adaede0e63b4e822e3fbd49c005a38b9595b
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        # mbedTLS 3.6 asks for an old CMake minimum, which CMake 4 warns about.
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+        FetchContent_MakeAvailable(mbedtls)
+        unset(CMAKE_POLICY_VERSION_MINIMUM)
+        set_property(DIRECTORY ${mbedtls_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+
+        # curl finds this mbedTLS through these (its targets, not installed files).
+        set(MBEDTLS_INCLUDE_DIR ${mbedtls_SOURCE_DIR}/include CACHE PATH "" FORCE)
+        set(MBEDTLS_LIBRARY mbedtls CACHE STRING "" FORCE)
+        set(MBEDX509_LIBRARY mbedx509 CACHE STRING "" FORCE)
+        set(MBEDCRYPTO_LIBRARY mbedcrypto CACHE STRING "" FORCE)
+        set(HAVE_MBEDTLS_DES_CRYPT_ECB 1 CACHE INTERNAL "") # a link test that cannot run before mbedTLS is built
+        foreach(setting
+                CURL_USE_MBEDTLS=ON CURL_USE_OPENSSL=OFF CURL_USE_SCHANNEL=OFF CURL_USE_WOLFSSL=OFF CURL_USE_GNUTLS=OFF
+                HTTP_ONLY=ON BUILD_CURL_EXE=OFF BUILD_SHARED_LIBS=OFF BUILD_STATIC_LIBS=ON BUILD_TESTING=OFF
+                BUILD_LIBCURL_DOCS=OFF BUILD_MISC_DOCS=OFF ENABLE_CURL_MANUAL=OFF CURL_DISABLE_INSTALL=ON
+                CURL_USE_PKGCONFIG=OFF CURL_ZLIB=OFF CURL_BROTLI=OFF CURL_ZSTD=OFF USE_NGHTTP2=OFF USE_LIBIDN2=OFF
+                CURL_USE_LIBPSL=OFF CURL_USE_LIBSSH2=OFF CURL_USE_LIBSSH=OFF CURL_USE_GSSAPI=OFF ENABLE_ARES=OFF
+                CURL_DISABLE_LDAP=ON CURL_DISABLE_LDAPS=ON PICKY_COMPILER=OFF CURL_LTO=OFF)
+            string(REPLACE "=" ";" pair ${setting})
+            list(GET pair 0 name)
+            list(GET pair 1 value)
+            set(${name} ${value} CACHE BOOL "" FORCE)
+        endforeach()
+        # No bundle path from the build machine: the run decides (it differs by system).
+        set(CURL_CA_BUNDLE none CACHE STRING "" FORCE)
+        set(CURL_CA_PATH none CACHE STRING "" FORCE)
+        FetchContent_Declare(curl
+            URL https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.gz
+            URL_HASH SHA256=e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(curl)
+        set_property(DIRECTORY ${curl_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+
     # The strict rules, over Luau's analysis.
     add_library(cluau_check STATIC src/check/Check.cpp)
     target_link_libraries(cluau_check PUBLIC cluau_translator Luau.Analysis)
@@ -68,6 +120,14 @@ if(CLUAU_BUILD_RUNTIME)
         src/runtime/Check.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis)
+    if(CLUAU_HTTP)
+        target_sources(cluau_runtime PRIVATE src/runtime/Http.cpp)
+        target_link_libraries(cluau_runtime PRIVATE CURL::libcurl)
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_HTTP)
+        if(WIN32)
+            target_link_libraries(cluau_runtime PRIVATE crypt32) # the system's certificates
+        endif()
+    endif()
     # The REPL's line editor (history, editing, completion): Luau's copy of
     # isocline, built here so that it switches the terminal's mode without
     # discarding input it has not read yet (TCSANOW, not TCSAFLUSH) and a
@@ -141,6 +201,16 @@ if(CLUAU_BUILD_RUNTIME)
             if(Python3_Interpreter_FOUND)
                 add_test(NAME repl:terminal
                     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/repl_terminal.py $<TARGET_FILE:cluau>)
+                set_tests_properties(repl:terminal PROPERTIES TIMEOUT 120)
+            endif()
+        endif()
+        # @std/http against a local HTTP and HTTPS server (tests/http/run.py).
+        if(CLUAU_HTTP)
+            find_package(Python3 COMPONENTS Interpreter)
+            if(Python3_Interpreter_FOUND)
+                add_test(NAME http:local
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/http/run.py $<TARGET_FILE:cluau>)
+                set_tests_properties(http:local PROPERTIES TIMEOUT 180)
             endif()
         endif()
         file(GLOB CLUAU_CHECK_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/check/*.cluau)

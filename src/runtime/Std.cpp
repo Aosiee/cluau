@@ -1719,6 +1719,18 @@ namespace cluau::runtime::detail {
 			seen.pop_back();
 		}
 
+	} // namespace
+
+	std::string JsonEncodeValue(lua_State* L, int index)
+	{
+		std::vector<const void*> seen;
+		std::string out;
+		JsonEncode(L, lua_absindex(L, index), "", 0, seen, out);
+		return out;
+	}
+
+	namespace {
+
 		// json.encode(value, pretty?): `pretty` is true (two spaces) or an
 		// indent string.
 		int JsonEncodeFn(lua_State* L)
@@ -2101,6 +2113,11 @@ namespace cluau::runtime::detail {
 		SetFunctions(L, kTime);
 		lua_setfield(L, -2, "time");
 
+#ifdef CLUAU_HAS_HTTP
+		OpenHttp(L);
+		lua_setfield(L, -2, "http");
+#endif
+
 		lua_setfield(L, LUA_REGISTRYINDEX, kStdRegistry);
 
 		lua_pushcfunction(L, Input, "input");
@@ -2116,6 +2133,13 @@ namespace cluau::runtime::detail {
 		lua_pop(L, 2);
 	}
 
-	const char* StdNames() { return "@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/args, @std/csv"; }
+	const char* StdNames()
+	{
+#ifdef CLUAU_HAS_HTTP
+		return "@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/http, @std/args, @std/csv";
+#else
+		return "@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/args, @std/csv";
+#endif
+	}
 
 } // namespace cluau::runtime::detail
