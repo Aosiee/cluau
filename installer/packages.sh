@@ -66,7 +66,8 @@ size="$(du -sk "$root/usr" | cut -f 1)"
 	echo "Description: $summary"
 	echo "$description" | sed 's/^/ /'
 } > "$root/DEBIAN/control"
-dpkg-deb --root-owner-group --build "$root" "$out/cluau_${version}_${deb_arch}.deb"
+# xz: what every dpkg reads (newer ones default to zstd, which Debian 11's cannot).
+dpkg-deb --root-owner-group -Zxz --build "$root" "$out/cluau_${version}_${deb_arch}.deb"
 
 # ---- .rpm ----------------------------------------------------------------
 
@@ -98,7 +99,8 @@ install -D -m 644 "$dir/LICENSE" %{buildroot}%{_licensedir}/cluau/LICENSE
 %{_docdir}/cluau
 %license %{_licensedir}/cluau/LICENSE
 EOF
-rpmbuild -bb --quiet --target "$rpm_arch" --define "_topdir $work/rpm" "$work/cluau.spec"
+# xz too, for the older RPM systems (RHEL 8).
+rpmbuild -bb --quiet --target "$rpm_arch" --define "_topdir $work/rpm" --define "_binary_payload w9.xzdio" "$work/cluau.spec"
 cp "$work/rpm/RPMS/$rpm_arch/"*.rpm "$out/"
 
 ls -1 "$out"/*.deb "$out"/*.rpm
