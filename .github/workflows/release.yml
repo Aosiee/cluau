@@ -95,7 +95,8 @@ jobs:
           (cd / && cluau --version && cluau -e 'print(require("@std/regex").compile("\\d+"):match("v42").text)')
           sudo dpkg -r cluau
           test ! -e /usr/bin/cluau
-          docker run --rm -v "$PWD:/packages" fedora:latest sh -c 'rpm -i /packages/cluau-*.rpm && cluau --version && cluau -e "print(1 + 1)"'
+          # Not signed yet (Fedora refuses an unsigned package unless told).
+          docker run --rm -v "$PWD:/packages" fedora:latest sh -c 'rpm -i --nosignature /packages/cluau-*.rpm && cluau --version && cluau -e "print(1 + 1)"'
 
       - uses: actions/upload-artifact@v4
         with:
