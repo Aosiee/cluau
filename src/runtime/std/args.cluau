@@ -1,0 +1,349 @@
+// @std/args: command-line arguments, parsed against a declaration of the
+// flags, options and positional arguments a script takes, with a generated
+// --help.
+//
+//   const args = require("@std/args")
+//   const cli = args.parser({ name = "greet", description = "Says hello." })
+//   cli:flag("loud", { short = "l", help = "shout" })
+//   cli:option("times", { short = "n", help = "how many times", default = "1", number = true })
+//   cli:positional("names", { help = "who to greet", many = true })
+//   const parsed = cli:parse()        // process.args; --help prints the help and exits
+//   parsed:flag("loud"), parsed:number("times"), parsed:list("names")
+
+const io = require("@std/io")
+const process = require("@std/process")
+
+export type ParserSettings = { name: string?, description: string? }
+export type FlagOptions = { short: string?, help: string? }
+export type OptionOptions = { short: string?, help: string?, default: string?, value: string?, many: boolean?, number: boolean? }
+export type PositionalOptions = { help: string?, many: boolean?, optional: boolean?, required: boolean? }
+
+type Kind = "flag" | "option" | "positional"
+
+type Spec = {
+	Kind: Kind,
+	Name: string,
+	Short: string?,
+	Help: string,
+	Default: string?,
+	Value: string,
+	Many: boolean,
+	Required: boolean,
+	Number: boolean,
+}
+
+class Parsed {
+	Flags: { [string]: boolean } = {}
+	Values: { [string]: { string } } = {}
+	Defaults: { [string]: string } = {}
+	Help: boolean = false
+
+	// Whether a flag was given.
+	function flag(name: string): boolean {
+		return self.Flags[name] == true
+	}
+
+	// An option's value (its last, when given more than once), or a single
+	// positional argument; the default when it was not given.
+	function get(name: string): string? {
+		const values = self.Values[name]
+		if (values != nil && #values > 0) {
+			return values[#values]
+		}
+		return self.Defaults[name]
+	}
+
+	// get(name) as a number (options declared with `number = true` are
+	// checked when the arguments are parsed).
+	function number(name: string): number? {
+		const text = self:get(name)
+		if (text == nil) {
+			return nil
+		}
+		const value = tonumber(text)
+		if (value == nil) {
+			error(`{name} is not a number: '{text}'`, 2)
+		}
+		return value
+	}
+
+	// Every value an option (`many = true`) or a positional argument took.
+	function list(name: string): { string } {
+		const values = self.Values[name]
+		if (values == nil) {
+			const fallback = self.Defaults[name]
+			return if (fallback != nil) { fallback } else {}
+		}
+		return table.clone(values)
+	}
+}
+
+class Parser {
+	Name: string = "script"
+	Description: string = ""
+	Specs: { Spec } = {}
+
+	function Init(settings: ParserSettings?) {
+		if (settings != nil) {
+			self.Name = settings.name or self.Name
+			self.Description = settings.description or ""
+		}
+	}
+
+	function add(spec: Spec): Parser {
+		for (_, other in self.Specs) {
+			if (other.Name == spec.Name) {
+				error(`args: '{spec.Name}' is declared twice`, 3)
+			}
+			if (spec.Short != nil && other.Short == spec.Short) {
+				error(`args: -{spec.Short} is declared twice`, 3)
+			}
+			if (spec.Kind == "positional" && other.Kind == "positional" && other.Many) {
+				error(`args: '{spec.Name}' comes after '{other.Name}', which takes every remaining argument`, 3)
+			}
+		}
+		if (spec.Short != nil && #spec.Short != 1) {
+			error(`args: a short name is one character, not '{spec.Short}'`, 3)
+		}
+		table.insert(self.Specs, spec)
+		return self
+	}
+
+	// A switch: --name (or -s), true when given.
+	function flag(name: string, options: FlagOptions?): Parser {
+		const o: FlagOptions = options or {}
+		return self:add({ Kind = "flag", Name = name, Short = o.short, Help = o.help or "", Default = nil, Value = "",
+			Many = false, Required = false, Number = false })
+	}
+
+	// --name value, --name=value or -s value.
+	function option(name: string, options: OptionOptions?): Parser {
+		const o: OptionOptions = options or {}
+		return self:add({ Kind = "option", Name = name, Short = o.short, Help = o.help or "", Default = o.default,
+			Value = o.value or string.upper(name), Many = o.many == true, Required = false, Number = o.number == true })
+	}
+
+	// An argument by its position: one (required unless `optional = true`),
+	// or with `many = true` every one left (none or more; one or more with
+	// `required = true`).
+	function positional(name: string, options: PositionalOptions?): Parser {
+		const o: PositionalOptions = options or {}
+		const many = o.many == true
+		return self:add({ Kind = "positional", Name = name, Short = nil, Help = o.help or "", Default = nil, Value = name,
+			Many = many, Required = if (many) o.required == true else o.optional != true, Number = false })
+	}
+
+	function usage(): string {
+		let parts = { `usage: {self.Name}` }
+		for (_, spec in self.Specs) {
+			const shown = if (spec.Short != nil) `-{spec.Short}` else `--{spec.Name}`
+			if (spec.Kind == "flag") {
+				table.insert(parts, `[{shown}]`)
+			} else if (spec.Kind == "option") {
+				table.insert(parts, `[{shown} {spec.Value}]`)
+			}
+		}
+		for (_, spec in self.Specs) {
+			if (spec.Kind == "positional") {
+				const shown = if (spec.Many) `{spec.Name}...` else spec.Name
+				table.insert(parts, if (spec.Required) shown else `[{shown}]`)
+			}
+		}
+		return table.concat(parts, " ")
+	}
+
+	function help(): string {
+		let lines = { self:usage() }
+		if (self.Description != "") {
+			table.insert(lines, "")
+			table.insert(lines, self.Description)
+		}
+		let rows: { { string } } = {}
+		let positionals: { { string } } = {}
+		table.insert(rows, { "-h, --help", "show this help and exit" })
+		for (_, spec in self.Specs) {
+			let text = spec.Help
+			if (spec.Default != nil) {
+				text = if (text == "") `(default: {spec.Default})` else `{text} (default: {spec.Default})`
+			}
+			if (spec.Kind == "positional") {
+				table.insert(positionals, { spec.Name, text })
+			} else {
+				let shown = if (spec.Short != nil) `-{spec.Short}, --{spec.Name}` else `    --{spec.Name}`
+				if (spec.Kind == "option") {
+					shown = `{shown} {spec.Value}`
+				}
+				table.insert(rows, { shown, text })
+			}
+		}
+		let width = 0
+		for (_, row in rows) {
+			width = math.max(width, #row[1])
+		}
+		for (_, row in positionals) {
+			width = math.max(width, #row[1])
+		}
+		local function section(title: string, entries: { { string } }) {
+			if (#entries == 0) {
+				return
+			}
+			table.insert(lines, "")
+			table.insert(lines, title)
+			for (_, row in entries) {
+				table.insert(lines, `  {row[1]}{string.rep(" ", width - #row[1] + 2)}{row[2]}`)
+			}
+		}
+		section("positional arguments:", positionals)
+		section("options:", rows)
+		return table.concat(lines, "\n") .. "\n"
+	}
+
+	function find(long: string?, short: string?): Spec? {
+		for (_, spec in self.Specs) {
+			if (spec.Kind != "positional" && ((long != nil && spec.Name == long) || (short != nil && spec.Short == short))) {
+				return spec
+			}
+		}
+		return nil
+	}
+
+	// The arguments parsed, or nil and what is wrong with them.
+	function tryParse(list: { string }?): (Parsed?, string?) {
+		const given: { string } = list or process.args
+		const parsed = Parsed()
+		let positional: { string } = {}
+		let onlyPositional = false
+
+		local function store(spec: Spec, value: string): string? {
+			if (spec.Number && tonumber(value) == nil) {
+				return `--{spec.Name} takes a number, not '{value}'`
+			}
+			const values = parsed.Values[spec.Name] or {}
+			if (!spec.Many) {
+				table.clear(values)
+			}
+			table.insert(values, value)
+			parsed.Values[spec.Name] = values
+			return nil
+		}
+
+		let i = 1
+		while (i <= #given) {
+			const arg = given[i]
+			if (onlyPositional || arg == "-" || string.sub(arg, 1, 1) != "-" || tonumber(arg) != nil) {
+				table.insert(positional, arg)
+			} else if (arg == "--") {
+				onlyPositional = true
+			} else if (arg == "-h" || arg == "--help") {
+				parsed.Help = true
+				return parsed, nil
+			} else if (string.sub(arg, 1, 2) == "--") {
+				const eq = string.find(arg, "=", 3, true)
+				const name = if (eq != nil) string.sub(arg, 3, eq - 1) else string.sub(arg, 3)
+				const spec = self:find(name, nil)
+				if (spec == nil) {
+					return nil, `unknown option --{name}`
+				}
+				if (spec.Kind == "flag") {
+					if (eq != nil) {
+						return nil, `--{name} takes no value`
+					}
+					parsed.Flags[spec.Name] = true
+				} else {
+					let value: string? = if (eq != nil) string.sub(arg, eq + 1) else nil
+					if (value == nil) {
+						i += 1
+						value = given[i]
+					}
+					if (value == nil) {
+						return nil, `--{name} needs a value`
+					}
+					const problem = store(spec, value)
+					if (problem != nil) {
+						return nil, problem
+					}
+				}
+			} else {
+				// -abc: flags a, b, c; -nVALUE or -n VALUE: an option's value.
+				let k = 2
+				while (k <= #arg) {
+					const short = string.sub(arg, k, k)
+					const spec = self:find(nil, short)
+					if (spec == nil) {
+						return nil, `unknown option -{short}`
+					}
+					if (spec.Kind == "flag") {
+						parsed.Flags[spec.Name] = true
+						k += 1
+					} else {
+						let value: string? = if (k < #arg) string.sub(arg, k + 1) else nil
+						if (value == nil) {
+							i += 1
+							value = given[i]
+						}
+						if (value == nil) {
+							return nil, `-{short} needs a value`
+						}
+						const problem = store(spec, value)
+						if (problem != nil) {
+							return nil, problem
+						}
+						break
+					}
+				}
+			}
+			i += 1
+		}
+
+		// The positional arguments, in order.
+		let at = 1
+		for (_, spec in self.Specs) {
+			if (spec.Kind == "positional") {
+				const values: { string } = {}
+				if (spec.Many) {
+					while (at <= #positional) {
+						table.insert(values, positional[at])
+						at += 1
+					}
+				} else if (at <= #positional) {
+					table.insert(values, positional[at])
+					at += 1
+				}
+				if (spec.Required && #values == 0) {
+					return nil, `missing {spec.Name}`
+				}
+				parsed.Values[spec.Name] = values
+			}
+			if (spec.Default != nil) {
+				parsed.Defaults[spec.Name] = spec.Default
+			}
+		}
+		if (at <= #positional) {
+			return nil, `unexpected argument '{positional[at]}'`
+		}
+		return parsed, nil
+	}
+
+	// The arguments parsed (process.args unless a list is given). --help
+	// prints the help and exits; a mistake prints it with the usage to
+	// standard error and exits with status 2.
+	function parse(list: { string }?): Parsed {
+		const parsed, problem = self:tryParse(list)
+		if (parsed == nil) {
+			io.writeError(`{self.Name}: {problem or "bad arguments"}\n{self:usage()}\n`)
+			return process.exit(2)
+		}
+		if (parsed.Help) {
+			io.write(self:help())
+			return process.exit(0)
+		}
+		return parsed
+	}
+}
+
+// A parser for a script's arguments.
+function parser(settings: ParserSettings?): Parser {
+	return Parser(settings)
+}
+
+return { parser = parser }

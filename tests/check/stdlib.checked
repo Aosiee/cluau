@@ -1,0 +1,42 @@
+stdlib.cluau:9:35: Expected this to be '("a" | "r" | "w")?', but got '"x"'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be '"a" | "r" | "w"', but got '"x"'; none of the union options are compatible
+stdlib.cluau:10:12: Expected this to be 'number | string', but got '{|  |}'; none of the union options are compatible
+stdlib.cluau:11:1: Expected this to be 'string', but got '{string}'
+stdlib.cluau:12:40: Expected this to be
+	'SpawnOptions?'
+but got
+	'{| stderr: "capture" |}'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly
+	'SpawnOptions'
+but got
+	'{| stderr: "capture" |}'
+caused by:
+  Property 'stderr' is not compatible.
+Expected this to be exactly '("inherit" | "merge")?', but got '"capture"'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly '"inherit" | "merge"', but got '"capture"'; none of the union options are compatible
+stdlib.cluau:13:1: Expected this to be 'string', but got 'boolean'
+stdlib.cluau:14:1: Expected this to be 'string', but got 'number'
+stdlib.cluau:15:22: Expected this to be 'Options?', but got '{| utc: string |}'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly 'Options', but got '{| utc: string |}'
+caused by:
+  Property 'utc' is not compatible.
+Expected this to be exactly 'boolean?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly 'boolean', but got 'string'
+stdlib.cluau:17:1: Value of type 'Parsed?' could be nil
+stdlib.cluau:18:1: Expected this to be exactly '{string}', but got '{{string}}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'string', but got '{string}'
+stdlib.cluau:19:7: Type 'unknown' does not have key 'key'
+cluau check: 10 error(s), 0 warning(s)
+exit: 1

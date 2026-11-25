@@ -30,7 +30,8 @@ class Player {
 
 It is also a scripting language on its own: `cluau script.cluau` runs a
 script the way `python script.py` does, with a REPL, `require` for other
-files and a standard library for files, paths, processes and JSON, and
+files and a standard library for files, paths, processes, JSON, times,
+command-line arguments and CSV, and
 `cluau check script.cluau` type-checks it (and the modules it requires)
 without running it.
 

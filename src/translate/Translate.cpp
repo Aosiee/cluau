@@ -1732,7 +1732,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.8.0";
+		return "0.9.0";
 	}
 
 } // namespace cluau

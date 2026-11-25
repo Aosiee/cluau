@@ -389,8 +389,22 @@ __cluau_meta = {
 			{
 				lua_getfield(L, LUA_REGISTRYINDEX, detail::kStdRegistry);
 				lua_getfield(L, -1, name.c_str() + 5);
-				if (lua_isnil(L, -1))
+				if (!lua_isnil(L, -1))
+					return 1;
+				lua_pop(L, 1);
+				// A module written in cluau: loaded once, then kept with the others.
+				auto source = detail::StdSources().find(name.substr(5));
+				if (source == detail::StdSources().end())
 					luaL_error(L, "no standard module '%s' (the standard modules: %s)", name.c_str(), detail::StdNames());
+				std::string error;
+				if (rt.Load(L, source->second, name, false, true, error) != LoadStatus::Ok)
+				{
+					lua_pushlstring(L, error.data(), error.size());
+					lua_error(L);
+				}
+				lua_call(L, 0, 1);
+				lua_pushvalue(L, -1);
+				lua_setfield(L, -3, name.c_str() + 5);
 				return 1;
 			}
 			if (StartsWith(name, "@"))

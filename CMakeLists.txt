@@ -57,8 +57,15 @@ if(CLUAU_BUILD_RUNTIME)
     # The strict rules, over Luau's analysis.
     add_library(cluau_check STATIC src/check/Check.cpp)
     target_link_libraries(cluau_check PUBLIC cluau_translator Luau.Analysis)
+    # The standard modules written in cluau, embedded as text.
+    file(GLOB CLUAU_STD_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/std/*.cluau)
+    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp
+        COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp
+            -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/std -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_std.cmake
+        DEPENDS ${CLUAU_STD_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_std.cmake
+        COMMENT "Embedding the standard modules written in cluau")
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
-        src/runtime/Check.cpp)
+        src/runtime/Check.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis)
     # The REPL's line editor (history, editing, completion): Luau's copy of

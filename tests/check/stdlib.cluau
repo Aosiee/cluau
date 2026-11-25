@@ -1,0 +1,20 @@
+// Mistakes with the standard library that cluau check reports.
+const fs = require("@std/fs")
+const process = require("@std/process")
+const json = require("@std/json")
+const time = require("@std/time")
+const args = require("@std/args")
+const csv = require("@std/csv")
+
+const file = fs.open("notes.txt", "x")                     // the mode is "r", "w" or "a"
+file:write({})                                             // text or numbers
+const count: string = fs.glob("*.txt")                     // a list of paths
+const child = process.spawn({ "cat" }, { stderr = "capture" }) // spawn inherits or merges stderr
+const late: string = process.run("ls", { timeout = 1 }).timedOut
+const when: string = time.parse("2026-01-01")              // a number of seconds
+time.iso(time.now(), { utc = "yes" })                      // utc is a boolean
+const parsed = args.parser({ name = "tool" }):tryParse({})
+parsed:flag("verbose")                                     // tryParse may give nil
+const rows: { string } = csv.parse("a,b")                  // rows of fields
+print(json.decode("{}", { null = json.null }).key)          // decode gives unknown
+print(file, count, child, late, when, rows)

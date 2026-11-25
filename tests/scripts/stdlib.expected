@@ -1,0 +1,52 @@
+glob *.txt:	a.txt
+glob **/*.txt:	a.txt src/c.txt src/deep/d.txt
+glob src/*/[d-e].*:	src/deep/d.txt src/deep/e.log
+glob nothing:	0
+lines:	first|second|3
+readLine:	first	read(3):	sec	at:	9
+rest:	"ond\r\n3\n"	at the end:	nil
+closed:	false
+buffer:	4	1	4	4
+environment:	here
+iso:	2026-11-24T20:05:09.250Z	2026-03-01T00:00:00Z
+format:	2026-11-24 20:05:09
+parts:	2026	11	24	20	5	9	250	2	328	0
+fromParts:	true
+carry over:	2027-01-01T00:00:00Z
+bad text:	false
+monotonic:	true
+null dropped:	{"b":{},"c":[],"d":{"1":1,"3":3}}
+null kept:	{"a":null,"b":{},"c":[],"d":[1,null,3]}
+markers:	{"array":[],"object":{},"plain":[]}
+timed out:	true
+in time:	false	0	quick
+spawned:	tick 1
+spawned:	tick 2
+spawned:	tick 3
+spawned exit:	0
+spawned echo:	THROUGH STANDARD INPUT	0
+args:	true	3	in.txt	a,b	x,--y
+defaults:	false	1	0
+args error:	true	--count takes a number, not 'x'
+args error:	true	unknown option --nope
+args error:	true	missing input
+args error:	true	-n needs a value
+usage: tool [-v] [-n COUNT] [--tag TAG] input [rest...]
+
+Does a thing.
+
+positional arguments:
+  input              the file to read
+  rest               everything else
+
+options:
+  -h, --help         show this help and exit
+  -v, --verbose      say more
+  -n, --count COUNT  how many (default: 1)
+      --tag TAG      a tag
+csv rows:	3	says "hi", then leaves	"two\nlines"
+csv records:	ada	36	""
+"plain,\"has,comma\",\"has \"\"quote\"\"\"\n1,true,\n"
+"name,age,city\nada,36,\n"
+cleaned:	true
+exit: 0

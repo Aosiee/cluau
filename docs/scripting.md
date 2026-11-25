@@ -3,8 +3,8 @@
 The `cluau` tool runs cluau as a scripting language, the way `python` runs
 Python: no host, no build step. A script is translated in *script mode*,
 compiled by Luau and run on Luau's VM, with `require` for other files and a
-small standard library for files, paths, processes, standard input and
-output, and JSON.
+standard library for files, paths, processes, standard input and output,
+JSON, dates and times, command-line arguments and CSV.
 
 ```
 #!/usr/bin/env cluau
@@ -321,6 +321,21 @@ standard input, `nil` at its end), and these modules:
 | `rename(from, to)`, `copy(from, to)` | moves, or copies (directories recursively) |
 | `size(path): number`, `modified(path): number` | the size in bytes; the last change, in seconds since 1970 |
 | `tempDir(): string` | the system's temporary directory |
+| `tempFile(prefix?): string` | a new, empty file of the script's own in the temporary directory |
+| `glob(pattern): {string}` | the paths matching a pattern, sorted: `*`, `?` and `[a-z]` within a name, `**` for any number of directories (`fs.glob("src/**/*.cluau")`); names starting with `.` match only a pattern that does |
+| `lines(path)` | the file's lines one by one, for a `for` loop (`for (line in fs.lines("log.txt")) { }`) |
+| `open(path, mode?): File` | a file to read (`"r"`, the default), write from empty (`"w"`) or add to (`"a"`) |
+| `readBuffer(path): buffer`, `writeBuffer(path, bytes)` | the file's bytes as a Luau `buffer`, and back |
+
+A `File` reads and writes as it goes, bytes unchanged:
+
+| method | does |
+|---|---|
+| `read(count?): string?` | `count` bytes (`nil` at the end), or without a count everything left |
+| `readLine(): string?`, `lines()` | a line without its line break (`nil` at the end); every line, for a `for` loop |
+| `write(...)` | writes its arguments (text or numbers) |
+| `seek(offset?, from?): number` | moves to `offset` from `"set"` (the start, the default), `"current"` or `"end"`; the position |
+| `flush()`, `close()` | a file closes by itself once nothing refers to it; `close` does it now |
 
 A failure is an error naming the call, the path and why
 (`fs.read: cannot read 'x.txt': no such file or directory`); `pcall` it to
@@ -343,9 +358,11 @@ every platform, Windows included (which accepts them).
 | `platform: string` | `"linux"`, `"macos"`, `"windows"` or `"other"` |
 | `executable: string` | the path of the running `cluau` (to start another script with the same one) |
 | `env(name): string?`, `setEnv(name, value?)` | an environment variable (`nil` unsets it) |
+| `environment(): { [string]: string }` | every environment variable |
 | `cwd(): string`, `chdir(dir)` | the working directory |
-| `run(command, options?): { code: number, output: string, error: string }` | runs a command to its end, capturing its standard output |
-| `exec(command, options?): number` | runs a command with the script's own output; its exit code |
+| `run(command, options?): { code: number, output: string, error: string, timedOut: boolean }` | runs a command to its end, capturing its standard output |
+| `exec(command, options?): (number, boolean)` | runs a command with the script's own output; its exit code, and whether it timed out |
+| `spawn(command, options?): Child` | starts a command that runs alongside the script |
 | `sleep(seconds)` | waits |
 | `exit(code?)` | ends the script (0 by default) |
 
@@ -366,6 +383,7 @@ The options (a table, all optional):
 | `cwd: string` | the directory it runs in |
 | `env: { [string]: string }` | variables set on top of the script's environment |
 | `stderr` (run only) | `"inherit"` (the default: it goes where the script's goes), `"capture"` (into `error`) or `"merge"` (into `output`, in order) |
+| `timeout: number` (run and exec) | seconds it may take; past them the command, and anything it started, is killed and `timedOut` is true |
 
 ```
 const process = require("@std/process")
@@ -380,6 +398,32 @@ const sorted = process.run({ "sort" }, { input = "b\na\n" }).output
 A program that cannot be started (not found, not executable, a missing
 `cwd`) is an error; a program that starts and fails is its exit code.
 
+`spawn` is for a command whose output the script reads while it runs (a
+build's progress, a server's log) or one it talks to. It takes `cwd`, `env`,
+`stderr = "inherit" | "merge"`, and `input = true` to write the command's
+standard input. The `Child` it returns:
+
+| method | does |
+|---|---|
+| `readLine(): string?`, `lines()` | the next line of its output (`nil` once it has ended); every line, for a `for` loop |
+| `read(): string?` | whatever output there is next |
+| `write(...)`, `closeInput()` | sends text to its standard input; ends it |
+| `wait(): number` | waits for it to end (closing its input first), keeping any output left for `read`; its exit code |
+| `kill()` | ends it, and anything it started |
+| `id(): number` | its process id |
+
+```
+const process = require("@std/process")
+
+const build = process.spawn({ "make", "-j8" }, { stderr = "merge" })
+for (line in build:lines()) {
+	if (string.find(line, "error", 1, true)) {
+		print("!", line)
+	}
+}
+print("make exited with", build:wait())
+```
+
 ### `@std/io`
 
 `write(...)` writes its arguments to standard output with no separator and
@@ -389,12 +433,97 @@ string?` reads a line (without its newline; `nil` at the end of input);
 
 ### `@std/json`
 
-`encode(value, pretty?): string` and `decode(text): any`. `pretty` is
-`true` (two spaces) or an indent string. Objects' keys are written sorted,
-so the output is the same every run; a table whose keys are `1..n` is an
-array, and an empty table is `[]`. `null` decodes to `nil` (a key whose
-value is `null` is absent). A value with no JSON form (a function, a
-table that contains itself, NaN) is an error.
+`encode(value, pretty?): string` and `decode(text, options?): unknown`.
+`pretty` is `true` (two spaces) or an indent string. Objects' keys are
+written sorted, so the output is the same every run; a table whose keys are
+`1..n` is an array, and an empty table is `[]`. A value with no JSON form
+(a function, a table that contains itself, NaN) is an error.
+
+- `null` decodes to `nil`, so a key whose value is `null` is absent and an
+  array's `null` leaves a gap. `decode(text, { null = json.null })` decodes
+  it to `json.null` instead, which encodes as `null` again.
+- `json.object(t?)` and `json.array(t?)` mark a table (or a new one) to
+  encode as an object or an array: `json.object()` is `{}`, not `[]`. An
+  empty object decodes marked, so it encodes as `{}` again.
+
+### `@std/time`
+
+A time is a number: seconds since 1970-01-01 UTC, with a fraction. The
+functions that read or write calendar fields take `{ utc = true }`;
+without it they use the system's local time zone.
+
+| function | is |
+|---|---|
+| `now(): number` | the current time |
+| `monotonic(): number` | seconds on a clock that only moves forward, for measuring how long something takes |
+| `parse(text): number` | an ISO 8601 date or date and time: `2026-11-24`, `2026-11-24T21:05`, `2026-11-24 21:05:09.25+01:00`, `...Z`. A date alone is UTC midnight; a time without an offset is local |
+| `iso(t?, options?): string` | `2026-11-24T21:05:09.250+01:00` (`...Z` in UTC) |
+| `format(t, pattern, options?): string` | `strftime`'s patterns: `%Y-%m-%d %H:%M:%S`, `%A`, `%B`, ... |
+| `parts(t?, options?)` | `{ year, month, day, hour, minute, second, millisecond, weekday, yearday, offset }`: `weekday` 1 is Monday, `offset` is seconds east of UTC |
+| `fromParts(parts, options?): number` | the time those fields name (all but `year` optional); a field past its range carries over, so day 32 is the next month's first |
+
+```
+const time = require("@std/time")
+const start = time.monotonic()
+const due = time.parse("2026-12-01") + 7 * 24 * 3600
+print("due", time.format(due, "%A %d %B", { utc = true }), "took", time.monotonic() - start)
+```
+
+### `@std/args`
+
+A script's command line, parsed against what it declares it takes, with a
+generated `--help`:
+
+```
+const args = require("@std/args")
+
+const cli = args.parser({ name = "resize", description = "Resizes images." })
+cli:flag("verbose", { short = "v", help = "say what is done" })
+cli:option("width", { short = "w", help = "the new width", default = "800", number = true })
+cli:option("tag", { help = "a tag to add", many = true })
+cli:positional("files", { help = "the images", many = true, required = true })
+const options = cli:parse()
+
+for (_, file in options:list("files")) {
+	if (options:flag("verbose")) {
+		print(`resizing {file} to {options:number("width")}`)
+	}
+}
+```
+
+- `flag(name, { short?, help? })` is a switch: `--verbose`, `-v`.
+- `option(name, { short?, help?, default?, value?, many?, number? })` takes a
+  value: `--width 640`, `--width=640`, `-w 640`, `-w640`. `many` keeps every
+  value given; `number` refuses one that is not a number; `value` names it
+  in the help (`--width PIXELS`).
+- `positional(name, { help?, many?, optional?, required? })` is an argument
+  by its place: one (required unless `optional`), or with `many` every one
+  left (none or more; one or more with `required`). After `--`, every
+  argument is positional.
+- Short flags combine (`-vq`); `-h` and `--help` print the help.
+- `parse(list?)` reads `process.args` (or `list`). With `--help` it prints
+  the help and exits; with a mistake (an unknown option, a missing value, a
+  value that is not a number, a missing positional) it prints the mistake
+  and the usage to standard error and exits with status 2. `tryParse(list?)`
+  returns the result, or `nil` and the mistake, instead.
+- The result: `flag(name): boolean`, `get(name): string?` (an option's
+  value or its default, or a single positional), `number(name): number?`,
+  `list(name): {string}`.
+- `usage()` and `help()` are the texts it prints.
+
+### `@std/csv`
+
+Comma-separated values, quoted as RFC 4180 has it (a field holding the
+separator, a quote or a line break is quoted, with `""` for a quote):
+
+| function | is |
+|---|---|
+| `parse(text, options?): {{string}}` | every row's fields |
+| `records(text, options?): {{[string]: string}}` | the rows after the first, keyed by the first row's names |
+| `encode(rows, options?): string` | rows (of text, numbers or booleans) as CSV, each line ending in `\n` |
+| `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order |
+
+`options.separator` is another one-character separator (`";"`, `"\t"`).
 
 ## Embedding the runtime
 

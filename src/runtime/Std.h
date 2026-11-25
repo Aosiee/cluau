@@ -3,6 +3,7 @@
 // The standard modules `require("@std/<name>")` returns, and the globals
 // scripts get beyond Luau's own libraries (`input`, `repr`).
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,10 @@ namespace cluau::runtime::detail {
 
 	// The standard modules' names, for error messages ("fs, io, ...").
 	const char* StdNames();
+
+	// The standard modules written in cluau (src/runtime/std/<name>.cluau),
+	// by name: loaded on their first require, typed from their source.
+	const std::map<std::string, std::string>& StdSources();
 
 	// After a read of standard input came back empty-handed: when a Ctrl-C
 	// stopped it, raises the `interrupted` error (and does not return).

@@ -1,0 +1,133 @@
+// @std/csv: comma-separated values (RFC 4180): fields quoted with `"` when
+// they hold the separator, a quote or a line break, a doubled `""` for a
+// quote inside one.
+//
+//   csv.parse("name,age\nada,36\n")      // { { "name", "age" }, { "ada", "36" } }
+//   csv.records("name,age\nada,36\n")    // { { name = "ada", age = "36" } }
+//   csv.encode({ { "name", "age" }, { "ada", 36 } })
+
+export type Options = { separator: string? }
+export type Field = string | number | boolean
+
+function Separator(options: Options?): string {
+	const separator = if (options != nil) options.separator or "," else ","
+	if (#separator != 1 || separator == "\"" || separator == "\n" || separator == "\r") {
+		error(`csv: the separator is one character (not a quote or a line break), not '{separator}'`, 3)
+	}
+	return separator
+}
+
+// Every row's fields, as text. A line break inside quotes is part of the
+// field; a final line break ends the last row without starting another.
+function parse(text: string, options: Options?): { { string } } {
+	const separator = Separator(options)
+	const rows: { { string } } = {}
+	let row: { string } = {}
+	let field: { string } = {}
+	let i = 1
+	const n = #text
+	let atRowStart = true
+	while (i <= n) {
+		const c = string.sub(text, i, i)
+		atRowStart = false
+		if (c == "\"" && #field == 0) {
+			// A quoted field: to the closing quote, "" being a quote.
+			i += 1
+			let closed = false
+			while (i <= n) {
+				const q = string.sub(text, i, i)
+				if (q == "\"") {
+					if (string.sub(text, i + 1, i + 1) == "\"") {
+						table.insert(field, "\"")
+						i += 2
+					} else {
+						i += 1
+						closed = true
+						break
+					}
+				} else {
+					table.insert(field, q)
+					i += 1
+				}
+			}
+			if (!closed) {
+				error("csv.parse: a quoted field has no closing quote", 2)
+			}
+		} else if (c == separator) {
+			table.insert(row, table.concat(field))
+			field = {}
+			i += 1
+		} else if (c == "\n" || c == "\r") {
+			table.insert(row, table.concat(field))
+			table.insert(rows, row)
+			row = {}
+			field = {}
+			i += if (c == "\r" && string.sub(text, i + 1, i + 1) == "\n") 2 else 1
+			atRowStart = true
+		} else {
+			table.insert(field, c)
+			i += 1
+		}
+	}
+	if (!atRowStart || #row > 0 || #field > 0) {
+		table.insert(row, table.concat(field))
+		table.insert(rows, row)
+	}
+	return rows
+}
+
+// The rows after the first, as tables keyed by the first row's names.
+function records(text: string, options: Options?): { { [string]: string } } {
+	const rows = parse(text, options)
+	const out: { { [string]: string } } = {}
+	const header = rows[1]
+	if (header == nil) {
+		return out
+	}
+	for (r = 2, #rows) {
+		const record: { [string]: string } = {}
+		for (c, name in header) {
+			record[name] = rows[r][c] or ""
+		}
+		table.insert(out, record)
+	}
+	return out
+}
+
+function Quote(value: Field, separator: string): string {
+	const text = tostring(value)
+	if (string.find(text, separator, 1, true) || string.find(text, "[\"\r\n]")) {
+		return "\"" .. string.gsub(text, "\"", "\"\"") .. "\""
+	}
+	return text
+}
+
+// Rows as CSV text, each line ended by "\n".
+function encode(rows: { { Field } }, options: Options?): string {
+	const separator = Separator(options)
+	const lines: { string } = {}
+	for (_, row in rows) {
+		const fields: { string } = {}
+		for (_, value in row) {
+			table.insert(fields, Quote(value, separator))
+		}
+		table.insert(lines, table.concat(fields, separator) .. "\n")
+	}
+	return table.concat(lines)
+}
+
+// Records as CSV text: a header row of `columns`, then each record's values
+// in that order ("" for a missing one).
+function encodeRecords(list: { { [string]: Field } }, columns: { string }, options: Options?): string {
+	const rows: { { Field } } = { columns }
+	for (_, record in list) {
+		const row: { Field } = {}
+		for (_, name in columns) {
+			table.insert(row, record[name] or "")
+		}
+		table.insert(rows, row)
+	}
+	return encode(rows, options)
+}
+
+return { parse = parse, records = records, encode = encode, encodeRecords = encodeRecords }

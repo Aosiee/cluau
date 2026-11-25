@@ -1,0 +1,129 @@
+// The standard library's 0.9 additions: fs.glob, files, buffers and
+// temporary files, process.environment, @std/time (in UTC: the same on every
+// machine), JSON's null and markers, process.run's timeout, process.spawn,
+// @std/args and @std/csv.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const json = require("@std/json")
+const time = require("@std/time")
+const args = require("@std/args")
+const csv = require("@std/csv")
+const io = require("@std/io")
+
+// fs.glob, in a scratch directory of its own.
+const dir = path.join(fs.tempDir(), `cluau-stdlib-{process.platform}-{math.floor(time.now() * 1000)}`)
+fs.mkdir(path.join(dir, "src", "deep"))
+for (_, name in { "a.txt", "b.md", ".hidden.txt", "src/c.txt", "src/deep/d.txt", "src/deep/e.log" }) {
+	fs.write(path.join(dir, name), name)
+}
+function Shown(list: { string }): string {
+	const out: { string } = {}
+	for (_, file in list) {
+		table.insert(out, path.relative(file, dir))
+	}
+	return table.concat(out, " ")
+}
+print("glob *.txt:", Shown(fs.glob(path.join(dir, "*.txt"))))
+print("glob **/*.txt:", Shown(fs.glob(path.join(dir, "**", "*.txt"))))
+print("glob src/*/[d-e].*:", Shown(fs.glob(path.join(dir, "src", "*", "[d-e].*"))))
+print("glob nothing:", #fs.glob(path.join(dir, "*.none")))
+
+// Files: written in pieces, read by lines, by count and whole.
+const notes = path.join(dir, "notes.txt")
+const out = fs.open(notes, "w")
+out:write("first\n", "second\r\n", 3, "\n")
+out:close()
+const lines: { string } = {}
+for (line in fs.lines(notes)) {
+	table.insert(lines, line)
+}
+print("lines:", table.concat(lines, "|"))
+const file = fs.open(notes)
+print("readLine:", file:readLine(), "read(3):", file:read(3), "at:", file:seek())
+print("rest:", repr(file:read()), "at the end:", file:read(1))
+file:close()
+print("closed:", (pcall(function() {
+	return file:read()
+})))
+
+// Bytes through buffers, and a temporary file.
+const scratch = fs.tempFile("cluau-stdlib")
+const bytes = buffer.create(4)
+buffer.writeu32(bytes, 0, 0x04030201)
+fs.writeBuffer(scratch, bytes)
+const back = fs.readBuffer(scratch)
+print("buffer:", buffer.len(back), buffer.readu8(back, 0), buffer.readu8(back, 3), fs.size(scratch))
+fs.remove(scratch)
+
+// The environment, whole.
+process.setEnv("CLUAU_STDLIB_TEST", "here")
+print("environment:", process.environment().CLUAU_STDLIB_TEST)
+
+// Times, in UTC.
+const t = time.parse("2026-11-24T21:05:09.250+01:00")
+print("iso:", time.iso(t, { utc = true }), time.iso(time.parse("2026-03-01"), { utc = true }))
+print("format:", time.format(t, "%Y-%m-%d %H:%M:%S", { utc = true }))
+const p = time.parts(t, { utc = true })
+print("parts:", p.year, p.month, p.day, p.hour, p.minute, p.second, p.millisecond, p.weekday, p.yearday, p.offset)
+print("fromParts:", time.fromParts({ year = 2026, month = 11, day = 24, hour = 20, minute = 5, second = 9, millisecond = 250 }, { utc = true }) == t)
+print("carry over:", time.iso(time.fromParts({ year = 2026, month = 12, day = 32 }, { utc = true }), { utc = true }))
+print("bad text:", (pcall(time.parse, "24/11/2026")))
+const before = time.monotonic()
+process.sleep(0.02)
+print("monotonic:", time.monotonic() > before)
+
+// JSON: null kept or dropped, and an empty table's kind chosen.
+const text = '{"a": null, "b": {}, "c": [], "d": [1, null, 3]}'
+print("null dropped:", json.encode(json.decode(text)))
+print("null kept:", json.encode(json.decode(text, { null = json.null })))
+print("markers:", json.encode({ object = json.object(), array = json.array({}), plain = {} }))
+
+// process.run with a time limit; process.spawn line by line.
+const cluau = process.executable
+const slow = process.run({ cluau, "-e", "require('@std/process').sleep(10)" }, { timeout = 0.3 })
+print("timed out:", slow.timedOut)
+const quick = process.run({ cluau, "-e", "print('quick')" }, { timeout = 30 })
+print("in time:", quick.timedOut, quick.code, (string.gsub(quick.output, "%s+$", "")))
+const counter = process.spawn({ cluau, "-e", "for (i = 1, 3) { print('tick ' .. i) }" })
+for (line in counter:lines()) {
+	print("spawned:", (string.gsub(line, "\r", "")))
+}
+print("spawned exit:", counter:wait())
+const echo = process.spawn({ cluau, "-e", "print(string.upper(require('@std/io').readLine() or ''))" }, { input = true })
+echo:write("through standard input\n")
+echo:closeInput()
+print("spawned echo:", (string.gsub(echo:readLine() or "", "\r", "")), echo:wait())
+
+// @std/args.
+const cli = args.parser({ name = "tool", description = "Does a thing." })
+cli:flag("verbose", { short = "v", help = "say more" })
+cli:option("count", { short = "n", help = "how many", default = "1", number = true })
+cli:option("tag", { help = "a tag", many = true })
+cli:positional("input", { help = "the file to read" })
+cli:positional("rest", { help = "everything else", many = true })
+const parsed = cli:tryParse({ "-vn3", "--tag=a", "in.txt", "--tag", "b", "x", "--", "--y" })
+if (parsed != nil) {
+	print("args:", parsed:flag("verbose"), parsed:number("count"), parsed:get("input"), table.concat(parsed:list("tag"), ","),
+		table.concat(parsed:list("rest"), ","))
+}
+const defaults = cli:tryParse({ "only.txt" })
+if (defaults != nil) {
+	print("defaults:", defaults:flag("verbose"), defaults:number("count"), #defaults:list("rest"))
+}
+for (_, bad in { { "--count=x", "a" }, { "--nope", "a" }, {}, { "-n" } }) {
+	const none, problem = cli:tryParse(bad)
+	print("args error:", none == nil, problem)
+}
+io.write(cli:help())
+
+// @std/csv.
+const table_ = csv.parse('name,note\nada,"says ""hi"", then leaves"\n"two\nlines",x\n')
+print("csv rows:", #table_, table_[2][2], repr(table_[3][1]))
+const records = csv.records("name;age\nada;36\nbob;\n", { separator = ";" })
+print("csv records:", records[1].name, records[1].age, repr(records[2].age))
+print(repr(csv.encode({ { "plain", "has,comma", 'has "quote"' }, { 1, true, "" } })))
+print(repr(csv.encodeRecords({ { name = "ada", age = 36 } }, { "name", "age", "city" })))
+
+fs.remove(dir, true)
+print("cleaned:", !fs.exists(dir))

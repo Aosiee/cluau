@@ -30,5 +30,5 @@ false	json.decode: expected ',' or ']' at line 1 column 6
 false	json.encode: a function value has no JSON form
 no newline 42
 0	from a command
-3
+3	false
 exit: 0

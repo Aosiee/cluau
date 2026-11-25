@@ -6,6 +6,7 @@
 #include "cluau/check.h"
 #include "cluau/runtime.h"
 #include "Resolve.h"
+#include "Std.h"
 
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Config.h"
@@ -39,6 +40,15 @@ declare __cluau_meta: unknown
 		{
 			static const std::map<std::string, std::string> modules = {
 				{ "fs", R"LUAU(
+export type File = {
+	read: (self: File, count: number?) -> string?,
+	readLine: (self: File) -> string?,
+	lines: (self: File) -> () -> string?,
+	write: (self: File, ...string | number) -> (),
+	seek: (self: File, offset: number?, from: ("set" | "current" | "end")?) -> number,
+	flush: (self: File) -> (),
+	close: (self: File) -> (),
+}
 local m: any = nil
 return m :: {
 	read: (path: string) -> string,
@@ -56,6 +66,12 @@ return m :: {
 	size: (path: string) -> number,
 	modified: (path: string) -> number,
 	tempDir: () -> string,
+	glob: (pattern: string) -> { string },
+	open: (path: string, mode: ("r" | "w" | "a")?) -> File,
+	lines: (path: string) -> () -> string?,
+	readBuffer: (path: string) -> buffer,
+	writeBuffer: (path: string, bytes: buffer) -> (),
+	tempFile: (prefix: string?) -> string,
 }
 )LUAU" },
 				{ "path", R"LUAU(
@@ -78,9 +94,21 @@ export type RunOptions = {
 	cwd: string?,
 	env: { [string]: string }?,
 	stderr: ("inherit" | "capture" | "merge")?,
+	timeout: number?,
 }
-export type ExecOptions = { input: string?, cwd: string?, env: { [string]: string }? }
-export type RunResult = { code: number, output: string, error: string }
+export type ExecOptions = { input: string?, cwd: string?, env: { [string]: string }?, timeout: number? }
+export type SpawnOptions = { input: boolean?, cwd: string?, env: { [string]: string }?, stderr: ("inherit" | "merge")? }
+export type RunResult = { code: number, output: string, error: string, timedOut: boolean }
+export type Child = {
+	read: (self: Child) -> string?,
+	readLine: (self: Child) -> string?,
+	lines: (self: Child) -> () -> string?,
+	write: (self: Child, ...string | number) -> (),
+	closeInput: (self: Child) -> (),
+	wait: (self: Child) -> number,
+	kill: (self: Child) -> (),
+	id: (self: Child) -> number,
+}
 local m: any = nil
 return m :: {
 	args: { string },
@@ -89,10 +117,12 @@ return m :: {
 	platform: string,
 	env: (name: string) -> string?,
 	setEnv: (name: string, value: string?) -> (),
+	environment: () -> { [string]: string },
 	cwd: () -> string,
 	chdir: (dir: string) -> (),
 	run: (command: string | { string }, options: RunOptions?) -> RunResult,
-	exec: (command: string | { string }, options: ExecOptions?) -> number,
+	exec: (command: string | { string }, options: ExecOptions?) -> (number, boolean),
+	spawn: (command: string | { string }, options: SpawnOptions?) -> Child,
 	sleep: (seconds: number) -> (),
 	exit: (code: number?) -> never,
 }
@@ -111,7 +141,44 @@ return m :: {
 local m: any = nil
 return m :: {
 	encode: (value: unknown, pretty: (boolean | string)?) -> string,
-	decode: (text: string) -> unknown,
+	decode: (text: string, options: { null: unknown }?) -> unknown,
+	null: unknown,
+	object: (<T>(value: T) -> T) & (() -> { [string]: unknown }),
+	array: (<T>(value: T) -> T) & (() -> { unknown }),
+}
+)LUAU" },
+				{ "time", R"LUAU(
+export type Options = { utc: boolean? }
+export type Parts = {
+	year: number,
+	month: number,
+	day: number,
+	hour: number,
+	minute: number,
+	second: number,
+	millisecond: number,
+	weekday: number,
+	yearday: number,
+	offset: number,
+}
+export type PartsGiven = {
+	year: number,
+	month: number?,
+	day: number?,
+	hour: number?,
+	minute: number?,
+	second: number?,
+	millisecond: number?,
+}
+local m: any = nil
+return m :: {
+	now: () -> number,
+	monotonic: () -> number,
+	iso: (t: number?, options: Options?) -> string,
+	parse: (text: string) -> number,
+	format: (t: number, pattern: string, options: Options?) -> string,
+	parts: (t: number?, options: Options?) -> Parts,
+	fromParts: (parts: PartsGiven, options: Options?) -> number,
 }
 )LUAU" },
 			};
@@ -160,6 +227,16 @@ return m :: {
 			{
 				if (StartsWith(name, "@std/"))
 				{
+					// A module written in cluau is typed from its own source.
+					if (auto source = detail::StdSources().find(name.substr(5)); source != detail::StdSources().end())
+					{
+						TranslateOptions options;
+						options.Script = true;
+						options.Profile = &ScriptProfile();
+						// Kept: errors name its classes (Parsed, not its structure).
+						const TranslateResult& t = Translations[name] = Translate(source->second, options);
+						return Luau::SourceCode{ t.Luau, Luau::SourceCode::Module };
+					}
 					auto it = StdTypes().find(name.substr(5));
 					if (it == StdTypes().end())
 						return std::nullopt;
@@ -188,7 +265,7 @@ return m :: {
 				const int line = (int)expr->location.begin.line;
 				if (StartsWith(request, "@std/"))
 				{
-					if (!StdTypes().count(request.substr(5)))
+					if (!StdTypes().count(request.substr(5)) && !detail::StdSources().count(request.substr(5)))
 					{
 						if (context)
 							NotFound[{ context->name, line }] = "no standard module '" + request + "'";
@@ -305,7 +382,10 @@ return m :: {
 				for (const ClassInfo& c : translation.Classes)
 					if (auto it = m->exportedTypeBindings.find(c.Name); it != m->exportedTypeBindings.end())
 					{
-						const std::string printed = Luau::toString(it->second.type);
+						// Its structure, as a copy of the type in another module prints.
+						Luau::ToStringOptions structural;
+						structural.ignoreSyntheticName = true;
+						const std::string printed = Luau::toString(it->second.type, structural);
 						if (printed != c.Name)
 							classNames.emplace_back(printed, c.Name);
 					}
@@ -328,14 +408,22 @@ return m :: {
 				const size_t close = message.find('\'', open + 1);
 				if (close == std::string::npos)
 					break;
-				const std::string quoted = plain(message.substr(open + 1, close - open - 1));
+				std::string quoted = plain(message.substr(open + 1, close - open - 1));
+				// An optional class prints as `t1? where t1 = ...`.
+				std::string suffix;
+				if (const size_t mark = quoted.find("? where "); mark != std::string::npos && mark > 0 &&
+					quoted.find_first_of(" {(<", 0) == mark + 1)
+				{
+					quoted.erase(mark, 1);
+					suffix = "?";
+				}
 				for (const auto& [printed, name] : classNames)
 				{
 					const bool cut = quoted.size() > kCut.size() && quoted.compare(quoted.size() - kCut.size(), kCut.size(), kCut) == 0;
 					const size_t length = cut ? quoted.size() - kCut.size() : quoted.size();
 					if (cut ? printed.compare(0, length, quoted, 0, length) == 0 : printed == quoted)
 					{
-						message.replace(open + 1, close - open - 1, name);
+						message.replace(open + 1, close - open - 1, name + suffix);
 						break;
 					}
 				}
