@@ -151,14 +151,21 @@ namespace cluau::runtime::detail {
 			std::string LocalHost, RemoteHost;
 			int LocalPort = 0, RemotePort = 0;
 
+			std::mutex Using;
+			int Users = 0; // the jobs waiting on it now
+
 			~Socket()
 			{
 				if (Handle != kNoSocket)
 					CloseHandle(Handle);
 			}
 
+			// Closing ends the waits on it (they poll for it), and the handle
+			// is closed as soon as none uses it (no other socket gets its
+			// number under a wait). A closed server stops listening.
 			void Close()
 			{
+				std::lock_guard<std::mutex> lock(Using);
 				if (Closed.exchange(true))
 					return;
 #ifdef _WIN32
@@ -166,6 +173,31 @@ namespace cluau::runtime::detail {
 #else
 				shutdown(Handle, SHUT_RDWR);
 #endif
+				if (Users == 0 && Handle != kNoSocket)
+				{
+					CloseHandle(Handle);
+					Handle = kNoSocket;
+				}
+			}
+
+			// A job's use of the handle: false when it is closed already.
+			bool Enter()
+			{
+				std::lock_guard<std::mutex> lock(Using);
+				if (Closed)
+					return false;
+				Users++;
+				return true;
+			}
+
+			void Leave()
+			{
+				std::lock_guard<std::mutex> lock(Using);
+				if (--Users == 0 && Closed && Handle != kNoSocket)
+				{
+					CloseHandle(Handle);
+					Handle = kNoSocket;
+				}
 			}
 
 			void Addresses()
@@ -181,6 +213,23 @@ namespace cluau::runtime::detail {
 		};
 
 		enum class Ready { Yes, TimedOut, Closed, Failed };
+
+		// A job's hold on a socket while it waits on it.
+		struct Use
+		{
+			Socket& Of;
+			bool Entered;
+			explicit Use(Socket& socket)
+				: Of(socket)
+				, Entered(socket.Enter())
+			{
+			}
+			~Use()
+			{
+				if (Entered)
+					Of.Leave();
+			}
+		};
 
 		// Until the socket can be read (or written), in steps of 100 ms.
 		Ready WaitFor(const Socket& socket, bool write, double timeout)
@@ -414,6 +463,9 @@ namespace cluau::runtime::detail {
 			std::shared_ptr<Socket> server = Check(L, 1, kServerMeta);
 			const double timeout = TimeoutOption(L, 2, "server:accept");
 			return Await(L, [server, timeout]() -> JobResult {
+				Use use(*server);
+				if (!use.Entered)
+					return Failure("server:accept: the socket is closed");
 				const Ready ready = WaitFor(*server, false, timeout);
 				if (ready != Ready::Yes)
 					return Failure("server:accept: " + Why(ready, timeout));
@@ -490,6 +542,9 @@ namespace cluau::runtime::detail {
 		{
 			return Await(L, [socket, kind, count, fn]() -> JobResult {
 				std::lock_guard<std::mutex> reading(socket->Reading);
+				Use use(*socket);
+				if (!use.Entered && socket->Buffer.empty())
+					return Failure(std::string(fn) + ": the socket is closed");
 				std::string why;
 				auto text = std::make_shared<std::string>();
 				bool got = false;
@@ -586,6 +641,9 @@ namespace cluau::runtime::detail {
 			}
 			return Await(L, [socket, data]() -> JobResult {
 				std::lock_guard<std::mutex> writing(socket->Writing);
+				Use use(*socket);
+				if (!use.Entered)
+					return Failure("socket:write: the socket is closed");
 				size_t at = 0;
 				while (at < data.size())
 				{
