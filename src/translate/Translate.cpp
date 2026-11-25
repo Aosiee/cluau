@@ -350,6 +350,9 @@ namespace cluau {
 					k = Sig(Sig(k) + 1) + 1;
 				if (m_Toks[Sig(k)].Is("<"))
 					k = MatchClose(Sig(k)) + 1;
+				// A generic type pack: `R...`.
+				if (m_Toks[Sig(k)].Is("..."))
+					k = Sig(k) + 1;
 				return k;
 			}
 
@@ -2364,7 +2367,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.18.0";
+		return "0.19.0";
 	}
 
 } // namespace cluau

@@ -75,8 +75,8 @@ only computes.
 - `require` loads `.cluau` and `.luau` modules only from under the script's
   directory, its `cluau_modules` and the search path (`CLUAU_PATH`).
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
-  `@std/path` (text only), `@std/args`, `@std/csv` and `@std/test` work as
-  usual, as do Luau's own libraries, which have no file or process access.
+  `@std/path` (text only), `@std/regex`, `@std/task`, `@std/args`,
+  `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -938,6 +938,94 @@ separator, a quote or a line break is quoted, with `""` for a quote):
 | `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order |
 
 `options.separator` is another one-character separator (`";"`, `"\t"`).
+
+### `@std/regex`
+
+Regular expressions, as Perl and Python write them (PCRE2): alternation,
+classes, quantifiers (greedy and lazy), groups (numbered and
+`(?<name>...)`), lookahead and lookbehind, backreferences, `\b`, `\d`,
+`\s`, `\w`, and Unicode properties (`\p{L}`). A pattern is compiled once
+and matched as UTF-8 text: `\w`, `\d` and case-insensitive matching know
+letters beyond ASCII. Positions are 1-based byte offsets, as `string.find`
+gives them.
+
+| function | is |
+|---|---|
+| `compile(pattern, flags?): Regex` | the compiled pattern; `flags` holds `i` (ignore case), `m` (`^` and `$` at each line), `s` (`.` matches a line break), `x` (spaces and `#` comments in the pattern are ignored) |
+| `escape(text): string` | `text` with the pattern's special characters escaped, to match it literally |
+
+A `Regex`'s methods (and `pattern`, its source):
+
+| method | is |
+|---|---|
+| `test(text, start?): boolean` | whether it matches anywhere (from `start`) |
+| `match(text, start?): Match?` | the first match (from `start`) |
+| `matches(text)` | an iterator over every match: `for (m in re:matches(text)) { }` |
+| `replace(text, replacement, count?): (string, number)` | the text with each match (the first `count`) replaced, and how many were. `replacement` is a string, where `$1`..`$99` are groups, `${name}` a named group, `$&` (or `$0`) the match and `$$` a dollar sign; or a function given the `Match`, returning the text |
+| `split(text, limit?): {string}` | the pieces between matches (at most `limit` of them) |
+
+A `Match` is `{ text, start, finish, groups, named }`: the matched text,
+where it starts and ends, the groups by number (a group that took no part
+is `nil`) and by name.
+
+```
+const regex = require("@std/regex")
+const date = regex.compile("(?<year>\\d{4})-(?<month>\\d\\d)-(?<day>\\d\\d)")
+const m = date:match("due 2026-11-25")
+if (m != nil) {
+	print(m.named.year, m.start) // 2026 5
+}
+print(date:replace("2026-11-25", "${day}/${month}/${year}")) // 25/11/2026 1
+```
+
+A pattern that backtracks too long on a text (nested repetition such as
+`(a+)+$`) stops with an error instead of running on.
+
+### `@std/task`
+
+Tasks that run side by side on the script's one thread, for waiting on
+several things at once: each task is a function run as a coroutine, which
+runs until it waits, and the others run meanwhile.
+
+| function | is |
+|---|---|
+| `spawn(fn, ...): Task` | `fn(...)` as a task, started now: it runs until it first waits |
+| `delay(seconds, fn, ...): Task` | `fn(...)` as a task that starts after `seconds` |
+| `wait(seconds?): number` | waits `seconds` (none: lets the tasks due now run), and returns how long it waited |
+| `join(task): ...` | waits for the task to finish, and returns what its function returned (nothing when it was cancelled) |
+| `cancel(task)` | stops the task: it does not run again |
+| `running(): Task?` | the task running now (`nil` in the script's own code) |
+
+A `Task` has `done` (it returned, failed or was cancelled) and
+`cancelled`. `task.join` is typed by the task's function: joining a task
+whose function returns `(string, number)` gives `(string, number)`.
+
+```
+const task = require("@std/task")
+
+const workers: { task.Task<string> } = {}
+for (i = 1, 3) {
+	table.insert(workers, task.spawn(function(): string {
+		task.wait(0.1 * (4 - i)) // the last one started finishes first
+		return `worker {i}`
+	}))
+}
+for (_, worker in workers) {
+	print(task.join(worker)) // worker 1, worker 2, worker 3: 0.3 seconds in all
+}
+```
+
+- The script's own code waits too: `task.wait` outside a task runs the
+  other tasks until its time is up, and `task.join` runs them until the
+  task finishes.
+- Once the script's last line has run, the tasks still waiting run to
+  their end before the script exits.
+- An error in a task is raised where the tasks are being run (a
+  `task.wait` or `task.join` in the script's code, or the script's end),
+  with the task's own stack in the report.
+- Tasks take turns: a task runs until it waits, so a long computation
+  without a `task.wait` holds the others up, and a blocking call (a
+  `process.run`, an `http.get`) blocks them all while it runs.
 
 ## Embedding the runtime
 

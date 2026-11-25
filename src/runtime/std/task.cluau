@@ -1,0 +1,252 @@
+// @std/task: tasks that run side by side on the script's one thread. A task
+// is a function run as a coroutine: it runs until it waits (task.wait, or
+// task.join on another task), and the others run meanwhile.
+//
+//   const task = require("@std/task")
+//   const a = task.spawn(function(): string { task.wait(0.2); return "a" })
+//   const b = task.delay(0.1, function(): string { return "b" })
+//   print(task.join(b), task.join(a)) // b a, after 0.2 seconds in all
+//
+// The script's own code waits too: task.wait outside a task runs the other
+// tasks until the time is up. Once the script's code finishes, the tasks
+// still waiting run to their end before the script exits. An error in a
+// task is raised where the tasks are being run (the task.wait or task.join
+// running them, or the script's end), so none goes unseen.
+
+const time = require("@std/time")
+const process = require("@std/process")
+
+// A task whose function returns R... (what task.join gives back).
+export type Task<R...> = {
+	// The task has finished: returned, failed or was cancelled.
+	done: boolean,
+	cancelled: boolean,
+	// The task's function (its type is what task.join returns).
+	__returns: (...any) -> R...,
+}
+
+type State = {
+	task: Task<any>,
+	thread: thread,
+	started: boolean,
+	args: { any },
+	results: { any },
+	waiters: { State },
+	wake: number,
+	order: number,
+}
+
+// The tasks waiting to run again (or to start), each with when it is due.
+const waiting: { State } = {}
+const states: { [Task<any>]: State } = {}
+const byThread: { [thread]: State } = {}
+const counter = { next = 0 }
+// The last task that failed, and its error: an error that ends the script
+// is reported with that task's stack when it is this one (the runtime's).
+const failure: { message: any, thread: thread? } = { message = nil, thread = nil }
+
+const Due = function(state: State, wake: number) {
+	counter.next += 1
+	state.wake = wake
+	state.order = counter.next
+	table.insert(waiting, state)
+}
+
+const Finish = function(state: State) {
+	state.task.done = true
+	byThread[state.thread] = nil
+	for (_, waiter in state.waiters) {
+		Due(waiter, time.monotonic())
+	}
+	state.waiters = {}
+}
+
+// Runs the task until it waits or ends; its error is raised here.
+const Resume = function(state: State) {
+	let results: { any }
+	if (state.started) {
+		results = table.pack(coroutine.resume(state.thread))
+	} else {
+		state.started = true
+		results = table.pack(coroutine.resume(state.thread, table.unpack(state.args)))
+	}
+	if (!results[1]) {
+		failure.message = results[2]
+		failure.thread = state.thread
+		Finish(state)
+		error(results[2], 0)
+	}
+	if (coroutine.status(state.thread) == "dead") {
+		table.remove(results, 1)
+		state.results = results
+		Finish(state)
+	}
+}
+
+// The first task due (the earliest, then the first made due), taken out.
+const NextDue = function(): State? {
+	let best = 0
+	for (i, state in waiting) {
+		const current = waiting[best]
+		if (best == 0 || state.wake < current.wake || (state.wake == current.wake && state.order < current.order)) {
+			best = i
+		}
+	}
+	if (best == 0) {
+		return nil
+	}
+	return table.remove(waiting, best)
+}
+
+// Runs the waiting tasks as they come due, sleeping between them, until
+// `stop` says to (it is asked between tasks) or `deadline` passes.
+const RunUntil = function(stop: () -> boolean, deadline: number?) {
+	while (!stop()) {
+		const state = NextDue()
+		const now = time.monotonic()
+		if (state == nil) {
+			if (deadline != nil && deadline > now) {
+				process.sleep(deadline - now)
+			}
+			return
+		}
+		if (deadline != nil && state.wake > deadline) {
+			Due(state, state.wake)
+			if (deadline > now) {
+				process.sleep(deadline - now)
+			}
+			return
+		}
+		if (state.wake > now) {
+			process.sleep(state.wake - now)
+		}
+		if (!state.task.done) {
+			Resume(state)
+		}
+	}
+}
+
+const Make = function(fn: (...any) -> ...any, args: { any }): State {
+	const task: Task<any> = { done = false, cancelled = false, __returns = fn }
+	const state: State = {
+		task = task,
+		thread = coroutine.create(fn),
+		started = false,
+		args = args,
+		results = {},
+		waiters = {},
+		wake = 0,
+		order = 0,
+	}
+	states[task] = state
+	byThread[state.thread] = state
+	return state
+}
+
+const Current = function(): State? {
+	const thread = coroutine.running()
+	return byThread[thread]
+}
+
+// Starts `fn(...)` as a task now: it runs until it first waits.
+const spawn = function<R...>(fn: (...any) -> R..., ...: any): Task<R...> {
+	const state = Make(fn, table.pack(...))
+	Resume(state)
+	return state.task
+}
+
+// Starts `fn(...)` as a task after `seconds`.
+const delay = function<R...>(seconds: number, fn: (...any) -> R..., ...: any): Task<R...> {
+	const state = Make(fn, table.pack(...))
+	Due(state, time.monotonic() + math.max(0, seconds))
+	return state.task
+}
+
+// Waits `seconds` (none: until the other tasks due now have run), letting
+// the other tasks run; returns the seconds it waited.
+const wait = function(seconds: number?): number {
+	const start = time.monotonic()
+	const due = start + math.max(0, seconds or 0)
+	const state = Current()
+	if (state != nil) {
+		Due(state, due)
+		coroutine.yield()
+	} else {
+		// The script's own code (or a coroutine that is not a task): the
+		// tasks due by then run here, and the time left is slept.
+		RunUntil(function(): boolean {
+			return false
+		}, due)
+	}
+	return time.monotonic() - start
+}
+
+// Waits for the task to finish; returns what it returned (nothing when it
+// was cancelled).
+const join = function<R...>(task: Task<R...>): R... {
+	const target = states[task]
+	if (target == nil) {
+		error("task.join: not a task", 2)
+	}
+	if (!task.done) {
+		const state = Current()
+		if (state == target) {
+			error("task.join: a task cannot wait for itself", 2)
+		}
+		if (state != nil) {
+			table.insert(target.waiters, state)
+			coroutine.yield()
+		} else {
+			RunUntil(function(): boolean {
+				return task.done
+			})
+			if (!task.done) {
+				error("task.join: the task can never finish (no other task is waiting to run)", 2)
+			}
+		}
+	}
+	return table.unpack(target.results)
+}
+
+// Stops the task: it does not run again, and what joins it gets nothing.
+const cancel = function<R...>(task: Task<R...>) {
+	const state = states[task]
+	if (state == nil || task.done) {
+		return
+	}
+	task.cancelled = true
+	for (i, each in waiting) {
+		if (each == state) {
+			table.remove(waiting, i)
+			break
+		}
+	}
+	Finish(state)
+	if (Current() == state) {
+		coroutine.yield() // never resumed
+	}
+}
+
+// The task running now (nil in the script's own code).
+const running = function(): Task<...unknown>? {
+	const state = Current()
+	return if (state != nil) state.task else nil
+}
+
+// The runtime's, at the end of the script: the waiting tasks run to the end.
+const _run = function() {
+	RunUntil(function(): boolean {
+		return #waiting == 0
+	})
+}
+
+return {
+	spawn = spawn,
+	delay = delay,
+	wait = wait,
+	join = join,
+	cancel = cancel,
+	running = running,
+	_run = _run,
+	_failure = failure,
+}

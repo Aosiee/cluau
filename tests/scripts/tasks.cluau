@@ -1,0 +1,59 @@
+// @std/task: tasks that wait, in the order they come due; joining, results,
+// cancelling, the script's own waits, and the tasks left at the end.
+const task = require("@std/task")
+
+const log: { string } = {}
+function Note(text: string) {
+	table.insert(log, text)
+	print(text)
+}
+
+const slow = task.spawn(function(name: string): string {
+	Note(`{name} starts`)
+	task.wait(0.06)
+	Note(`{name} ends`)
+	return name
+}, "slow")
+const fast = task.delay(0.02, function(): (string, number) {
+	Note("fast runs")
+	return "fast", 2
+})
+Note("the script goes on")
+print(slow.done, fast.done)
+
+const name, count = task.join(fast)
+print("joined", name, count)
+print("joined", task.join(slow), slow.done)
+
+// A task that waits for another.
+const inner = task.delay(0.01, function(): number {
+	return 40
+})
+const outer = task.spawn(function(): number {
+	return task.join(inner) + 2
+})
+print("outer", task.join(outer))
+
+// Cancelled before it ran: joining gives nothing.
+const never = task.delay(5, function() {
+	Note("never runs")
+})
+task.cancel(never)
+print("cancelled", never.done, never.cancelled, select("#", task.join(never)))
+
+// The script's own wait lets the others run.
+task.spawn(function() {
+	for (i = 1, 2) {
+		task.wait(0.01)
+		Note(`tick {i}`)
+	}
+})
+const waited = task.wait(0.3)
+print("waited enough", waited >= 0.25)
+print(task.running() == nil)
+
+// Left to run after the script's last line.
+task.delay(0.01, function() {
+	print("after the end")
+})
+print("last line")

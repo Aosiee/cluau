@@ -1,0 +1,7 @@
+the script's code is done
+task_error.cluau:5: the task failed
+stack backtrace (in the task):
+[C] function error
+task_error.cluau:5
+    error("the task failed")
+exit: 1

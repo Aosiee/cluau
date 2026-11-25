@@ -107,6 +107,28 @@ if(CLUAU_BUILD_RUNTIME)
         set_property(DIRECTORY ${curl_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
     endif()
 
+    # @std/regex: PCRE2 (Perl-compatible regular expressions), fetched at a
+    # release and linked statically, 8-bit with Unicode, without its JIT.
+    option(CLUAU_REGEX "Build @std/regex (fetches PCRE2)" ON)
+    if(CLUAU_REGEX)
+        include(FetchContent)
+        foreach(setting
+                PCRE2_BUILD_PCRE2_8=ON PCRE2_BUILD_PCRE2_16=OFF PCRE2_BUILD_PCRE2_32=OFF PCRE2_SUPPORT_UNICODE=ON
+                PCRE2_SUPPORT_JIT=OFF PCRE2_BUILD_PCRE2GREP=OFF PCRE2_BUILD_TESTS=OFF PCRE2_SHOW_REPORT=OFF
+                BUILD_SHARED_LIBS=OFF BUILD_STATIC_LIBS=ON PCRE2_STATIC_PIC=ON)
+            string(REPLACE "=" ";" pair ${setting})
+            list(GET pair 0 name)
+            list(GET pair 1 value)
+            set(${name} ${value} CACHE BOOL "" FORCE)
+        endforeach()
+        FetchContent_Declare(pcre2
+            URL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.bz2
+            URL_HASH SHA256=53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(pcre2)
+        set_property(DIRECTORY ${pcre2_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+
     # The strict rules, over Luau's analysis.
     add_library(cluau_check STATIC src/check/Check.cpp)
     target_link_libraries(cluau_check PUBLIC cluau_translator Luau.Analysis)
@@ -123,6 +145,11 @@ if(CLUAU_BUILD_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
+    if(CLUAU_REGEX)
+        target_sources(cluau_runtime PRIVATE src/runtime/Regex.cpp)
+        target_link_libraries(cluau_runtime PRIVATE pcre2-8-static)
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_REGEX PCRE2_CODE_UNIT_WIDTH=8 PCRE2_STATIC)
+    endif()
     if(CLUAU_HTTP)
         target_sources(cluau_runtime PRIVATE src/runtime/Http.cpp)
         target_link_libraries(cluau_runtime PRIVATE CURL::libcurl)

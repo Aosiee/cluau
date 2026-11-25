@@ -1,0 +1,25 @@
+2026-11-25	5	14	2026	11	25
+true	true	false
+2026-12-01
+found	2026-01-02	3
+found	2027-03-04	16
+11/25/2026 and 12/01/2026	2
+[2026-11-25] and 2026-12-01	1
+-a-b-c-	4
+-b--c-	4
+1 2 3	3
+cost $5	1
+a|b|c|d
+a|b|c
+a|b,c,d
+<héllo> <wörld>	2
+true	true	true
+true
+a\.b\*c	false	true
+true	b
+Regex((?<year>\d{4})-(?<month>\d\d)-(\d\d))	(?<year>\d{4})-(?<month>\d\d)-(\d\d)
+false	regex.cluau:43: bad regex at position 10: missing closing parenthesis
+false	regex.cluau:46: unknown regex flag 'q' (the flags: i, m, s, x)
+false	regex.cluau:49: the replacement names group 'day', which the pattern does not have
+false	regex.cluau:52: the regex gave up: the pattern backtracks too much on this text ((a+)+$)
+exit: 0

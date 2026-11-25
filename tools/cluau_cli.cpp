@@ -93,7 +93,7 @@ namespace {
 		"command (cluau --sandbox -e '...', cluau --sandbox test).\n"
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
 		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
-		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/args and @std/csv.\n";
+		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/regex, @std/task, @std/args and @std/csv.\n";
 
 	bool g_Sandbox = false; // --sandbox
 	bool g_Native = true;   // --no-native turns it off

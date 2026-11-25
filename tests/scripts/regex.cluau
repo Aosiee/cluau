@@ -1,0 +1,53 @@
+// @std/regex: matching, groups, iteration, replacing, splitting, flags,
+// Unicode, escaping and the errors.
+const regex = require("@std/regex")
+
+const date = regex.compile("(?<year>\\d{4})-(?<month>\\d\\d)-(\\d\\d)")
+const m = date:match("due 2026-11-25, paid 2026-12-01")
+if (m != nil) {
+	print(m.text, m.start, m.finish, m.groups[1], m.named.month, m.groups[3])
+}
+print(date:match("no dates here") == nil, date:test("2026-01-01"), date:test("2026-01-01", 2))
+const later = date:match("due 2026-11-25, paid 2026-12-01", 10)
+print(if (later != nil) later.text else "none")
+
+for (found in date:matches("a 2026-01-02 b 2027-03-04")) {
+	print("found", found.text, found.start)
+}
+
+print(date:replace("2026-11-25 and 2026-12-01", "${month}/$3/$1"))
+print(date:replace("2026-11-25 and 2026-12-01", "[$&]", 1))
+print(regex.compile("x*"):replace("abc", "-"))
+print(regex.compile("a*"):replace("baac", "-"))
+print(regex.compile("\\d+"):replace("1 22 333", function(match: regex.Match): string {
+	return tostring(#match.text)
+}))
+print(regex.compile("\\$"):replace("cost $5", "$$"))
+
+print(table.concat(regex.compile("\\s*,\\s*"):split("a , b,c ,d"), "|"))
+print(table.concat(regex.compile(""):split("abc"), "|"))
+print(table.concat(regex.compile(","):split("a,b,c,d", 2), "|"))
+
+print(regex.compile("\\w+"):replace("héllo wörld", "<$&>"))
+print(regex.compile("HÉLLO", "i"):test("héllo"), regex.compile("^b", "m"):test("a\nb"), regex.compile("a.b", "s"):test("a\nb"))
+print(regex.compile("a b # spaces and comments are ignored", "x"):test("ab"))
+
+print(regex.escape("a.b*c"), regex.compile(regex.escape("a.b")):test("axb"), regex.compile(regex.escape("a.b")):test("a.b"))
+const alternatives = regex.compile("(a)|(b)"):match("b")
+if (alternatives != nil) {
+	print(alternatives.groups[1] == nil, alternatives.groups[2])
+}
+print(date, date.pattern)
+
+print(pcall(function() {
+	regex.compile("(unclosed")
+}))
+print(pcall(function() {
+	regex.compile("a", "q")
+}))
+print(pcall(function() {
+	date:replace("2026-01-01", "${day}")
+}))
+print(pcall(function() {
+	regex.compile("(a+)+$"):test(string.rep("a", 30) .. "b")
+}))

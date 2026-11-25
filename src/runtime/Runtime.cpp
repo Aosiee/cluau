@@ -449,6 +449,34 @@ __cluau_meta = {
 			return LoadStatus::Ok;
 		}
 
+		// The @std/task task whose error is the one on T's stack, if it is
+		// one: its own stack shows where the error was raised.
+		lua_State* FailedTask(lua_State* T)
+		{
+			lua_checkstack(L, 4);
+			const int top = lua_gettop(L);
+			lua_State* task = nullptr;
+			lua_getfield(L, LUA_REGISTRYINDEX, detail::kStdRegistry);
+			lua_getfield(L, -1, "task");
+			if (lua_istable(L, -1))
+			{
+				lua_getfield(L, -1, "_failure");
+				if (lua_istable(L, -1))
+				{
+					lua_getfield(L, -1, "message");
+					lua_pushvalue(T, -1);
+					lua_xmove(T, L, 1);
+					if (!lua_isnil(L, -1) && lua_rawequal(L, -1, -2))
+					{
+						lua_getfield(L, -3, "thread");
+						task = lua_tothread(L, -1);
+					}
+				}
+			}
+			lua_settop(L, top);
+			return task;
+		}
+
 		// The file a chunk was loaded from, as an absolute path ("" for one
 		// with no file: a standard or host module, `-e`, the prompt).
 		std::string FileOf(const std::string& name) const
@@ -491,13 +519,14 @@ __cluau_meta = {
 			if (Debug)
 				Debug->OnUncaught(T, message);
 			std::fflush(stdout);
-			std::string trace = lua_debugtrace(T);
+			lua_State* traced = FailedTask(T);
+			std::string trace = lua_debugtrace(traced ? traced : T);
 			while (!trace.empty() && trace.back() == '\n')
 				trace.pop_back();
 			if (trace.empty())
 				std::fprintf(stderr, "%s\n", message.c_str());
 			else
-				std::fprintf(stderr, "%s\nstack backtrace:\n%s\n", message.c_str(), Backtrace(trace).c_str());
+				std::fprintf(stderr, "%s\nstack backtrace%s:\n%s\n", message.c_str(), traced ? " (in the task)" : "", Backtrace(trace).c_str());
 			lua_pop(L, 1); // the thread
 			return nullptr;
 		}
@@ -510,6 +539,28 @@ __cluau_meta = {
 				std::fprintf(stderr, "%s\n", error.c_str());
 				return 1;
 			}
+			lua_State* T = Execute();
+			std::fflush(stdout);
+			if (!T)
+				return g_Interrupted ? 130 : 1;
+			lua_pop(L, 1);
+			return RunTasks();
+		}
+
+		// After the script's code: the @std/task tasks still waiting run to
+		// their end (when the script used @std/task).
+		int RunTasks()
+		{
+			lua_getfield(L, LUA_REGISTRYINDEX, detail::kStdRegistry);
+			lua_getfield(L, -1, "task");
+			if (!lua_istable(L, -1))
+			{
+				lua_pop(L, 2);
+				return 0;
+			}
+			lua_getfield(L, -1, "_run");
+			lua_remove(L, -2);
+			lua_remove(L, -2);
 			lua_State* T = Execute();
 			std::fflush(stdout);
 			if (!T)

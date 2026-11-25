@@ -41,6 +41,7 @@ TEST("functions: statements, locals, literals, return types with table types")
 	CHECK_EQ(Luau("function t(): {number} { return {1} }"), std::string("function t(): {number}  return {1} end"));
 	CHECK_EQ(Luau("function M:Run<T>(x: T): (T, string) { return x, \"\" }"),
 		std::string("function M:Run<T>(x: T): (T, string)  return x, \"\" end"));
+	CHECK_EQ(Luau("function all<R...>(f: () -> R...): R... { return f() }"), std::string("function all<R...>(f: () -> R...): R...  return f() end"));
 }
 
 TEST("tables stay tables: constructors, call sugar, nested functions")

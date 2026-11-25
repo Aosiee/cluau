@@ -1,0 +1,7 @@
+// An error in a task is raised where the tasks run: here, the script's end.
+const task = require("@std/task")
+
+task.delay(0.01, function() {
+	error("the task failed")
+})
+print("the script's code is done")

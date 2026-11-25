@@ -1,0 +1,16 @@
+slow starts
+the script goes on
+false	false
+fast runs
+joined	fast	2
+slow ends
+joined	slow	true
+outer	42
+cancelled	true	true	0
+tick 1
+tick 2
+waited enough	true
+true
+last line
+after the end
+exit: 0

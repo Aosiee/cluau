@@ -150,6 +150,28 @@ return m :: {
 	array: (<T>(value: T) -> T) & (() -> { unknown }),
 }
 )LUAU" },
+				{ "regex", R"LUAU(
+export type Match = {
+	text: string,
+	start: number,
+	finish: number,
+	groups: { [number]: string },
+	named: { [string]: string },
+}
+export type Regex = {
+	pattern: string,
+	test: (self: Regex, text: string, start: number?) -> boolean,
+	match: (self: Regex, text: string, start: number?) -> Match?,
+	matches: (self: Regex, text: string) -> () -> Match?,
+	replace: (self: Regex, text: string, replacement: string | (match: Match) -> string, count: number?) -> (string, number),
+	split: (self: Regex, text: string, limit: number?) -> { string },
+}
+local m: any = nil
+return m :: {
+	compile: (pattern: string, flags: string?) -> Regex,
+	escape: (text: string) -> string,
+}
+)LUAU" },
 				{ "http", R"LUAU(
 export type Options = {
 	headers: { [string]: string }?,

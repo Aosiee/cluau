@@ -2152,6 +2152,10 @@ namespace cluau::runtime::detail {
 			lua_setfield(L, -2, "http");
 		}
 #endif
+#ifdef CLUAU_HAS_REGEX
+		OpenRegex(L);
+		lua_setfield(L, -2, "regex");
+#endif
 
 		lua_setfield(L, LUA_REGISTRYINDEX, kStdRegistry);
 
@@ -2170,11 +2174,15 @@ namespace cluau::runtime::detail {
 
 	const char* StdNames()
 	{
+		static const std::string names = std::string("@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time")
 #ifdef CLUAU_HAS_HTTP
-		return "@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/http, @std/args, @std/csv";
-#else
-		return "@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/args, @std/csv";
+										 + ", @std/http"
 #endif
+#ifdef CLUAU_HAS_REGEX
+										 + ", @std/regex"
+#endif
+										 + ", @std/task, @std/args, @std/csv";
+		return names.c_str();
 	}
 
 	void SetExitHook(void (*hook)(int code)) { g_ExitHook = hook; }
