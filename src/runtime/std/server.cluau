@@ -1,0 +1,448 @@
+// @std/server: an HTTP/1.1 server over @std/net and @std/task. Each
+// connection is a task of its own (several requests one after another on
+// it: keep-alive), and a handler answers each request.
+//
+//   const server = require("@std/server")
+//   server.serve({ port = 8080 }, function(request: server.Request): server.Answer {
+//   	return { status = 200, headers = { ["content-type"] = "text/plain" }, body = "hello" }
+//   })
+//
+// serve returns at once: the server runs in tasks, so it goes on after the
+// script's last line (until it is closed, or Ctrl-C). A handler may answer
+// with a table (status, headers, body), a string (200, text), or nil
+// (404); an error in it is a 500, with the error on stderr.
+
+const net = require("@std/net")
+const task = require("@std/task")
+const fs = require("@std/fs")
+const path = require("@std/path")
+const io = require("@std/io")
+const websocket = require("@std/websocket")
+
+export type Request = {
+	method: string,
+	path: string,         // without the query, decoded
+	target: string,       // as the request line gave it
+	query: { [string]: string },
+	headers: { [string]: string }, // names in lowercase
+	body: string,
+	params: { [string]: string },  // a router's :name parts
+	remoteHost: string,
+	remotePort: number,
+	socket: net.Socket,
+}
+export type Response = { status: number?, headers: { [string]: string }?, body: (string | buffer)? }
+export type Answer = Response | string | nil
+export type Handler = (request: Request) -> Answer
+export type Options = {
+	host: string?,      // "127.0.0.1" (this machine only) by default
+	port: number?,      // 8080 by default; 0 for any free one
+	tls: { certFile: string, keyFile: string }?,
+	maxBody: number?,   // bytes a request's body may have (16 MiB by default)
+	idle: number?,      // seconds a connection may wait between requests (60)
+}
+
+const kReasons: { [number]: string } = {
+	[101] = "Switching Protocols", [200] = "OK", [201] = "Created", [204] = "No Content", [301] = "Moved Permanently", [302] = "Found",
+	[304] = "Not Modified", [400] = "Bad Request", [401] = "Unauthorized", [403] = "Forbidden", [404] = "Not Found",
+	[405] = "Method Not Allowed", [408] = "Request Timeout", [413] = "Content Too Large", [500] = "Internal Server Error",
+	[501] = "Not Implemented", [503] = "Service Unavailable",
+}
+
+// %XX (and + in a query) back to their characters.
+const Decode = function(text: string, query: boolean): string {
+	const spaced = if (query) string.gsub(text, "+", " ") else text
+	const decoded = string.gsub(spaced, "%%(%x%x)", function(hex: string): string {
+		return string.char(tonumber(hex, 16) or 0)
+	})
+	return decoded
+}
+
+const ParseQuery = function(text: string): { [string]: string } {
+	const query: { [string]: string } = {}
+	for (pair in string.gmatch(text, "[^&]+")) {
+		const name, value = string.match(pair, "^([^=]*)=?(.*)$")
+		if (name != nil && name != "") {
+			query[Decode(name, true)] = Decode(value or "", true)
+		}
+	}
+	return query
+}
+
+const Exactly = function(socket: net.Socket, count: number): string? {
+	const parts: { string } = {}
+	let have = 0
+	while (have < count) {
+		const chunk = socket:read(math.min(count - have, 65536))
+		if (chunk == nil) {
+			return nil
+		}
+		table.insert(parts, chunk)
+		have += #chunk
+	}
+	return table.concat(parts)
+}
+
+class Failure {
+	Status: number = 400
+	Message: string = ""
+	function Init(status: number, message: string) {
+		self.Status = status
+		self.Message = message
+	}
+}
+
+const Fail = function(status: number, message: string): never {
+	error(Failure(status, message), 0)
+}
+
+// The next request on the connection (nil when it closed between requests).
+const ReadRequest = function(socket: net.Socket, maxBody: number): Request? {
+	let line = socket:readLine()
+	// Browsers may send an empty line between requests.
+	while (line == "") {
+		line = socket:readLine()
+	}
+	if (line == nil) {
+		return nil
+	}
+	const method, target, version = string.match(line, "^(%u+) (%S+) HTTP/(%d%.%d)$")
+	if (method == nil || target == nil || version == nil) {
+		Fail(400, "a request line is METHOD /path HTTP/1.1")
+	}
+	const headers: { [string]: string } = {}
+	let count = 0
+	while (true) {
+		const header = socket:readLine()
+		if (header == nil) {
+			return nil
+		}
+		if (header == "") {
+			break
+		}
+		count += 1
+		if (count > 100) {
+			Fail(400, "more than 100 headers")
+		}
+		const name, value = string.match(header, "^([^:%s]+):%s*(.-)%s*$")
+		if (name == nil || value == nil) {
+			Fail(400, "a header is Name: value")
+		}
+		const key = string.lower(name)
+		headers[key] = if (headers[key] != nil) headers[key] .. ", " .. value else value
+	}
+	if (version == "1.0" && headers["connection"] == nil) {
+		headers["connection"] = "close"
+	}
+	// The body: by its length, or in chunks.
+	let body = ""
+	if (string.lower(headers["transfer-encoding"] or "") == "chunked") {
+		const parts: { string } = {}
+		let size = 0
+		while (true) {
+			const sizeLine = socket:readLine() or "0"
+			const chunk = tonumber(string.match(sizeLine, "^%x+") or "0", 16) or 0
+			if (chunk == 0) {
+				while ((socket:readLine() or "") != "") {
+					// the trailers, unused
+				}
+				break
+			}
+			size += chunk
+			if (size > maxBody) {
+				Fail(413, `a body of more than {maxBody} bytes`)
+			}
+			table.insert(parts, Exactly(socket, chunk) or "")
+			socket:readLine()
+		}
+		body = table.concat(parts)
+	} else if (headers["content-length"] != nil) {
+		const length = tonumber(headers["content-length"])
+		if (length == nil || length < 0) {
+			Fail(400, "Content-Length is a number")
+		}
+		if (length > maxBody) {
+			Fail(413, `a body of {length} bytes (at most {maxBody})`)
+		}
+		body = Exactly(socket, length) or ""
+	}
+	const rawPath, rawQuery = string.match(target, "^([^?]*)%??(.*)$")
+	return {
+		method = method,
+		path = Decode(rawPath or target, false),
+		target = target,
+		query = ParseQuery(rawQuery or ""),
+		headers = headers,
+		body = body,
+		params = {},
+		remoteHost = socket.remoteHost,
+		remotePort = socket.remotePort,
+		socket = socket,
+	}
+}
+
+const Write = function(socket: net.Socket, request: Request?, response: Response, keepAlive: boolean) {
+	const status = response.status or 200
+	const given = response.body
+	const body = if (type(given) == "buffer") buffer.tostring(given) else (given :: string?) or ""
+	const lines = { `HTTP/1.1 {status} {kReasons[status] or "Status"}` }
+	const headers = response.headers or {}
+	let typed = false
+	for (name, value in headers) {
+		const lower = string.lower(name)
+		if (lower != "content-length" && lower != "connection") {
+			table.insert(lines, `{name}: {value}`)
+		}
+		typed = typed || lower == "content-type"
+	}
+	if (!typed && #body > 0) {
+		table.insert(lines, "Content-Type: text/plain; charset=utf-8")
+	}
+	table.insert(lines, `Content-Length: {#body}`)
+	table.insert(lines, if (keepAlive) "Connection: keep-alive" else "Connection: close")
+	const head = table.concat(lines, "\r\n") .. "\r\n\r\n"
+	if (request != nil && request.method == "HEAD") {
+		socket:write(head)
+	} else {
+		socket:write(head, body)
+	}
+}
+
+// What upgrade() answers with: the connection becomes a WebSocket.
+class Upgrade {
+	Run: ((ws: websocket.WebSocket) -> ())? = nil
+	function Init(run: (ws: websocket.WebSocket) -> ()) {
+		self.Run = run
+	}
+}
+
+// A request's answer that makes the connection a WebSocket: `run` gets it
+// (and the connection ends when run returns).
+const upgrade = function(request: Request, run: (ws: websocket.WebSocket) -> ()): Answer {
+	if (string.lower(request.headers["upgrade"] or "") != "websocket" || request.headers["sec-websocket-key"] == nil) {
+		return { status = 400, body = "a WebSocket request (Upgrade: websocket)" }
+	}
+	return Upgrade(run) :: any // allow-any: an answer serve knows
+}
+
+const Serve = function(socket: net.Socket, handler: Handler, options: Options) {
+	socket:setTimeout(options.idle or 60)
+	const maxBody = options.maxBody or 16 * 1024 * 1024
+	while (true) {
+		const read, request = pcall(ReadRequest, socket, maxBody)
+		if (!read) {
+			// A broken request is answered; a connection gone quiet just ends.
+			if (typeof(request) == "table" && getmetatable(request) == Failure) {
+				const failure = request :: Failure
+				pcall(Write, socket, nil, { status = failure.Status, body = failure.Message }, false)
+			}
+			break
+		}
+		if (request == nil) {
+			break
+		}
+		const keepAlive = string.lower(request.headers["connection"] or "") != "close"
+		const answered, answer = pcall(handler, request)
+		if (!answered) {
+			io.writeError(`server: {request.method} {request.path}: {tostring(answer)}\n`)
+			pcall(Write, socket, request, { status = 500, body = "Internal Server Error" }, false)
+			break
+		}
+		if (typeof(answer) == "table" && getmetatable(answer) == Upgrade) {
+			const up = answer :: Upgrade
+			const key = request.headers["sec-websocket-key"] or ""
+			socket:write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ",
+				websocket._accept(key), "\r\n\r\n")
+			socket:setTimeout(0)
+			const ws = websocket._fromSocket(socket)
+			const ran, problem = pcall(up.Run :: (ws: websocket.WebSocket) -> (), ws)
+			if (!ran) {
+				io.writeError(`server: the WebSocket at {request.path}: {tostring(problem)}\n`)
+			}
+			pcall(function() {
+				ws:close()
+			})
+			return
+		}
+		let response: Response
+		if (answer == nil) {
+			response = { status = 404, body = "Not Found" }
+		} else if (type(answer) == "string") {
+			response = { status = 200, body = answer }
+		} else {
+			response = answer :: Response
+		}
+		const wrote = pcall(Write, socket, request, response, keepAlive)
+		if (!wrote || !keepAlive) {
+			break
+		}
+	}
+	pcall(function() {
+		socket:close()
+	})
+}
+
+class Running {
+	Server: net.Server = nil :: any // allow-any: set by the constructor
+	host: string = ""
+	port: number = 0
+	function Init(server: net.Server) {
+		self.Server = server
+		self.host = server.host
+		self.port = server.port
+	}
+	// Stops taking connections (those under way finish).
+	function close() {
+		self.Server:close()
+	}
+}
+
+// Serves `handler` on options.host and options.port; returns at once.
+const serve = function(options: Options?, handler: Handler): Running {
+	const given = options or {}
+	const listening = net.listen(given.host or "127.0.0.1", given.port or 8080, { tls = given.tls })
+	task.spawn(function() {
+		while (true) {
+			const accepted, socket = pcall(function(): net.Socket {
+				return listening:accept()
+			})
+			if (!accepted) {
+				break
+			}
+			task.spawn(Serve, socket, handler, given)
+		}
+	})
+	return Running(listening)
+}
+
+// ---- routing --------------------------------------------------------------
+
+type Route = { Method: string, Parts: { string }, Handler: Handler }
+
+class Router {
+	Routes: { Route } = {}
+
+	// `pattern`'s parts: literal, :name (a part, given as request.params.name)
+	// or * (the rest of the path, as request.params["*"]).
+	function route(method: string, pattern: string, handler: Handler): Router {
+		const parts: { string } = {}
+		for (part in string.gmatch(pattern, "[^/]+")) {
+			table.insert(parts, part)
+		}
+		table.insert(self.Routes, { Method = string.upper(method), Parts = parts, Handler = handler })
+		return self
+	}
+	function get(pattern: string, handler: Handler): Router {
+		return self:route("GET", pattern, handler)
+	}
+	function post(pattern: string, handler: Handler): Router {
+		return self:route("POST", pattern, handler)
+	}
+	function put(pattern: string, handler: Handler): Router {
+		return self:route("PUT", pattern, handler)
+	}
+	function delete(pattern: string, handler: Handler): Router {
+		return self:route("DELETE", pattern, handler)
+	}
+
+	// The first route the request's path and method match.
+	function handle(request: Request): Answer {
+		const parts: { string } = {}
+		for (part in string.gmatch(request.path, "[^/]+")) {
+			table.insert(parts, part)
+		}
+		let pathMatched = false
+		for (_, route in self.Routes) {
+			const params: { [string]: string } = {}
+			let matches = true
+			for (i, part in route.Parts) {
+				if (part == "*") {
+					params["*"] = table.concat(parts, "/", i)
+					break
+				}
+				const given = parts[i]
+				if (given == nil) {
+					matches = false
+					break
+				}
+				if (string.sub(part, 1, 1) == ":") {
+					params[string.sub(part, 2)] = given
+				} else if (part != given) {
+					matches = false
+					break
+				}
+			}
+			const last = route.Parts[#route.Parts]
+			if (matches && last != "*" && #parts != #route.Parts) {
+				matches = false
+			}
+			if (matches) {
+				pathMatched = true
+				if (route.Method == request.method || (route.Method == "GET" && request.method == "HEAD")) {
+					request.params = params
+					return route.Handler(request)
+				}
+			}
+		}
+		if (pathMatched) {
+			return { status = 405, body = "Method Not Allowed" }
+		}
+		return nil
+	}
+
+	// The router as a handler, for serve.
+	function handler(): Handler {
+		return function(request: Request): Answer {
+			return self:handle(request)
+		}
+	}
+}
+
+const router = function(): Router {
+	return Router()
+}
+
+// ---- files ----------------------------------------------------------------
+
+const kTypes: { [string]: string } = {
+	html = "text/html; charset=utf-8", htm = "text/html; charset=utf-8", css = "text/css", js = "text/javascript",
+	mjs = "text/javascript", json = "application/json", txt = "text/plain; charset=utf-8", md = "text/markdown; charset=utf-8",
+	svg = "image/svg+xml", png = "image/png", jpg = "image/jpeg", jpeg = "image/jpeg", gif = "image/gif", webp = "image/webp",
+	ico = "image/x-icon", wasm = "application/wasm", pdf = "application/pdf", xml = "application/xml", csv = "text/csv",
+	zip = "application/zip", gz = "application/gzip", mp3 = "audio/mpeg", mp4 = "video/mp4", woff2 = "font/woff2",
+}
+
+// A handler serving the files under `directory` (index.html for a
+// directory); a path that would leave the directory is refused.
+const files = function(directory: string): Handler {
+	return function(request: Request): Answer {
+		if (request.method != "GET" && request.method != "HEAD") {
+			return { status = 405, body = "Method Not Allowed" }
+		}
+		const parts: { string } = {}
+		for (part in string.gmatch(request.params["*"] or request.path, "[^/\\]+")) {
+			if (part == ".." || string.find(part, ":", 1, true) != nil) {
+				return { status = 403, body = "Forbidden" }
+			}
+			if (part != ".") {
+				table.insert(parts, part)
+			}
+		}
+		let file = path.join(directory, table.unpack(parts))
+		if (fs.isDir(file)) {
+			file = path.join(file, "index.html")
+		}
+		if (!fs.isFile(file)) {
+			return nil
+		}
+		const extension = string.lower(string.match(file, "%.([^./\\]+)$") or "")
+		return { status = 200, headers = { ["content-type"] = kTypes[extension] or "application/octet-stream" }, body = fs.readBuffer(file) }
+	}
+}
+
+return {
+	serve = serve,
+	router = router,
+	files = files,
+	upgrade = upgrade,
+}

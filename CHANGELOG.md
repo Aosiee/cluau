@@ -2,6 +2,24 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.26.0: @std/server and @std/websocket
+
+- `@std/server`: an HTTP/1.1 server (`serve`, keep-alive, chunked
+  request bodies, HTTPS), a router (`/users/:id`, `*`), files served from
+  a directory, and WebSocket upgrades. It runs in tasks, beside the rest
+  of the script.
+- `@std/websocket`: WebSocket connections (`ws://`, `wss://`): text and
+  binary messages, fragments joined, pings answered, the close handshake.
+- Fixes found by running the tests under the sanitizers and by fuzzing
+  (the fuzz targets are in `tests/fuzz`):
+  - `zip.create(...):finish()` leaked the archive's buffer.
+  - Two first TLS handshakes at once could build mbedTLS's list of
+    cipher suites together.
+  - Some damaged deflate data decoded into output without end; inflate and
+    gunzip now refuse it.
+  - A zip entry could claim any size and have it allocated; one whose
+    sizes cannot fit together is refused as damaged.
+
 ## 0.25.0: quick fixes, semantic highlighting, the call hierarchy
 
 - `cluau lsp` offers quick fixes: the likely names for a misspelt member

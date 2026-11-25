@@ -1,0 +1,77 @@
+// @std/server and @std/websocket: a server with a router, files and a
+// WebSocket echo, and clients of it (@std/http, @std/websocket) in the same
+// script.
+const server = require("@std/server")
+const websocket = require("@std/websocket")
+const http = require("@std/http")
+const json = require("@std/json")
+
+const routes = server.router()
+routes:get("/hello/:name", function(request: server.Request): server.Answer {
+	return `hello, {request.params.name}{if (request.query.punct != nil) request.query.punct else ""}`
+})
+routes:post("/echo", function(request: server.Request): server.Answer {
+	return { status = 201, headers = { ["content-type"] = "application/json" }, body = json.encode({ got = request.body, length = #request.body }) }
+})
+routes:get("/boom", function(request: server.Request): server.Answer {
+	error("the handler failed")
+})
+routes:get("/static/*", server.files("site"))
+routes:get("/ws", function(request: server.Request): server.Answer {
+	return server.upgrade(request, function(ws: websocket.WebSocket) {
+		for (message in ws:messages()) {
+			if (message.data == "bye") {
+				break
+			}
+			ws:send(`echo: {message.data}`)
+		}
+	})
+})
+
+const running = server.serve({ port = 0 }, routes:handler())
+const base = `http://127.0.0.1:{running.port}`
+print("serving", running.port > 0)
+
+let r = http.get(`{base}/hello/ada?punct=!`)
+print(r.status, r.body, r.headers["content-type"])
+r = http.post(`{base}/echo`, "a body")
+print(r.status, r.body)
+r = http.get(`{base}/nowhere`)
+print(r.status, r.body)
+r = http.request({ url = `{base}/echo`, method = "GET" })
+print(r.status, r.body)
+r = http.get(`{base}/boom`)
+print(r.status)
+r = http.get(`{base}/static/`)
+print(r.status, r.headers["content-type"], r.body)
+r = http.get(`{base}/static/style.css`)
+print(r.status, r.headers["content-type"], r.body)
+r = http.get(`{base}/static/../web.cluau`)
+print(r.status)
+
+const ws = websocket.connect(`ws://127.0.0.1:{running.port}/ws`)
+ws:send("one")
+const first = ws:receive()
+ws:send(string.rep("x", 70000))
+const big = ws:receive()
+ws:send("bye")
+const after = ws:receive()
+print(if (first != nil) first.data else "?", if (big != nil) #big.data else -1, after == nil, ws.closeCode)
+ws:close()
+
+const refused, why = pcall(function() {
+	websocket.connect(`ws://127.0.0.1:{running.port}/hello/x`)
+})
+print("not a websocket", refused, string.find(tostring(why), "did not accept", 1, true) != nil)
+running:close()
+
+// The same over TLS: https and wss, with the test certificate.
+const secure = server.serve({ port = 0, tls = { certFile = "../http/test-cert.pem", keyFile = "../http/test-key.pem" } }, routes:handler())
+r = http.get(`https://127.0.0.1:{secure.port}/hello/tls`, { caFile = "../http/test-cert.pem" })
+print(r.status, r.body)
+const wss = websocket.connect(`wss://127.0.0.1:{secure.port}/ws`, { caFile = "../http/test-cert.pem" })
+wss:send("secure")
+const reply = wss:receive()
+print(if (reply != nil) reply.data else "?")
+wss:close()
+secure:close()

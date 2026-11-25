@@ -1047,6 +1047,69 @@ while (true) {
 }
 ```
 
+### `@std/server`
+
+An HTTP/1.1 server, on `@std/net` and `@std/task`: each connection is a
+task of its own (several requests one after another on it), and a handler
+answers each request.
+
+| function | is |
+|---|---|
+| `serve(options, handler): Server` | serves `handler` and returns at once; `options.host` (`"127.0.0.1"` by default: this machine only), `options.port` (8080; 0 for any free one), `options.tls` (`{ certFile, keyFile }`), `options.maxBody` (16 MiB), `options.idle` (seconds a connection may wait between requests, 60). The `Server` has `host`, `port` and `close()` |
+| `router(): Router` | routes by method and path: `get`, `post`, `put`, `delete` and `route(method, pattern, handler)` (each returns the router, to chain), and `handler()` for `serve`. A pattern's parts are literal, `:name` (in `request.params.name`) or `*` (the rest, in `request.params["*"]`) |
+| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension); a path that would leave the directory is refused |
+| `upgrade(request, fn): Answer` | answers a WebSocket request: `fn` gets the connection (a `@std/websocket` `WebSocket`), and the connection ends when `fn` returns |
+
+A `Request` has `method`, `path` (decoded, without the query), `query`
+(its names and values, decoded), `headers` (names in lowercase), `body`,
+`params`, `remoteHost`, `remotePort` and `target` (as the request line gave
+it). A handler answers with a table (`status`, 200 by default; `headers`;
+`body`, a string or a buffer), a string (200, as text), or `nil` (404). An
+error in a handler is a 500, with the error on stderr.
+
+```
+const server = require("@std/server")
+const json = require("@std/json")
+
+const routes = server.router()
+routes:get("/users/:id", function(request: server.Request): server.Answer {
+	return { headers = { ["content-type"] = "application/json" }, body = json.encode({ id = request.params.id }) }
+})
+routes:get("/static/*", server.files("public"))
+server.serve({ port = 8080 }, routes:handler())
+print("serving on http://127.0.0.1:8080")
+```
+
+`serve` returns at once: the server runs in tasks, so it goes on after the
+script's last line until it is closed (or Ctrl-C). The rest of the script
+runs alongside it, and its blocking calls wait on their own.
+
+### `@std/websocket`
+
+WebSocket connections: a client, and the connections `@std/server`
+accepts (`server.upgrade`). Messages are text or binary; a fragmented one
+arrives whole, pings are answered, and closing is the protocol's
+handshake.
+
+| function | is |
+|---|---|
+| `connect(url, options?): WebSocket` | a connection to a `ws://` or `wss://` address; `options.headers`, `options.protocols` (the subprotocols offered), `options.timeout`, and for `wss`, `options.caFile` and `options.verify` as `@std/net` has them |
+
+A `WebSocket` has `send(text)`, `sendBinary(data)`, `ping(data?)`,
+`receive()` (the next message, `{ kind, data }` with `kind` `"text"` or
+`"binary"`, or `nil` once the connection has closed), `messages()` (an
+iterator: `for (message in ws:messages()) { }`), `close(code?, reason?)`,
+and `protocol`, `closeCode` and `closeReason`.
+
+```
+const websocket = require("@std/websocket")
+const ws = websocket.connect("wss://example.org/updates")
+ws:send("subscribe")
+for (message in ws:messages()) {
+	print(message.data)
+}
+```
+
 ### `@std/crypto`
 
 Hashes, HMACs and randomness, on mbedTLS (built in). `data` is a string or

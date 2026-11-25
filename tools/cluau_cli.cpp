@@ -94,8 +94,8 @@ namespace {
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
 		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
 		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/net,\n"
-		"@std/sqlite, @std/regex, @std/task, @std/crypto, @std/encoding, @std/compress, @std/zip, @std/args\n"
-		"and @std/csv.\n";
+		"@std/sqlite, @std/regex, @std/task, @std/crypto, @std/encoding, @std/compress, @std/zip,\n"
+		"@std/server, @std/websocket, @std/args and @std/csv.\n";
 
 	bool g_Sandbox = false; // --sandbox
 	bool g_Native = true;   // --no-native turns it off

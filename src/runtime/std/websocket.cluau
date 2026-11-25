@@ -1,0 +1,309 @@
+// @std/websocket: WebSocket connections (RFC 6455) over @std/net: a client
+// (websocket.connect, ws:// and wss://), and the connections @std/server
+// accepts. Messages are text or binary; fragmented ones arrive joined,
+// pings are answered, and closing is the protocol's handshake. Each wait
+// waits on its own in a task.
+//
+//   const websocket = require("@std/websocket")
+//   const ws = websocket.connect("wss://echo.example.org/chat")
+//   ws:send("hello")
+//   const reply = ws:receive()
+//   if (reply != nil) { print(reply.data) }
+//   ws:close()
+
+const net = require("@std/net")
+const crypto = require("@std/crypto")
+const encoding = require("@std/encoding")
+
+export type Kind = "text" | "binary"
+export type Message = { kind: Kind, data: string }
+export type ConnectOptions = {
+	headers: { [string]: string }?,
+	protocols: { string }?,
+	timeout: number?,
+	caFile: string?,
+	verify: boolean?,
+}
+
+const kGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const kText = 1
+const kBinary = 2
+const kClose = 8
+const kPing = 9
+const kPong = 10
+
+// What the handshake's key answers: base64(SHA-1(key .. the GUID)).
+const Accept = function(key: string): string {
+	return encoding.toBase64(crypto.hash("sha1", key .. kGuid, { raw = true }))
+}
+
+// Exactly `count` bytes from the socket (nil when it ends first).
+const ReadExact = function(socket: net.Socket, count: number): string? {
+	const parts: { string } = {}
+	let have = 0
+	while (have < count) {
+		const chunk = socket:read(count - have)
+		if (chunk == nil) {
+			return nil
+		}
+		table.insert(parts, chunk)
+		have += #chunk
+	}
+	return table.concat(parts)
+}
+
+// The payload XORed with the 4-byte key (masking and unmasking alike).
+const Mask = function(payload: string, key: string): string {
+	const data = buffer.fromstring(payload)
+	const k = { string.byte(key, 1, 4) }
+	for (i = 0, #payload - 1) {
+		buffer.writeu8(data, i, bit32.bxor(buffer.readu8(data, i), k[i % 4 + 1]))
+	}
+	return buffer.tostring(data)
+}
+
+const Frame = function(opcode: number, payload: string, masked: boolean): string {
+	const length = #payload
+	const maskBit = if (masked) 128 else 0
+	let header: string
+	if (length < 126) {
+		header = string.char(128 + opcode, maskBit + length)
+	} else if (length < 65536) {
+		header = string.char(128 + opcode, maskBit + 126, bit32.rshift(length, 8), bit32.band(length, 255))
+	} else {
+		const high = math.floor(length / 4294967296)
+		const low = length % 4294967296
+		header = string.char(128 + opcode, maskBit + 127) .. string.pack(">I4I4", high, low)
+	}
+	if (!masked) {
+		return header .. payload
+	}
+	const key = crypto.randomBytes(4)
+	return header .. key .. Mask(payload, key)
+}
+
+class Connection {
+	Socket: net.Socket = nil :: any // allow-any: given by the constructor
+	Client: boolean = true
+	Closed: boolean = false
+	// The protocol the server chose (""), and the close's code and reason.
+	protocol: string = ""
+	closeCode: number = 0
+	closeReason: string = ""
+
+	function Init(socket: net.Socket, client: boolean) {
+		self.Socket = socket
+		self.Client = client
+	}
+
+	function Send(opcode: number, payload: string) {
+		if (self.Closed) {
+			error("websocket: the connection is closed", 3)
+		}
+		self.Socket:write(Frame(opcode, payload, self.Client))
+	}
+
+	// Sends a text message.
+	function send(text: string) {
+		self:Send(kText, text)
+	}
+
+	// Sends a binary message (a string of the bytes, or a buffer).
+	function sendBinary(data: string | buffer) {
+		self:Send(kBinary, if (type(data) == "buffer") buffer.tostring(data) else data :: string)
+	}
+
+	function ping(data: string?) {
+		self:Send(kPing, data or "")
+	}
+
+	// One frame: its opcode, whether it ends a message, its payload (nil
+	// when the connection ended).
+	function ReadFrame(): (number?, boolean, string) {
+		const head = ReadExact(self.Socket, 2)
+		if (head == nil) {
+			return nil, true, ""
+		}
+		const b0, b1 = string.byte(head, 1, 2)
+		const fin = bit32.band(b0, 128) != 0
+		const opcode = bit32.band(b0, 15)
+		const masked = bit32.band(b1, 128) != 0
+		let length = bit32.band(b1, 127)
+		if (length == 126) {
+			const extended = ReadExact(self.Socket, 2) or "\0\0"
+			length = string.unpack(">I2", extended)
+		} else if (length == 127) {
+			const extended = ReadExact(self.Socket, 8) or string.rep("\0", 8)
+			const high, low = string.unpack(">I4I4", extended)
+			length = high * 4294967296 + low
+		}
+		if (length > 64 * 1024 * 1024) {
+			error(`websocket: a frame of {length} bytes (more than 64 MiB)`, 3)
+		}
+		const key = if (masked) ReadExact(self.Socket, 4) or "\0\0\0\0" else ""
+		const payload = ReadExact(self.Socket, length) or ""
+		return opcode, fin, if (masked) Mask(payload, key) else payload
+	}
+
+	// The next message (nil once the connection has closed): its kind and
+	// data. Pings are answered on the way.
+	function receive(): Message? {
+		if (self.Closed) {
+			return nil
+		}
+		let kind: Kind = "text"
+		const parts: { string } = {}
+		while (true) {
+			const opcode, fin, payload = self:ReadFrame()
+			if (opcode == nil) {
+				self.Closed = true
+				self.Socket:close()
+				return nil
+			}
+			if (opcode == kPing) {
+				self.Socket:write(Frame(kPong, payload, self.Client))
+			} else if (opcode == kPong) {
+				// an answer to our ping: nothing to do
+			} else if (opcode == kClose) {
+				if (#payload >= 2) {
+					self.closeCode = string.unpack(">I2", payload)
+					self.closeReason = string.sub(payload, 3)
+				}
+				if (!self.Closed) {
+					self.Closed = true
+					pcall(function() {
+						self.Socket:write(Frame(kClose, string.sub(payload, 1, 2), self.Client))
+					})
+				}
+				self.Socket:close()
+				return nil
+			} else {
+				if (opcode == kText || opcode == kBinary) {
+					kind = if (opcode == kBinary) "binary" else "text"
+				}
+				table.insert(parts, payload)
+				if (fin) {
+					return { kind = kind, data = table.concat(parts) }
+				}
+			}
+		}
+		return nil
+	}
+
+	// An iterator over the messages: for (message in ws:messages()) { }
+	function messages(): () -> Message? {
+		return function(): Message? {
+			return self:receive()
+		}
+	}
+
+	// Closes the connection: the close frame (with `code`, 1000 by default,
+	// and `reason`), then the other side's, then the socket.
+	function close(code: number?, reason: string?) {
+		if (self.Closed) {
+			return
+		}
+		const payload = string.pack(">I2", code or 1000) .. (reason or "")
+		pcall(function() {
+			self.Socket:write(Frame(kClose, payload, self.Client))
+		})
+		self.Closed = true
+		// The other side's close, briefly waited for.
+		self.Socket:setTimeout(2)
+		pcall(function() {
+			while (true) {
+				const opcode = self:ReadFrame()
+				if (opcode == nil || opcode == kClose) {
+					break
+				}
+			}
+		})
+		self.Socket:close()
+	}
+}
+
+// A connection (its methods are send, sendBinary, ping, receive, messages
+// and close).
+export type WebSocket = Connection
+
+// ws://host[:port]/path?query or wss://...: host, port, the path, TLS.
+const ParseUrl = function(url: string): (string, number, string, boolean) {
+	const scheme, rest = string.match(url, "^(wss?)://(.+)$")
+	if (scheme == nil || rest == nil) {
+		error(`websocket.connect: '{url}' is not a ws:// or wss:// address`, 3)
+	}
+	const tls = scheme == "wss"
+	const authority = string.match(rest, "^[^/?#]+") or rest
+	const target = string.sub(rest, #authority + 1)
+	let host = authority
+	let port = if (tls) 443 else 80
+	const bracketed, bracketPort = string.match(authority, "^%[(.+)%]:?(%d*)$")
+	if (bracketed != nil) {
+		host = bracketed
+		if (bracketPort != nil && bracketPort != "") {
+			port = tonumber(bracketPort) or port
+		}
+	} else {
+		const name, number = string.match(authority, "^(.+):(%d+)$")
+		if (name != nil) {
+			host = name
+			port = tonumber(number) or port
+		}
+	}
+	return host, port, if (target == "") "/" else target, tls
+}
+
+// A connection to `url`: the handshake made and its answer checked.
+const connect = function(url: string, options: ConnectOptions?): Connection {
+	const given = options or {}
+	const host, port, target, tls = ParseUrl(url)
+	const socket = net.connect(host, port, { timeout = given.timeout, tls = tls, caFile = given.caFile, verify = given.verify })
+	const key = encoding.toBase64(crypto.randomBytes(16))
+	const lines: { string } = {
+		`GET {target} HTTP/1.1`,
+		`Host: {host}{if ((tls && port == 443) || (!tls && port == 80)) "" else ":" .. tostring(port)}`,
+		"Upgrade: websocket",
+		"Connection: Upgrade",
+		`Sec-WebSocket-Key: {key}`,
+		"Sec-WebSocket-Version: 13",
+	}
+	if (given.protocols != nil && #given.protocols > 0) {
+		table.insert(lines, `Sec-WebSocket-Protocol: {table.concat(given.protocols, ", ")}`)
+	}
+	for (name, value in given.headers or {}) {
+		table.insert(lines, `{name}: {value}`)
+	}
+	socket:write(table.concat(lines, "\r\n"), "\r\n\r\n")
+	const status = socket:readLine() or ""
+	const headers: { [string]: string } = {}
+	while (true) {
+		const line = socket:readLine()
+		if (line == nil || line == "") {
+			break
+		}
+		const name, value = string.match(line, "^([^:]+):%s*(.-)%s*$")
+		if (name != nil && value != nil) {
+			headers[string.lower(name)] = value
+		}
+	}
+	if (string.match(status, "^HTTP/1%.%d 101") == nil) {
+		socket:close()
+		error(`websocket.connect: {url} did not accept the connection ({status})`, 2)
+	}
+	if (headers["sec-websocket-accept"] != Accept(key)) {
+		socket:close()
+		error(`websocket.connect: {url} answered the handshake wrongly`, 2)
+	}
+	const ws = Connection(socket, true)
+	ws.protocol = headers["sec-websocket-protocol"] or ""
+	return ws
+}
+
+return {
+	connect = connect,
+	// @std/server's: a connection it accepted (its handshake answered).
+	_fromSocket = function(socket: net.Socket): Connection {
+		return Connection(socket, false)
+	},
+	_accept = Accept,
+}

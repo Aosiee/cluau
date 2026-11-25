@@ -32,7 +32,7 @@ class Player {
 It is also a scripting language on its own: `cluau script.cluau` runs a
 script the way `python script.py` does, with a REPL, `require` for other
 files and a standard library for files, paths, processes, JSON, times,
-HTTP, TCP and TLS sockets, SQLite databases, hashing, compression and zip
+HTTP (a client and a server), WebSockets, TCP and TLS sockets, SQLite databases, hashing, compression and zip
 archives, regular expressions, tasks that run side by side, command-line
 arguments and CSV, and
 `cluau check script.cluau` type-checks it (and the modules it requires)
@@ -116,8 +116,8 @@ Each release also has Debian and RPM packages for Linux, which install
 `/usr/bin/cluau` for every user:
 
 ```
-sudo apt install ./cluau_0.25.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
-sudo dnf install --nogpgcheck ./cluau-0.25.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
+sudo apt install ./cluau_0.26.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
+sudo dnf install --nogpgcheck ./cluau-0.26.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
 ```
 
 The packages are not signed yet (`--nogpgcheck` lets dnf install one); the

@@ -1,0 +1,17 @@
+serving	true
+200	hello, ada!	text/plain; charset=utf-8
+201	{"got":"a body","length":6}
+404	Not Found
+405	Method Not Allowed
+server: GET /boom: web.cluau:17: the handler failed
+500
+200	text/html; charset=utf-8	<h1>cluau</h1>
+
+200	text/css	body { color: blue; }
+
+404
+echo: one	70006	true	1000
+not a websocket	false	true
+200	hello, tls
+echo: secure
+exit: 0
