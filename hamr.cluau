@@ -158,4 +158,34 @@ suite:step("format", {
 	run = { "build-hamr-release/cluau", "fmt", "--check", "src", "tests", "hamr.cluau" },
 })
 
+// The fuzz targets (tests/fuzz), built with clang's libFuzzer and the
+// sanitizers and each run for `fuzzSeconds`: by hand (`hamr run --tier
+// manual`, or `--only fuzz`), never in CI. A crash, a hang or a report
+// fails the step; libFuzzer keeps the input that caused it in build-fuzz.
+const fuzzSeconds = suite:var("fuzzSeconds", "60")
+suite:step("fuzz", {
+	doc = "Builds the fuzz targets with clang and the sanitizers and runs each for a while.",
+	tier = "manual",
+	resources = { exclusive = true },
+	timeout = 3600,
+	budget = 900,
+	paths = kPaths,
+	run = function(ctx: Context) {
+		const flags = "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer"
+		ctx:run({ "cmake", "-S", ".", "-B", "build-fuzz", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DCLUAU_BUILD_TESTS=ON",
+			"-DCLUAU_FUZZ=ON", "-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++", `-DCMAKE_C_FLAGS={flags}`, `-DCMAKE_CXX_FLAGS={flags}`,
+			"-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined" })
+		const targets = { "translate", "gunzip", "inflate", "zip", "base64", "json", "csv", "regex" }
+		const build = { "cmake", "--build", "build-fuzz", "-j", tostring(host.cores()), "--target" }
+		for (_, target in targets) {
+			table.insert(build, `fuzz_{target}`)
+		}
+		ctx:run(build)
+		for (_, target in targets) {
+			ctx:run({ `build-fuzz/fuzz_{target}`, `-max_total_time={fuzzSeconds}`, "-max_len=4096", "-timeout=10", "-rss_limit_mb=2048",
+				"-artifact_prefix=build-fuzz/" })
+		}
+	},
+})
+
 return suite

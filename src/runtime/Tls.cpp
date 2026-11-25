@@ -1,6 +1,7 @@
 #include "Tls.h"
 
 #include <mbedtls/error.h>
+#include <mbedtls/ssl.h>
 #include <mbedtls/threading.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
@@ -136,6 +137,9 @@ namespace cluau::runtime::detail {
 			mbedtls_threading_set_alt(MutexInit, MutexFree, MutexLock, MutexUnlock);
 #endif
 			psa_crypto_init();
+			// mbedTLS makes its list of cipher suites on the first call: here,
+			// before any connection's thread could make it at the same time.
+			mbedtls_ssl_list_ciphersuites();
 		});
 	}
 

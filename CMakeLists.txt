@@ -293,6 +293,17 @@ if(CLUAU_BUILD_RUNTIME)
         target_link_libraries(cluau_runtime_tests PRIVATE cluau_runtime Luau.VM)
         target_include_directories(cluau_runtime_tests PRIVATE src/runtime)
         add_test(NAME cluau_runtime_tests COMMAND cluau_runtime_tests)
+        # Fuzz targets (libFuzzer: clang), one per parser of untrusted input,
+        # built with the sanitizers; run by hand (hamr's manual tier).
+        option(CLUAU_FUZZ "Build the fuzz targets (clang's libFuzzer)" OFF)
+        if(CLUAU_FUZZ)
+            foreach(target translate gunzip inflate zip base64 json csv regex)
+                add_executable(fuzz_${target} tests/fuzz/fuzz.cpp)
+                target_compile_definitions(fuzz_${target} PRIVATE CLUAU_FUZZ_TARGET="${target}")
+                target_link_libraries(fuzz_${target} PRIVATE cluau_runtime Luau.VM Luau.Compiler)
+                target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer)
+            endforeach()
+        endif()
         # Each tests/scripts/<name>.cluau runs and its output is compared
         # with <name>.expected, and `cluau check` passes on it (or reports
         # what <name>.checked says); each tests/check/<name>.cluau is checked

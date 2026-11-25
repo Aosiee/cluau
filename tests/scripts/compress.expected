@@ -19,4 +19,7 @@ false	compress.gunzip: the data is not gzip
 false	compress.inflate: the data is not zlib 
 false	zip.fromString: the data is not a zip archive 
 false	compress.gzip: options.level is from 0 
+false	compress.inflate: the data is not raw deflate
+false	compress.gunzip: the compressed data is damaged
+false	true
 exit: 0

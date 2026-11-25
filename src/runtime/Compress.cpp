@@ -93,23 +93,30 @@ namespace cluau::runtime::detail {
 			out.clear();
 			std::vector<unsigned char> window(TINFL_LZ_DICT_SIZE);
 			size_t in = 0, at = 0;
+			// Always "more input may follow": told it has the whole input, miniz
+			// pads a stream cut short with zeros, which can decode into output
+			// without end. A stream that asks for more than there is is cut short.
 			const mz_uint32 flags = (zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0) | TINFL_FLAG_HAS_MORE_INPUT;
 			for (;;)
 			{
 				size_t inSize = data.size() - in;
 				size_t outSize = TINFL_LZ_DICT_SIZE - at;
 				const tinfl_status status = tinfl_decompress(&inflator, reinterpret_cast<const mz_uint8*>(data.data()) + in, &inSize, window.data(),
-					window.data() + at, &outSize, in + inSize >= data.size() ? flags & ~TINFL_FLAG_HAS_MORE_INPUT : flags);
+					window.data() + at, &outSize, flags);
 				in += inSize;
 				out.append(reinterpret_cast<const char*>(window.data()) + at, outSize);
 				at = (at + outSize) & (TINFL_LZ_DICT_SIZE - 1);
+				// Deflate expands at most about 1032 to 1: more is damaged data
+				// that miniz decodes without end (a code table zlib refuses).
+				if (out.size() > data.size() * 1040 + 65536)
+					return false;
 				if (status == TINFL_STATUS_DONE)
 				{
 					if (used)
 						*used = in;
 					return true;
 				}
-				if (status < 0 || (status == TINFL_STATUS_NEEDS_MORE_INPUT && in >= data.size()))
+				if (status < 0 || (status == TINFL_STATUS_NEEDS_MORE_INPUT && in >= data.size()) || (inSize == 0 && outSize == 0))
 					return false;
 			}
 		}
@@ -320,6 +327,18 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// An entry's sizes must fit together before it is read: what it claims
+		// to hold is allocated whole, and deflate expands at most about 1032
+		// to 1 (a stored entry, not at all).
+		void CheckSizes(lua_State* L, const mz_zip_archive_file_stat& stat, const char* fn)
+		{
+			const bool stored = stat.m_method == 0;
+			const bool fits = stored ? stat.m_uncomp_size == stat.m_comp_size : stat.m_uncomp_size <= stat.m_comp_size * 1040 + 65536;
+			if (!fits)
+				luaL_error(L, "%s: '%s' claims %.0f bytes from %.0f: the archive is damaged", fn, stat.m_filename, (double)stat.m_uncomp_size,
+					(double)stat.m_comp_size);
+		}
+
 		int ArchiveRead(lua_State* L)
 		{
 			Archive& a = CheckArchive(L, "archive:read");
@@ -327,6 +346,10 @@ namespace cluau::runtime::detail {
 			const int index = mz_zip_reader_locate_file(&a.Zip, name, nullptr, 0);
 			if (index < 0)
 				luaL_error(L, "archive:read: no '%s' in the archive", name);
+			mz_zip_archive_file_stat stat;
+			if (!mz_zip_reader_file_stat(&a.Zip, (mz_uint)index, &stat))
+				luaL_error(L, "archive:read: cannot read '%s': %s", name, mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
+			CheckSizes(L, stat, "archive:read");
 			size_t size = 0;
 			void* data = mz_zip_reader_extract_to_heap(&a.Zip, (mz_uint)index, &size, 0);
 			if (!data)
@@ -365,6 +388,7 @@ namespace cluau::runtime::detail {
 					continue;
 				}
 				fs::create_directories(target.parent_path(), ec);
+				CheckSizes(L, stat, "archive:extract");
 				size_t size = 0;
 				void* data = mz_zip_reader_extract_to_heap(&a.Zip, i, &size, 0);
 				if (!data)
@@ -484,6 +508,7 @@ namespace cluau::runtime::detail {
 			if (!mz_zip_writer_finalize_heap_archive(&w.Zip, &data, &size))
 				luaL_error(L, "writer:finish: %s", mz_zip_get_error_string(mz_zip_get_last_error(&w.Zip)));
 			const std::string archive(static_cast<const char*>(data), size);
+			mz_free(data); // the archive's buffer is the caller's to free
 			mz_zip_writer_end(&w.Zip);
 			w.Open = false;
 			if (w.Path.empty())

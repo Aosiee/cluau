@@ -78,3 +78,15 @@ for (_, attempt in attempts) {
 	const ok, why = pcall(attempt)
 	print(ok, string.match(tostring(why), "(%a+%.%w+: [^%(]*)"))
 }
+
+// What fuzzing found: a raw deflate stream that miniz decodes without end,
+// gzip data that does the same, and a zip entry that claims 721 MB from 6
+// bytes. Each is an error, at once.
+print(pcall(compress.inflate, encoding.fromBase64("LCsAAEoADQ=="), { raw = true }))
+print(pcall(compress.gunzip, encoding.fromBase64("H4sIAAD4AAAC/yQpkACAiPkAAAABFgAAAAAAAAAAAAAAAEEA")))
+const claims = zip.fromString(encoding.fromBase64("UEsDBBQAAAAIAE56eV0OHl2PBkkBAGQAAAAHAAAAYS9iq3R4LnQSAAAAAAAAAAQUAAAACABOenldAAAAAAIAAAAAAAAAAgAAAGQvAwBQSwMEFAAAAAAATnp5XQv5Q1YGAAAABgAAAAUAAABjLnR4dHZ0b3JhZFBLAQIUAxQAAAAIAE56eV2PXQ5eBgAAAGAAACsAAAcAAAAAAAAAAACAAQAAAABhL2IudHh0UEsBAhQDFAD/AAgAKXp5XQAAAAACAAAAAAAAAAAAAgAAAAAAAAAQAP1BKwAAAGQvUEsBAhQDFAAAAAByZWFkXQv5x6kGAAAABgAAAAUAAAAAAAAAAQAAFAMUAAAAAAAAAAAAAAAAgAFNAAAAcy50eHRQSwUGAAAAAAMAAwCYAAAAdgAAAAAA"))
+const entries = claims:entries()
+const huge, hugeWhy = pcall(function() {
+	claims:read(entries[1].name)
+})
+print(huge, string.find(tostring(hugeWhy), "the archive is damaged", 1, true) != nil)

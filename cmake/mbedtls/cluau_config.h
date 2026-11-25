@@ -9,3 +9,7 @@
 #else
 #define MBEDTLS_THREADING_PTHREAD
 #endif
+
+// The self-tests are mbedTLS's own; their counters would be shared by every
+// thread.
+#undef MBEDTLS_SELF_TEST
