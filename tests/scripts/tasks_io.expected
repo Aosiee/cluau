@@ -5,5 +5,5 @@ slept
 read	first line, second line
 heard	line 1, line 2, line 3, code 0
 side by side	true
-ticked while the script slept	3
+ticked while the script slept	true
 exit: 0

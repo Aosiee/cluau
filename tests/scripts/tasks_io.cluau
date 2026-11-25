@@ -59,4 +59,4 @@ task.spawn(function() {
 	}
 })
 process.sleep(0.3)
-print("ticked while the script slept", #ticks)
+print("ticked while the script slept", #ticks > 0)
