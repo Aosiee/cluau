@@ -1,5 +1,5 @@
-# cluau - C-syntax-flavoured Luau. The translator (`cluau`) has no
-# dependencies; the runtime and the checker behind `cluau check`
+# cluau - C-syntax-flavoured Luau. The translator (`cluau_translator`) has
+# no dependencies; the runtime and the checker behind `cluau check`
 # (`cluau_runtime`, `cluau_check`) build against Luau (fetched, or
 # CLUAU_LUAU_DIR's checkout). This file is the standalone build and what a
 # host's CMake build (Kiln's external build) adds with add_subdirectory,
@@ -11,12 +11,12 @@ project(cluau CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_library(cluau STATIC
+add_library(cluau_translator STATIC
     src/translate/Lexer.cpp
     src/translate/Translate.cpp
     src/convert/Convert.cpp
 )
-target_include_directories(cluau PUBLIC include PRIVATE src/translate)
+target_include_directories(cluau_translator PUBLIC include PRIVATE src/translate)
 
 set(CLUAU_LUAU_DIR "" CACHE PATH "A Luau checkout (the runtime's Luau; without the runtime, builds cluau_check)")
 
@@ -45,10 +45,10 @@ if(CLUAU_BUILD_RUNTIME)
     endif()
     # The strict rules, over Luau's analysis.
     add_library(cluau_check STATIC src/check/Check.cpp)
-    target_link_libraries(cluau_check PUBLIC cluau Luau.Analysis)
+    target_link_libraries(cluau_check PUBLIC cluau_translator Luau.Analysis)
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Check.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
-    target_link_libraries(cluau_runtime PUBLIC cluau PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis)
+    target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis)
     if(TARGET isocline) # Luau's line editor: the REPL's history and editing
         target_link_libraries(cluau_runtime PRIVATE isocline)
         target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_ISOCLINE)
@@ -62,23 +62,23 @@ if(NOT TARGET cluau_check AND CLUAU_LUAU_DIR)
     target_include_directories(cluau_check PUBLIC include PRIVATE
         ${CLUAU_LUAU_DIR}/Analysis/include ${CLUAU_LUAU_DIR}/Ast/include ${CLUAU_LUAU_DIR}/Common/include
         ${CLUAU_LUAU_DIR}/EqSat/include ${CLUAU_LUAU_DIR}/Config/include)
-    target_link_libraries(cluau_check PUBLIC cluau)
+    target_link_libraries(cluau_check PUBLIC cluau_translator)
 endif()
 
 option(CLUAU_BUILD_TESTS "Build the translator's tests" ${PROJECT_IS_TOP_LEVEL})
 if(CLUAU_BUILD_TESTS)
     enable_testing()
     add_executable(cluau_tests tests/main.cpp tests/translate_tests.cpp tests/convert_tests.cpp)
-    target_link_libraries(cluau_tests PRIVATE cluau)
+    target_link_libraries(cluau_tests PRIVATE cluau_translator)
     add_test(NAME cluau_tests COMMAND cluau_tests)
 endif()
 
-add_executable(cluau_cli tools/cluau_cli.cpp)
-target_link_libraries(cluau_cli PRIVATE cluau)
-set_target_properties(cluau_cli PROPERTIES OUTPUT_NAME cluau)
+# The command line: `cmake --build build --target cluau`.
+add_executable(cluau tools/cluau_cli.cpp)
+target_link_libraries(cluau PRIVATE cluau_translator)
 if(CLUAU_BUILD_RUNTIME)
-    target_link_libraries(cluau_cli PRIVATE cluau_runtime)
-    target_compile_definitions(cluau_cli PRIVATE CLUAU_HAS_RUNTIME)
+    target_link_libraries(cluau PRIVATE cluau_runtime)
+    target_compile_definitions(cluau PRIVATE CLUAU_HAS_RUNTIME)
     if(CLUAU_BUILD_TESTS)
         # Each tests/scripts/<name>.cluau runs and its output is compared
         # with <name>.expected, and `cluau check` passes on it (or reports
@@ -88,11 +88,11 @@ if(CLUAU_BUILD_RUNTIME)
         foreach(script ${CLUAU_SCRIPT_TESTS})
             get_filename_component(name ${script} NAME_WE)
             add_test(NAME script:${name}
-                COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau_cli> -DSCRIPT=${script}
+                COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
             if(NOT name MATCHES "^repl_")
                 add_test(NAME check:${name}
-                    COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau_cli> -DSCRIPT=${script} -DMODE=check
+                    COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script} -DMODE=check
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
             endif()
         endforeach()
@@ -100,7 +100,7 @@ if(CLUAU_BUILD_RUNTIME)
         foreach(script ${CLUAU_CHECK_TESTS})
             get_filename_component(name ${script} NAME_WE)
             add_test(NAME check:${name}
-                COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau_cli> -DSCRIPT=${script} -DMODE=check
+                COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script} -DMODE=check
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
         endforeach()
     endif()
@@ -111,6 +111,6 @@ endif()
 # embeds cluau installs what it needs itself.
 if(PROJECT_IS_TOP_LEVEL)
     include(GNUInstallDirs)
-    install(TARGETS cluau_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS cluau RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(FILES README.md LICENSE docs/syntax.md docs/scripting.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()

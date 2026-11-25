@@ -50,8 +50,8 @@ for (_, file in fs.walk(process.args[1] or ".")) {
 - [`docs/scripting.md`](docs/scripting.md) is the scripting guide: running
   and checking scripts, the REPL, classes in scripts, modules and the
   standard library.
-- `cluau` (the translator, `include/cluau/cluau.h`, and the Luau-to-cluau
-  converter, `include/cluau/convert.h`) has no dependencies.
+- `cluau_translator` (the translator, `include/cluau/cluau.h`, and the
+  Luau-to-cluau converter, `include/cluau/convert.h`) has no dependencies.
 - `cluau_runtime` (`include/cluau/runtime.h`, the script runner and checker
   behind the `cluau` tool) runs on Luau's VM, compiler and analysis, which
   CMake fetches (or `-DCLUAU_LUAU_DIR=<a Luau checkout>`).
@@ -95,10 +95,10 @@ suite (`hamr.cluau`): the tests, the script tests and the checker's tests in
 a release and a debug build, and the guides' examples through the tool.
 Each build lives in its own `build-hamr-<name>` directory.
 
-A host embeds the translator with `add_subdirectory` (CMake) or its own build
-manifest over `src/translate/*.cpp` (plus `src/convert/*.cpp` for the
-converter), and supplies a `ClassProfile` for what
-its classes lower to. Under `add_subdirectory` the runtime is off (no Luau
+A host embeds the translator with `add_subdirectory` (CMake, linking
+`cluau_translator`) or its own build manifest over `src/translate/*.cpp`
+(plus `src/convert/*.cpp` for the converter), and supplies a
+`ClassProfile` for what its classes lower to. Under `add_subdirectory` the runtime is off (no Luau
 is fetched); `-DCLUAU_BUILD_RUNTIME=ON` adds it, against the host's own
 Luau targets when they exist.
 
