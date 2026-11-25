@@ -200,6 +200,37 @@ namespace cluau::runtime::detail {
 		}
 	}
 
+	Json LspServer::CallItemJson(const CallItem& item) const
+	{
+		const Json range = RangeOf(item.At.Path, item.At.At);
+		return Json::Object()
+			.Set("name", item.Name)
+			.Set("kind", SymbolKindOf(item.Kind))
+			.Set("detail", item.Detail)
+			.Set("uri", UriFromPath(item.At.Path))
+			.Set("range", range)
+			.Set("selectionRange", range)
+			.Set("data", Json::Object()
+							 .Set("path", item.At.Path)
+							 .Set("line", item.At.At.Begin.Line)
+							 .Set("col", item.At.At.Begin.Col)
+							 .Set("end", item.At.At.End.Col));
+	}
+
+	CallItem LspServer::CallItemFrom(const Json& json) const
+	{
+		CallItem item;
+		item.Name = json["name"].String();
+		item.Detail = json["detail"].String();
+		const Json& data = json["data"];
+		const std::string path = data["path"].IsString() ? data["path"].String() : PathFromUri(json["uri"].String());
+		const int line = data["line"].Int(json["selectionRange"]["start"]["line"].Int());
+		const int col = data["col"].Int(Utf16ToByte(LineAt(path, line), json["selectionRange"]["start"]["character"].Int()));
+		item.At = { path, { { line, col }, { line, data["end"].Int(col) } } };
+		item.Kind = json["kind"].Int() == 6 ? SymbolKind::Method : SymbolKind::Function;
+		return item;
+	}
+
 	std::vector<std::string> LspServer::Handle(const std::string& text)
 	{
 		std::vector<std::string> out;
@@ -231,6 +262,17 @@ namespace cluau::runtime::detail {
 			capabilities.Set("renameProvider", true);
 			capabilities.Set("workspaceSymbolProvider", true);
 			capabilities.Set("inlayHintProvider", true);
+			capabilities.Set("codeActionProvider", Json::Object().Set("codeActionKinds", Json::Array().Push("quickfix")));
+			capabilities.Set("callHierarchyProvider", true);
+			Json tokenTypes = Json::Array();
+			for (const char* type : { "namespace", "class", "enum", "type", "parameter", "variable", "property", "function", "method" })
+				tokenTypes.Push(type);
+			capabilities.Set("semanticTokensProvider",
+				Json::Object()
+					.Set("legend", Json::Object()
+									   .Set("tokenTypes", std::move(tokenTypes))
+									   .Set("tokenModifiers", Json::Array().Push("declaration").Push("readonly").Push("defaultLibrary")))
+					.Set("full", true));
 			// Where references, renames and symbols look beyond the open files.
 			std::vector<std::string> folders;
 			for (const Json& folder : params["workspaceFolders"].Items())
@@ -407,6 +449,74 @@ namespace cluau::runtime::detail {
 			const int to = params["range"]["end"]["line"].Int(from);
 			for (const InlayHint& hint : m_Service.InlayHints(path, from, to))
 				result.Push(Json::Object().Set("position", Position(path, hint.At)).Set("label", hint.Label).Set("kind", 1));
+		}
+		else if (method == "textDocument/codeAction")
+		{
+			std::vector<DiagnosticRef> diagnostics;
+			for (const Json& d : params["context"]["diagnostics"].Items())
+			{
+				const Json& range = d["range"];
+				const int startLine = range["start"]["line"].Int(), endLine = range["end"]["line"].Int();
+				DiagnosticRef ref;
+				ref.At = { { startLine, Utf16ToByte(LineAt(path, startLine), range["start"]["character"].Int()) },
+					{ endLine, Utf16ToByte(LineAt(path, endLine), range["end"]["character"].Int()) } };
+				ref.Code = d["code"].IsString() ? d["code"].String() : std::string();
+				ref.Message = d["message"].String();
+				diagnostics.push_back(std::move(ref));
+			}
+			result = Json::Array();
+			for (const CodeAction& action : m_Service.CodeActions(path, diagnostics))
+			{
+				Json changes = Json::Object();
+				for (const auto& [file, edits] : action.Edits)
+				{
+					Json list = Json::Array();
+					for (const TextEdit& edit : edits)
+						list.Push(Json::Object().Set("range", RangeOf(file, edit.At)).Set("newText", edit.NewText));
+					changes.Set(UriFromPath(file), std::move(list));
+				}
+				Json entry = Json::Object().Set("title", action.Title).Set("kind", "quickfix").Set("edit", Json::Object().Set("changes", std::move(changes)));
+				if (action.Preferred)
+					entry.Set("isPreferred", true);
+				result.Push(std::move(entry));
+			}
+		}
+		else if (method == "textDocument/semanticTokens/full")
+		{
+			// Each token relative to the one before: line, start, length, type, modifiers.
+			Json data = Json::Array();
+			int lastLine = 0, lastStart = 0;
+			for (const SemanticToken& token : m_Service.SemanticTokens(path))
+			{
+				const std::string text = LineAt(path, token.At.Line);
+				const int start = ByteToUtf16(text, token.At.Col);
+				const int length = ByteToUtf16(text, token.At.Col + token.Length) - start;
+				data.Push(token.At.Line - lastLine).Push(token.At.Line == lastLine ? start - lastStart : start).Push(length);
+				data.Push((int)token.Type).Push((int)token.Modifiers);
+				lastLine = token.At.Line;
+				lastStart = start;
+			}
+			result = Json::Object().Set("data", std::move(data));
+		}
+		else if (method == "textDocument/prepareCallHierarchy")
+		{
+			result = Json::Array();
+			if (std::optional<CallItem> item = m_Service.PrepareCall(path, line, col))
+				result.Push(CallItemJson(*item));
+		}
+		else if (method == "callHierarchy/incomingCalls" || method == "callHierarchy/outgoingCalls")
+		{
+			const bool incoming = method == "callHierarchy/incomingCalls";
+			const CallItem item = CallItemFrom(params["item"]);
+			result = Json::Array();
+			for (const Call& call : incoming ? m_Service.IncomingCalls(item) : m_Service.OutgoingCalls(item))
+			{
+				Json ranges = Json::Array();
+				const std::string& file = incoming ? call.Item.At.Path : item.At.Path;
+				for (const Range& site : call.Sites)
+					ranges.Push(RangeOf(file, site));
+				result.Push(Json::Object().Set(incoming ? "from" : "to", CallItemJson(call.Item)).Set("fromRanges", std::move(ranges)));
+			}
 		}
 		else if (method == "textDocument/formatting")
 		{

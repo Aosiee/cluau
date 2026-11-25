@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <set>
 
 namespace fs = std::filesystem;
@@ -1126,6 +1127,496 @@ namespace cluau::runtime::detail {
 			out.push_back({ { at.Begin.Line, at.Begin.Col + (int)symbol.size() }, ": " + label });
 		}
 		std::sort(out.begin(), out.end(), [](const InlayHint& a, const InlayHint& b) { return a.At < b.At; });
+		return out;
+	}
+
+	// ---- Quick fixes ------------------------------------------------------------
+
+	namespace {
+
+		// The edits that turn one name into another (the cost of typos).
+		size_t Distance(const std::string& a, const std::string& b)
+		{
+			std::vector<size_t> row(b.size() + 1);
+			for (size_t j = 0; j <= b.size(); j++)
+				row[j] = j;
+			for (size_t i = 1; i <= a.size(); i++)
+			{
+				size_t diagonal = row[0];
+				row[0] = i;
+				for (size_t j = 1; j <= b.size(); j++)
+				{
+					const size_t above = row[j];
+					const bool same = std::tolower((unsigned char)a[i - 1]) == std::tolower((unsigned char)b[j - 1]);
+					row[j] = std::min({ row[j] + 1, row[j - 1] + 1, diagonal + (same ? 0 : 1) });
+					diagonal = above;
+				}
+			}
+			return row[b.size()];
+		}
+
+		// The name a diagnostic is about: the first quoted one after `after`.
+		std::string QuotedAfter(const std::string& message, const char* after)
+		{
+			const size_t at = message.find(after);
+			if (at == std::string::npos)
+				return {};
+			const size_t open = message.find('\'', at + std::strlen(after) - 1);
+			if (open == std::string::npos)
+				return {};
+			const size_t close = message.find('\'', open + 1);
+			return close == std::string::npos ? std::string() : message.substr(open + 1, close - open - 1);
+		}
+
+		const char* const kStdModules[] = { "fs", "path", "process", "io", "json", "time", "http", "net", "sqlite", "regex", "task", "crypto", "encoding",
+			"compress", "zip", "args", "csv", "test" };
+
+	} // namespace
+
+	std::vector<CodeAction> LanguageService::CodeActions(const std::string& path, const std::vector<DiagnosticRef>& diagnostics)
+	{
+		std::vector<CodeAction> out;
+		const std::string name = Name(path);
+		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		if (!text)
+			return out;
+		for (const DiagnosticRef& d : diagnostics)
+		{
+			const std::string lineText = LineOf(*text, d.At.Begin.Line);
+			if (d.Code == "NoAny")
+			{
+				// The line's exemption, at its end.
+				CodeAction action;
+				action.Title = "Allow any on this line (// allow-any:)";
+				action.Edits[path].push_back({ { { d.At.Begin.Line, (int)lineText.size() }, { d.At.Begin.Line, (int)lineText.size() } }, " // allow-any: reason" });
+				out.push_back(std::move(action));
+				continue;
+			}
+			std::string wrong = QuotedAfter(d.Message, "Unknown global '");
+			const bool global = !wrong.empty();
+			if (wrong.empty())
+				wrong = QuotedAfter(d.Message, "Key '");
+			if (wrong.empty())
+				wrong = QuotedAfter(d.Message, "does not have key '");
+			if (wrong.empty())
+				continue;
+			// Where the name is on the line (the diagnostic may cover more).
+			int col = d.At.Begin.Col;
+			if (!IdentifierAt(*text, d.At.Begin.Line, col, wrong))
+			{
+				const size_t found = lineText.find(wrong, (size_t)std::max(0, d.At.Begin.Col));
+				if (found == std::string::npos)
+					continue;
+				col = (int)found;
+			}
+			const Range at{ { d.At.Begin.Line, col }, { d.At.Begin.Line, col + (int)wrong.size() } };
+			if (global)
+				for (const char* module : kStdModules)
+					if (wrong == module)
+					{
+						// After the shebang and the requires the file starts with.
+						int line = 0;
+						for (;; line++)
+						{
+							const std::string l = LineOf(*text, line);
+							if (l.rfind("#!", 0) == 0 || (l.find("require(") != std::string::npos && l.rfind("const ", 0) == 0))
+								continue;
+							break;
+						}
+						CodeAction action;
+						action.Title = std::string("Add const ") + module + " = require(\"@std/" + module + "\")";
+						action.Edits[path].push_back({ { { line, 0 }, { line, 0 } }, std::string("const ") + module + " = require(\"@std/" + module + "\")\n" });
+						action.Preferred = true;
+						out.push_back(std::move(action));
+					}
+			// The names that could stand there, nearest first.
+			const CompletionList names = Complete(path, at.End.Line, at.End.Col);
+			std::vector<std::pair<size_t, std::string>> near;
+			const size_t limit = std::max<size_t>(1, wrong.size() / 3);
+			for (const CompletionItem& item : names.Items)
+			{
+				if (item.Kind == CompletionKind::Keyword || item.Label == wrong)
+					continue;
+				const size_t distance = Distance(wrong, item.Label);
+				if (distance <= limit)
+					near.push_back({ distance, item.Label });
+			}
+			std::sort(near.begin(), near.end());
+			for (size_t i = 0; i < near.size() && i < 3; i++)
+			{
+				CodeAction action;
+				action.Title = "Change to '" + near[i].second + "'";
+				action.Edits[path].push_back({ at, near[i].second });
+				action.Preferred = i == 0 && near[i].first == 1;
+				out.push_back(std::move(action));
+			}
+		}
+		return out;
+	}
+
+	// ---- Semantic tokens --------------------------------------------------------
+
+	std::vector<SemanticToken> LanguageService::SemanticTokens(const std::string& path)
+	{
+		std::vector<SemanticToken> out;
+		const std::string name = Name(path);
+		if (!Prepare(name))
+			return out;
+		Luau::ModulePtr module = m_Analysis.Frontend().moduleResolverForAutocomplete.getModule(name);
+		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(name);
+		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		if (!module || !source || !source->root || !text)
+			return out;
+		std::set<std::string> classes;
+		const TranslateResult* translation = m_Analysis.Translation(name);
+		if (translation)
+			for (const ClassInfo& c : translation->Classes)
+				classes.insert(c.Name);
+
+		struct Names : Luau::AstVisitor
+		{
+			struct Found
+			{
+				Luau::Location At;
+				std::string Name;
+				TokenType Type;
+				unsigned Modifiers;
+			};
+			std::vector<Found> Items;
+			std::set<Luau::AstLocal*> Parameters;
+			std::set<std::string> FileFunctions; // the script's own top-level functions
+			const Luau::Module* Checked = nullptr;
+			const std::set<std::string>* Classes = nullptr;
+
+			bool IsFunction(Luau::AstExpr* e) const
+			{
+				const Luau::TypeId* t = Checked->astTypes.find(e);
+				return t && Luau::get<Luau::FunctionType>(Luau::follow(*t));
+			}
+			void Local(Luau::AstLocal* local, unsigned modifiers, bool function)
+			{
+				const std::string n = NameOf(local->name);
+				const TokenType type = Classes->count(n) ? TokenType::Class
+					: Parameters.count(local)            ? TokenType::Parameter
+					: function                           ? TokenType::Function
+														 : TokenType::Variable;
+				Items.push_back({ local->location, n, type, modifiers });
+			}
+			bool visit(Luau::AstExprFunction* fn) override
+			{
+				for (Luau::AstLocal* arg : fn->args)
+				{
+					Parameters.insert(arg);
+					Local(arg, Declaration, false);
+				}
+				return true;
+			}
+			bool visit(Luau::AstStatLocal* decl) override
+			{
+				for (size_t i = 0; i < decl->vars.size; i++)
+				{
+					const bool function = i < decl->values.size && decl->values.data[i]->is<Luau::AstExprFunction>();
+					Local(decl->vars.data[i], Declaration, function);
+				}
+				return true;
+			}
+			bool visit(Luau::AstStatLocalFunction* fn) override
+			{
+				Local(fn->name, Declaration, true);
+				return true;
+			}
+			bool visit(Luau::AstStatFor* loop) override
+			{
+				Local(loop->var, Declaration, false);
+				return true;
+			}
+			bool visit(Luau::AstStatForIn* loop) override
+			{
+				for (Luau::AstLocal* var : loop->vars)
+					Local(var, Declaration, false);
+				return true;
+			}
+			bool visit(Luau::AstExprLocal* e) override
+			{
+				Local(e->local, 0, IsFunction(e));
+				return true;
+			}
+			bool visit(Luau::AstStatFunction* fn) override
+			{
+				// The name a function statement declares (a script's top-level
+				// function is a global of its own).
+				if (Luau::AstExprGlobal* g = fn->name->as<Luau::AstExprGlobal>())
+					Items.push_back({ g->location, NameOf(g->name), TokenType::Function, Declaration });
+				else if (Luau::AstExprIndexName* ix = fn->name->as<Luau::AstExprIndexName>())
+					Items.push_back({ ix->indexLocation, NameOf(ix->index), TokenType::Method, Declaration });
+				return true;
+			}
+			bool visit(Luau::AstExprGlobal* e) override
+			{
+				const std::string n = NameOf(e->name);
+				const bool own = FileFunctions.count(n) > 0;
+				const TokenType type = Classes->count(n) ? TokenType::Class
+					: own || IsFunction(e)              ? TokenType::Function
+														: TokenType::Namespace;
+				Items.push_back({ e->location, n, type, own ? 0u : (unsigned)DefaultLibrary });
+				return true;
+			}
+			bool visit(Luau::AstExprIndexName* e) override
+			{
+				Items.push_back({ e->indexLocation, NameOf(e->index), IsFunction(e) ? TokenType::Method : TokenType::Property, 0 });
+				return true;
+			}
+			bool visit(Luau::AstTypeReference* t) override
+			{
+				const std::string n = NameOf(t->name);
+				Items.push_back({ t->nameLocation, n, Classes->count(n) ? TokenType::Class : TokenType::Type, 0 });
+				return true;
+			}
+		} names;
+		names.Checked = module.get();
+		names.Classes = &classes;
+		for (Luau::AstStat* stat : source->root->body)
+			if (Luau::AstStatFunction* fn = stat->as<Luau::AstStatFunction>())
+				if (Luau::AstExprGlobal* g = fn->name->as<Luau::AstExprGlobal>())
+					names.FileFunctions.insert(NameOf(g->name));
+		source->root->visit(&names);
+
+		std::map<std::pair<int, int>, SemanticToken> tokens;
+		for (const auto& found : names.Items)
+		{
+			const Range r = Out(name, found.At);
+			// Only names the text holds (not the translation's own).
+			if (found.Name.empty() || found.Name.rfind("__", 0) == 0 || !IdentifierAt(*text, r.Begin.Line, r.Begin.Col, found.Name))
+				continue;
+			SemanticToken& token = tokens[{ r.Begin.Line, r.Begin.Col }];
+			token.At = r.Begin;
+			token.Length = (int)found.Name.size();
+			// A declaration's kind wins over what another visit says.
+			if ((token.Modifiers & Declaration) && !(found.Modifiers & Declaration))
+				continue;
+			token.Type = found.Type;
+			token.Modifiers = found.Modifiers;
+		}
+		// The classes' own declarations (their names, members and fields).
+		if (translation)
+			for (const ClassInfo& c : translation->Classes)
+			{
+				auto mark = [&](const Range& r, TokenType type) {
+					if (r.Begin.Line < 0 || r.End.Col <= r.Begin.Col)
+						return;
+					tokens[{ r.Begin.Line, r.Begin.Col }] = { r.Begin, r.End.Col - r.Begin.Col, type, Declaration };
+				};
+				mark(c.At, TokenType::Class);
+				for (const ClassMethod& m : c.Methods)
+					mark(m.At, TokenType::Method);
+				for (const ClassField& f : c.Fields)
+					mark(f.At, TokenType::Property);
+			}
+		for (auto& [key, token] : tokens)
+			out.push_back(token);
+		return out;
+	}
+
+	// ---- Call hierarchy ---------------------------------------------------------
+
+	std::optional<CallItem> LanguageService::CallItemAt(const Location& declaration)
+	{
+		const std::string module = Name(declaration.Path);
+		const std::optional<std::string> text = m_Analysis.TextOf(module);
+		if (!text || !Prepare(module))
+			return std::nullopt;
+		const std::string lineText = LineOf(*text, declaration.At.Begin.Line);
+		int end = declaration.At.Begin.Col;
+		while (end < (int)lineText.size() && IsIdent(lineText[(size_t)end]))
+			end++;
+		CallItem item;
+		item.Name = lineText.substr((size_t)declaration.At.Begin.Col, (size_t)(end - declaration.At.Begin.Col));
+		item.At = { PathOf(module), { declaration.At.Begin, { declaration.At.Begin.Line, end } } };
+		item.Detail = fs::u8path(module).filename().u8string();
+		if (const TranslateResult* t = m_Analysis.Translation(module))
+			for (const ClassInfo& c : t->Classes)
+				for (const ClassMethod& m : c.Methods)
+					if (m.At.Begin == declaration.At.Begin)
+					{
+						item.Kind = SymbolKind::Method;
+						item.Detail = c.Name;
+						return item;
+					}
+		// A function declared there: `function f`, a local function, or a
+		// name a function is given to.
+		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(module);
+		if (!source)
+			return std::nullopt;
+		for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, In(module, declaration.At.Begin.Line, declaration.At.Begin.Col)))
+		{
+			if (node->is<Luau::AstStatFunction>() || node->is<Luau::AstStatLocalFunction>())
+				return item;
+			if (Luau::AstStatLocal* decl = node->as<Luau::AstStatLocal>())
+				for (size_t i = 0; i < decl->vars.size && i < decl->values.size; i++)
+					if (NameOf(decl->vars.data[i]->name) == item.Name && decl->values.data[i]->is<Luau::AstExprFunction>())
+						return item;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<CallItem> LanguageService::PrepareCall(const std::string& path, int line, int col)
+	{
+		std::optional<Location> found = Definition(path, line, col);
+		if (!found)
+		{
+			const std::vector<Location> uses = References(path, line, col);
+			if (uses.empty())
+				return std::nullopt;
+			found = uses.front();
+		}
+		return CallItemAt(*found);
+	}
+
+	CallItem LanguageService::Enclosing(const std::string& module, const std::string& file, const Luau::Position& at)
+	{
+		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(module);
+		const std::optional<std::string> text = m_Analysis.TextOf(module);
+		CallItem top;
+		top.Name = "(top level)";
+		top.Kind = SymbolKind::Function;
+		top.Detail = fs::u8path(module).filename().u8string();
+		top.At = { file, { { 0, 0 }, { 0, 0 } } };
+		if (!source || !text)
+			return top;
+		const std::vector<Luau::AstNode*> ancestry = Luau::findAstAncestryOfPosition(*source, at);
+		for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
+		{
+			Luau::AstExprFunction* fn = (*it)->as<Luau::AstExprFunction>();
+			if (!fn)
+				continue;
+			// The function's name: where its statement (or the local given it) names it.
+			std::optional<Luau::Location> nameAt;
+			std::string symbol;
+			if (it + 1 != ancestry.rend())
+			{
+				Luau::AstNode* parent = *(it + 1);
+				if (Luau::AstStatFunction* stat = parent->as<Luau::AstStatFunction>())
+				{
+					if (Luau::AstExprGlobal* g = stat->name->as<Luau::AstExprGlobal>())
+						nameAt = g->location, symbol = NameOf(g->name);
+					else if (Luau::AstExprIndexName* ix = stat->name->as<Luau::AstExprIndexName>())
+						nameAt = ix->indexLocation, symbol = NameOf(ix->index);
+				}
+				else if (Luau::AstStatLocalFunction* local = parent->as<Luau::AstStatLocalFunction>())
+					nameAt = local->name->location, symbol = NameOf(local->name->name);
+				else if (Luau::AstStatLocal* decl = parent->as<Luau::AstStatLocal>())
+					for (size_t i = 0; i < decl->values.size && i < decl->vars.size; i++)
+						if (decl->values.data[i] == fn)
+							nameAt = decl->vars.data[i]->location, symbol = NameOf(decl->vars.data[i]->name);
+			}
+			if (nameAt)
+				if (std::optional<Location> mapped = Mapped(module, *nameAt, symbol))
+					if (std::optional<CallItem> item = CallItemAt({ module, mapped->At }))
+						return *item;
+			// A function with no name of its own: the next one out.
+		}
+		return top;
+	}
+
+	std::vector<Call> LanguageService::IncomingCalls(const CallItem& item)
+	{
+		std::vector<Call> out;
+		std::map<std::pair<std::string, std::pair<int, int>>, size_t> byCaller;
+		for (const Location& use : References(item.At.Path, item.At.At.Begin.Line, item.At.At.Begin.Col))
+		{
+			if (use.Path == item.At.Path && use.At.Begin == item.At.At.Begin)
+				continue; // the declaration
+			const std::string module = Name(use.Path);
+			const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(module);
+			if (!source)
+				continue;
+			const Luau::Position at = In(module, use.At.Begin.Line, use.At.Begin.Col);
+			// A call of it: the name is (the end of) what is called.
+			bool called = false;
+			for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, at))
+				if (Luau::AstExprCall* call = node->as<Luau::AstExprCall>(); call && call->func->location.containsClosed(at))
+					called = true;
+			if (!called)
+				continue;
+			const CallItem caller = Enclosing(module, use.Path, at);
+			const auto key = std::make_pair(caller.At.Path, std::make_pair(caller.At.At.Begin.Line, caller.At.At.Begin.Col));
+			auto found = byCaller.find(key);
+			if (found == byCaller.end())
+			{
+				found = byCaller.emplace(key, out.size()).first;
+				out.push_back({ caller, {} });
+			}
+			out[found->second].Sites.push_back(use.At);
+		}
+		return out;
+	}
+
+	std::vector<Call> LanguageService::OutgoingCalls(const CallItem& item)
+	{
+		std::vector<Call> out;
+		const std::string module = Name(item.At.Path);
+		if (!Prepare(module))
+			return out;
+		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(module);
+		const std::optional<std::string> text = m_Analysis.TextOf(module);
+		if (!source || !text)
+			return out;
+		// The function's body: the function whose name is at the item.
+		Luau::AstExprFunction* body = nullptr;
+		const Luau::Position at = In(module, item.At.At.Begin.Line, item.At.At.Begin.Col);
+		for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, at))
+		{
+			if (Luau::AstStatFunction* stat = node->as<Luau::AstStatFunction>())
+				body = stat->func;
+			else if (Luau::AstStatLocalFunction* local = node->as<Luau::AstStatLocalFunction>())
+				body = local->func;
+			else if (Luau::AstStatLocal* decl = node->as<Luau::AstStatLocal>())
+				for (size_t i = 0; i < decl->values.size; i++)
+					if (Luau::AstExprFunction* fn = decl->values.data[i]->as<Luau::AstExprFunction>())
+						body = fn;
+		}
+		if (!body)
+			return out;
+		struct Calls : Luau::AstVisitor
+		{
+			Luau::AstExprFunction* Root = nullptr;
+			std::vector<std::pair<Luau::Location, std::string>> Found; // the callee's name
+			bool visit(Luau::AstExprFunction* fn) override { return fn == Root; } // not into nested functions
+			bool visit(Luau::AstExprCall* call) override
+			{
+				if (Luau::AstExprIndexName* ix = call->func->as<Luau::AstExprIndexName>())
+					Found.push_back({ ix->indexLocation, NameOf(ix->index) });
+				else if (Luau::AstExprLocal* local = call->func->as<Luau::AstExprLocal>())
+					Found.push_back({ local->location, NameOf(local->local->name) });
+				else if (Luau::AstExprGlobal* global = call->func->as<Luau::AstExprGlobal>())
+					Found.push_back({ global->location, NameOf(global->name) });
+				return true;
+			}
+		} calls;
+		calls.Root = body;
+		body->visit(&calls);
+		std::map<std::pair<std::string, std::pair<int, int>>, size_t> byCallee;
+		for (const auto& [location, symbol] : calls.Found)
+		{
+			const Range r = Out(module, location);
+			if (!IdentifierAt(*text, r.Begin.Line, r.Begin.Col, symbol))
+				continue;
+			const std::optional<Location> target = Definition(item.At.Path, r.Begin.Line, r.Begin.Col);
+			// The workspace's functions (a standard module's are declarations only).
+			if (!target || target->Path.empty() || target->Path[0] == '@')
+				continue;
+			const std::optional<CallItem> callee = CallItemAt(*target);
+			if (!callee)
+				continue;
+			const auto key = std::make_pair(callee->At.Path, std::make_pair(callee->At.At.Begin.Line, callee->At.At.Begin.Col));
+			auto found = byCallee.find(key);
+			if (found == byCallee.end())
+			{
+				found = byCallee.emplace(key, out.size()).first;
+				out.push_back({ *callee, {} });
+			}
+			out[found->second].Sites.push_back({ r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } });
+		}
 		return out;
 	}
 

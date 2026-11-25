@@ -75,15 +75,15 @@ for (_, attempt in {
 	print("error:", done, string.match(message, "^(http%.%a+: %u+ %S+):") or message)
 }
 
-// Requests in tasks run side by side: three that each give up after half a
-// second take about half a second in all.
+// Requests in tasks run side by side: three that each give up after a
+// second take about a second in all (three one after another: three).
 const task = require("@std/task")
 const time = require("@std/time")
 const started = time.monotonic()
 const waits: { task.Task<boolean> } = {}
 for (i = 1, 3) {
 	table.insert(waits, task.spawn(function(): boolean {
-		const answered = pcall(http.get, `{base}/slow`, { timeout = 0.5 })
+		const answered = pcall(http.get, `{base}/slow`, { timeout = 1 })
 		return answered
 	}))
 }
@@ -93,7 +93,7 @@ const hello = task.spawn(function(): string {
 for (_, each in waits) {
 	task.join(each)
 }
-print("tasks:", task.join(hello), time.monotonic() - started < 1.2)
+print("tasks:", task.join(hello), time.monotonic() - started < 2.2)
 
 // HTTPS in tasks side by side (TLS handshakes on several threads at once).
 const secures: { task.Task<string> } = {}

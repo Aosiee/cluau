@@ -42,6 +42,8 @@ namespace cluau::runtime::detail {
 		Json RangeOf(const std::string& path, const Range& range) const;
 		std::string LineAt(const std::string& path, int line) const;
 		void Publish(std::vector<std::string>& out);
+		Json CallItemJson(const CallItem& item) const;
+		CallItem CallItemFrom(const Json& json) const;
 
 		LanguageService m_Service;
 		std::vector<std::string> m_Published; // files given diagnostics (a closed one is cleared)

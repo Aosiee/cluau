@@ -80,6 +80,49 @@ namespace cluau::runtime::detail {
 		std::string Label; // ": number"
 	};
 
+	// A diagnostic the editor asks code actions for.
+	struct DiagnosticRef
+	{
+		Range At;
+		std::string Code;
+		std::string Message;
+	};
+
+	// A quick fix: its title and edits by file.
+	struct CodeAction
+	{
+		std::string Title;
+		std::map<std::string, std::vector<TextEdit>> Edits;
+		bool Preferred = false;
+	};
+
+	enum class TokenType { Namespace, Class, Enum, Type, Parameter, Variable, Property, Function, Method };
+	enum TokenModifier : unsigned { Declaration = 1, Readonly = 2, DefaultLibrary = 4 };
+
+	// A name's kind, for highlighting (what the checker knows of it).
+	struct SemanticToken
+	{
+		Position At; // 0-based line and byte column
+		int Length = 0;
+		TokenType Type = TokenType::Variable;
+		unsigned Modifiers = 0;
+	};
+
+	// A function, in the call hierarchy.
+	struct CallItem
+	{
+		std::string Name;
+		SymbolKind Kind = SymbolKind::Function;
+		std::string Detail; // the file, or the class
+		Location At;        // its name where it is declared
+	};
+
+	struct Call
+	{
+		CallItem Item;            // the caller (incoming) or the callee (outgoing)
+		std::vector<Range> Sites; // the calls: in the caller's file
+	};
+
 	struct DocumentSymbol
 	{
 		std::string Name;
@@ -131,6 +174,18 @@ namespace cluau::runtime::detail {
 		// The types of the names `let`, `const` and `for` declare without
 		// one, on lines `fromLine` to `toLine`.
 		std::vector<InlayHint> InlayHints(const std::string& path, int fromLine, int toLine);
+
+		// The quick fixes for those of the file's diagnostics given: a
+		// misspelt member or global's likely names, a standard module's
+		// require, the line's `any` exemption.
+		std::vector<CodeAction> CodeActions(const std::string& path, const std::vector<DiagnosticRef>& diagnostics);
+		// Every name in the file with its kind, in order.
+		std::vector<SemanticToken> SemanticTokens(const std::string& path);
+		// The function at the position (named or called there), and what
+		// calls it or what it calls.
+		std::optional<CallItem> PrepareCall(const std::string& path, int line, int col);
+		std::vector<Call> IncomingCalls(const CallItem& item);
+		std::vector<Call> OutgoingCalls(const CallItem& item);
 		// The edit that formats the file as `cluau fmt` would (none when it
 		// is formatted already, or cannot be read).
 		std::vector<TextEdit> Format(const std::string& path, const std::string& indent);
@@ -149,6 +204,12 @@ namespace cluau::runtime::detail {
 		std::optional<Location> MemberDeclaration(const std::string& module, const Luau::AstExprIndexName* index);
 		// References; `declaredIn` is the module declaring a member ("" for a local).
 		std::vector<Location> ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn);
+		// A function's item from where it is declared (nullopt when what is
+		// declared there is not a function).
+		std::optional<CallItem> CallItemAt(const Location& declaration);
+		// The item of the function the module's position is inside ("(top
+		// level)" outside any).
+		CallItem Enclosing(const std::string& module, const std::string& file, const Luau::Position& at);
 		// The workspace's script files, and the open ones.
 		std::vector<std::string> SearchFiles() const;
 		Luau::Position In(const std::string& name, int line, int col) const;

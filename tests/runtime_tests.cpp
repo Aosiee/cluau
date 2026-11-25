@@ -575,6 +575,109 @@ TEST("profile: samples name the functions the time went to, as folded stacks")
 	CHECK(text.str().find(";spin (") != std::string::npos);
 }
 
+TEST("lsp: quick fixes for a misspelt name, a missing standard module, and any")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "const shapes = require(\"./shapes\")\n" // 0
+																 "const p = shapes.Point()\n"             // 1
+																 "print(p:Lenght())\n"                    // 2
+																 "prnt(1)\n"                              // 3
+																 "print(json.encode({ a = 1 }))\n"        // 4
+																 "const loose: any = 1\n"));              // 5
+	const Json diagnostics = s.Diagnostics(project.Main);
+	CHECK(diagnostics.Size() >= 4);
+	const Json actions = s.Request("textDocument/codeAction",
+		Json::Object()
+			.Set("textDocument", Json::Object().Set("uri", project.Main))
+			.Set("range", diagnostics[0]["range"])
+			.Set("context", Json::Object().Set("diagnostics", diagnostics)))["result"];
+	std::map<std::string, Json> byTitle;
+	for (const Json& action : actions.Items())
+		byTitle[action["title"].String()] = action;
+	CHECK(byTitle.count("Change to 'Length'"));
+	CHECK(byTitle.count("Change to 'print'"));
+	CHECK(byTitle.count("Add const json = require(\"@std/json\")"));
+	CHECK(byTitle.count("Allow any on this line (// allow-any:)"));
+	if (byTitle.count("Change to 'Length'"))
+	{
+		const Json edit = byTitle["Change to 'Length'"]["edit"]["changes"][project.Main][0];
+		CHECK_EQ(edit["range"]["start"]["line"].Int(), 2);
+		CHECK_EQ(edit["range"]["start"]["character"].Int(), 8);
+		CHECK_EQ(edit["newText"].String(), std::string("Length"));
+	}
+	if (byTitle.count("Add const json = require(\"@std/json\")"))
+	{
+		const Json edit = byTitle["Add const json = require(\"@std/json\")"]["edit"]["changes"][project.Main][0];
+		CHECK_EQ(edit["range"]["start"]["line"].Int(), 1); // after the file's requires
+	}
+}
+
+TEST("lsp: semantic tokens name each name's kind")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, kMain));
+	const Json data = s.Request("textDocument/semanticTokens/full", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main)))["result"]["data"];
+	CHECK(data.Size() % 5 == 0 && data.Size() > 0);
+	// line:col -> type index, modifiers
+	std::map<std::string, std::pair<int, int>> tokens;
+	int line = 0, col = 0;
+	for (size_t i = 0; i + 4 < data.Size(); i += 5)
+	{
+		const int dl = data[i].Int(), dc = data[i + 1].Int();
+		line += dl;
+		col = dl ? dc : col + dc;
+		tokens[std::to_string(line) + ":" + std::to_string(col)] = { data[i + 3].Int(), data[i + 4].Int() };
+	}
+	enum { Namespace, Class, Enum, Type, Parameter, Variable, Property, Function, Method };
+	CHECK(tokens.count("4:9") && tokens["4:9"].first == Function);            // count
+	CHECK(tokens.count("4:15") && tokens["4:15"].first == Parameter);         // path
+	CHECK(tokens.count("4:15") && (tokens["4:15"].second & 1));               // ... declared there
+	CHECK(tokens.count("5:9") && tokens["5:9"].first == Namespace);           // string
+	CHECK(tokens.count("5:9") && (tokens["5:9"].second & 4));                 // ... the standard library's
+	CHECK(tokens.count("5:16") && tokens["5:16"].first == Method);            // split
+	CHECK(tokens.count("8:6") && tokens["8:6"].first == Variable);            // p
+	CHECK(tokens.count("9:8") && tokens["9:8"].first == Method);              // Length
+}
+
+TEST("lsp: the call hierarchy: what calls a function, and what it calls")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "function inner(): number {\n"   // 0
+																 "\treturn 1\n"                   // 1
+																 "}\n"                             // 2
+																 "function outer(): number {\n"    // 3
+																 "\treturn inner() + inner()\n"   // 4
+																 "}\n"                             // 5
+																 "print(outer(), inner())\n"));    // 6
+	const Json prepared = s.Request("textDocument/prepareCallHierarchy", At(project.Main, 6, 15))["result"];
+	CHECK_EQ(prepared.Size(), size_t(1));
+	if (prepared.Size() != 1)
+		return;
+	CHECK_EQ(prepared[0]["name"].String(), std::string("inner"));
+	CHECK_EQ(prepared[0]["range"]["start"]["line"].Int(), 0);
+	const Json incoming = s.Request("callHierarchy/incomingCalls", Json::Object().Set("item", prepared[0]))["result"];
+	std::map<std::string, size_t> callers;
+	for (const Json& call : incoming.Items())
+		callers[call["from"]["name"].String()] = call["fromRanges"].Size();
+	CHECK_EQ(callers["outer"], size_t(2));
+	CHECK_EQ(callers["(top level)"], size_t(1));
+
+	const Json outer = s.Request("textDocument/prepareCallHierarchy", At(project.Main, 3, 10))["result"];
+	CHECK_EQ(outer.Size(), size_t(1));
+	if (outer.Size() != 1)
+		return;
+	const Json outgoing = s.Request("callHierarchy/outgoingCalls", Json::Object().Set("item", outer[0]))["result"];
+	CHECK_EQ(outgoing.Size(), size_t(1));
+	CHECK_EQ(outgoing[0]["to"]["name"].String(), std::string("inner"));
+	CHECK_EQ(outgoing[0]["fromRanges"].Size(), size_t(2));
+}
+
 TEST("lsp: columns are UTF-16 code units, and messages are framed on the wire")
 {
 	Project project;

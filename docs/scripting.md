@@ -291,8 +291,12 @@ members in other modules, `require` paths), references and renaming
 (a local's in its file; a class member's or a module's exported name's in
 every file of the workspace that uses it), the outline of classes,
 functions and variables, the workspace's symbols, the types of names
-declared without one shown beside them (inlay hints), and formatting
-(`cluau fmt`). It finds modules as `cluau` does, and takes the
+declared without one shown beside them (inlay hints), highlighting by
+what each name is (a class, a method, a parameter, the standard library's;
+semantic tokens), the call hierarchy (what calls a function, and what it
+calls), quick fixes (a misspelt name's likely names, the `require` of a
+standard module used without one, a line's `allow-any` exemption), and
+formatting (`cluau fmt`). It finds modules as `cluau` does, and takes the
 same `--module <name>=<file>` options as `cluau check` for a host's
 modules.
 

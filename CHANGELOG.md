@@ -2,6 +2,19 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.25.0: quick fixes, semantic highlighting, the call hierarchy
+
+- `cluau lsp` offers quick fixes: the likely names for a misspelt member
+  or global (`p:Lenght()` to `p:Length()`), the `require` of a standard
+  module used without one (`json.encode` adds
+  `const json = require("@std/json")`), and a line's `allow-any`
+  exemption.
+- Semantic highlighting: each name by what the checker knows it is (a
+  class, a method, a property, a parameter, a local, a function, the
+  standard library's), declarations marked.
+- The call hierarchy: what calls a function (across the workspace) and
+  what it calls.
+
 ## 0.24.0: @std/compress and @std/zip
 
 - `@std/compress`: gzip and gunzip (gzip files, joined ones too), deflate

@@ -18,6 +18,9 @@ files:
   exported name's across the workspace), the outline of classes, functions
   and variables, and the workspace's symbols;
 - the types of names declared without one, shown beside them;
+- highlighting by what each name is (classes, methods, parameters, the
+  standard library), the call hierarchy, and quick fixes (a misspelt
+  name, a standard module used without its `require`);
 - formatting (`cluau fmt`);
 - the debugger (`cluau debug`): breakpoints with conditions, hit counts and
   log messages, pausing on errors, stepping, the paused frames' variables,
