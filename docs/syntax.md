@@ -65,6 +65,64 @@ can, so `if (c) 1 else 2 + x` adds `x` to the `else` branch only. C's
 `c ? a : b` is not cluau: `?` and `:` already mean optional types,
 annotations and method calls.
 
+## Errors: try, catch, finally, throw
+
+```
+function Load(file: string): Config? {
+	try {
+		return json.decode(fs.read(file)) :: Config
+	} catch (error) {
+		if (!fs.exists(file)) {
+			return nil
+		}
+		throw error
+	} finally {
+		print("read", file)
+	}
+}
+```
+
+- `try { }` runs its block; when an error escapes it, `catch (name) { }`
+  runs with the error value as `name`. Either `catch` or `finally` may be
+  left out, not both.
+- The caught value is `unknown` to the type checker (an error can be any
+  value); `catch (error: string)` declares it.
+- `finally { }` runs after the rest whatever happened: after the block, after
+  the catch, and before an error that neither handled travels on.
+- A `return`, `break` or `continue` inside `try` or `catch` does what it
+  says, from where the statement stands: `return` leaves the function
+  (after `finally`), `break` and `continue` act on the loop around the
+  statement. A `finally` block cannot return, break or continue.
+- `throw value` raises `value` as it is: a re-raised error keeps its
+  message and position. It works anywhere, and inside `catch (error)`,
+  where the name `error` is the caught value rather than Luau's function.
+- `try`, `catch`, `finally` and `throw` are keywords only where they start
+  those statements; elsewhere they are ordinary names.
+
+It lowers to `pcall`, every line on its line.
+
+## Enums
+
+```
+enum Color { Red, Green, Blue }
+enum Status {
+	Ok = 200
+	NotFound = 404
+}
+
+let c: Color = Color.Red
+```
+
+- A member without a value is its own name as a string (`Color.Red ==
+  "Red"`): it prints, compares and serialises as itself. A member's value
+  may be a string or a number instead.
+- The enum's type is the union of its string members (`"Red" | "Green" |
+  "Blue"`), so a name that is not a member is a type error; an enum of
+  numbers is `number` (Luau has no number literal types).
+- The enum is a frozen table: `for (name, value in Status) { }` lists its
+  members, and assigning to it is an error.
+- Members are separated by commas or line breaks.
+
 ## Comments
 
 | cluau | Luau |
@@ -161,8 +219,8 @@ An exemption that covers nothing is a warning.
 ## Manifest mode
 
 A host may translate in *manifest mode* (Kiln's build manifests):
-`function`, `while`, `do { } while` and `class` are rejected, and the file
-is declarations only.
+`function`, `while`, `do { } while`, `try` and `class` are rejected, and
+the file is declarations only.
 
 ## Converting
 
@@ -177,7 +235,8 @@ stays a module table.
 An if-expression becomes cluau's (`if a then b elseif c then d else e`
 -> `if (a) b else if (c) d else e`). An identifier that is a cluau keyword
 (`let`, `const`, `class`) has no cluau form and is reported, left as
-written.
+written; so is a call to a function named `throw` or `try` at a
+statement's start (`throw(x)` would read as cluau's `throw`).
 
 `--verify` translates the result back and checks it is the input's tokens
 again (comments, parentheses and doubled `not`s aside).

@@ -423,3 +423,101 @@ TEST("format: a source that does not lex is left as it is")
 	CHECK(!r.Changed);
 	CHECK_EQ(r.Text, std::string("let s = \"unterminated\n  let t = 1\n"));
 }
+
+namespace {
+
+	cluau::TranslateResult ScriptTranslation(const std::string& source)
+	{
+		cluau::TranslateOptions options;
+		options.Script = true;
+		options.Profile = &cluau::ScriptProfile();
+		return cluau::Translate(source, options);
+	}
+
+} // namespace
+
+TEST("language: throw raises a value as it is")
+{
+	// A script raises through the runtime (a catch's `error` may hide Luau's).
+	CHECK_EQ(ScriptTranslation("throw \"bad\"\n").Luau, std::string("__cluau_throw( \"bad\")\n"));
+	CHECK_EQ(ScriptTranslation("throw {\n\tcode = 1,\n}\n").Luau, std::string("__cluau_throw( {\n\tcode = 1,\n})\n"));
+	// A host: Luau's error, with no position added.
+	CHECK_EQ(Luau("throw `x {y}`\n"), std::string("error( `x {y}`, 0)\n"));
+	// `throw` as a name stays a name.
+	CHECK_EQ(Luau("throw = 1\nthrow.x = 2\n"), std::string("throw = 1\nthrow.x = 2\n"));
+	CHECK(HasError(cluau::Translate("throw\n"), "throw raises a value"));
+}
+
+TEST("language: try / catch / finally keep every line on its line")
+{
+	const std::string source = "function F(): number {\n\ttry {\n\t\treturn 1\n\t} catch (error) {\n\t\tprint(error)\n\t\treturn 2\n\t} finally {\n\t\tprint(3)\n\t}\n}\n";
+	const cluau::TranslateResult r = ScriptTranslation(source);
+	CHECK(!r.HasErrors());
+	CHECK_EQ(Lines(r.Luau), Lines(source));
+	CHECK(r.Luau.find("pcall(function(): ...any") != std::string::npos);
+	CHECK(r.Luau.find("pcall(function (error: unknown): ...any") != std::string::npos);
+	CHECK(r.Luau.find("return 1, table.pack( 1)") != std::string::npos);
+	// The try ends its function: its return is unconditional.
+	CHECK(r.Luau.find(" return table.unpack(__try1val or {}, 1,") != std::string::npos);
+	// A catch's annotation is kept.
+	CHECK(ScriptTranslation("try {\n} catch (error: string) {\n}\n").Luau.find("(error: string): ...any") != std::string::npos);
+}
+
+TEST("language: break and continue leave a try for the loop around it")
+{
+	const cluau::TranslateResult r = ScriptTranslation("for (i = 1, 3) {\n\ttry {\n\t\tbreak\n\t} catch (error) {\n\t\tcontinue\n\t}\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("return 2") != std::string::npos);
+	CHECK(r.Luau.find("return 3") != std::string::npos);
+	CHECK(r.Luau.find("if __try1sig == 2 then break end") != std::string::npos);
+	CHECK(r.Luau.find("if __try1sig == 3 then continue end") != std::string::npos);
+	// A loop inside the try is the break's own.
+	CHECK(ScriptTranslation("try {\n\tfor (i = 1, 2) {\n\t\tbreak\n\t}\n} finally {\n}\n").Luau.find("return 2") == std::string::npos);
+}
+
+TEST("language: try mistakes are reported")
+{
+	CHECK(HasError(ScriptTranslation("try {\n}\n"), "try needs a catch or a finally"));
+	CHECK(HasError(ScriptTranslation("function F() {\n\ttry {\n\t} finally {\n\t\treturn\n\t}\n}\n"), "cannot return"));
+	CHECK(HasError(ScriptTranslation("try {\n\tbreak\n} catch (error) {\n}\n"), "not inside a loop"));
+	CHECK(HasError(ScriptTranslation("try {\n} catch {\n}\n"), "catch names the error"));
+	// `try` as a name, and a call with a table, outside a statement start.
+	CHECK(!cluau::Translate("try = 1\nlocal x = try\n").HasErrors());
+}
+
+TEST("language: enums are frozen tables with a type")
+{
+	const cluau::TranslateResult r = ScriptTranslation("enum Color { Red, Green = \"green\" }\nenum Code {\n\tOk = 200\n\tGone = -1\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK_EQ(Lines(r.Luau), 5);
+	CHECK(r.Luau.find("local Color = table.freeze( { Red = \"Red\" :: \"Red\", Green = \"green\" :: \"green\" }); export type Color = \"Red\" | \"green\"") !=
+		std::string::npos);
+	CHECK(r.Luau.find("Ok = 200,") != std::string::npos); // a comma where a line break separated members
+	CHECK(r.Luau.find("export type Code = number") != std::string::npos);
+	CHECK(HasError(ScriptTranslation("enum E { A, A }\n"), "has 'A' twice"));
+	CHECK(HasError(ScriptTranslation("enum E { A = f() }\n"), "a string or a number"));
+	CHECK(HasError(ScriptTranslation("enum E { }\n"), "has no members"));
+	// Inside a block, the type is local to it.
+	CHECK(ScriptTranslation("do {\n\tenum E { A }\n} while (false);\n").Luau.find("; type E =") != std::string::npos);
+}
+
+TEST("language: abstract classes and methods")
+{
+	const cluau::TranslateResult r = ScriptTranslation(
+		"abstract class Shape {\n\tabstract function Area(): number\n\tabstract function Scale(by: number)\n}\n"
+		"class Square extends Shape {\n\tfunction Area(): number { return 1 }\n\tfunction Scale(by: number) { }\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Classes[0].Abstract);
+	CHECK(r.Classes[0].Methods[0].Abstract);
+	CHECK(r.Luau.find("__abstract = true, __abstracts = { \"Area\", \"Scale\" }") != std::string::npos);
+	CHECK(r.Luau.find("function Shape.Area(self: Shape): number return __cluau_abstract(\"Shape\", \"Area\") end") != std::string::npos);
+	CHECK(r.Luau.find("function Shape.Scale(self: Shape, by: number) __cluau_abstract(\"Shape\", \"Scale\") end") != std::string::npos);
+	// An abstract class is not callable to the checker.
+	CHECK(r.Luau.find("__cluau_meta :: {  })") != std::string::npos);
+
+	CHECK(HasError(ScriptTranslation("abstract class A {\n\tabstract function F()\n}\nclass B extends A {\n}\n"),
+		"B does not define F, which A declares abstract"));
+	CHECK(HasError(ScriptTranslation("class A {\n\tabstract function F()\n}\n"), "so A is too"));
+	CHECK(HasError(ScriptTranslation("abstract class A {\n\tabstract function F() { }\n}\n"), "has no body"));
+	CHECK(HasError(cluau::Translate("abstract class A {\n}\n"), "not abstract"));
+}

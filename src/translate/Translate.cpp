@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <tuple>
 
 namespace cluau {
 
@@ -23,7 +24,7 @@ namespace cluau {
 		constexpr size_t npos = (size_t)-1;
 
 		enum class Frame : uint8_t { Paren, Bracket, Table, Block, Class };
-		enum class BlockKind : uint8_t { Plain, If, Else, Loop, Function, Repeat, Method };
+		enum class BlockKind : uint8_t { Plain, If, Else, Loop, Function, Repeat, Method, Try, Catch, Finally };
 
 		struct Open
 		{
@@ -245,6 +246,7 @@ namespace cluau {
 				m_Toks = detail::Lex(m_Src, m_R.Diagnostics);
 				const size_t n = m_Toks.size();
 				m_Repl.assign(n, std::nullopt);
+				m_After.assign(n, std::string());
 				m_BlockAt.assign(n, BlockMark{});
 				m_OpenedBlock.assign(n, 0);
 				m_ClosedBlock.assign(n, 0);
@@ -384,6 +386,81 @@ namespace cluau {
 				while (last > from && m_Toks[last].IsComment())
 					last--;
 				return std::string(m_Src.substr(m_Toks[from].Begin, m_Toks[last].End - m_Toks[from].Begin));
+			}
+
+			// Text the translation adds for `i` (all of it generated: the strict
+			// rules do not report in it).
+			void Generate(size_t i, std::string text)
+			{
+				m_GeneratedAt[i] = { 0, text.size() };
+				m_Repl[i] = std::move(text);
+			}
+
+			// Generated text after token `i` (on its line).
+			void AddAfter(size_t i, const std::string& text)
+			{
+				if (!m_Repl[i])
+					m_Repl[i] = std::string(m_Toks[i].Text);
+				m_After[i] += text;
+			}
+
+			// Ends a line that the next line continues.
+			static bool AwaitsOperand(const Token& t)
+			{
+				if (t.Kind == TokenKind::Name)
+					return t.Is("and") || t.Is("or") || t.Is("not");
+				if (t.Kind != TokenKind::Op)
+					return false;
+				static constexpr const char* kOps[] = { "=", "+", "-", "*", "/", "%", "^", "..", "==", "!=", "~=", "<", "<=", ">", ">=", "&&",
+					"||", "~/", ",", "!", "#", "(", "[", "{" };
+				for (const char* op : kOps)
+					if (t.Text == op)
+						return true;
+				return false;
+			}
+
+			// Starts a line that continues the one before.
+			static bool ContinuesLine(const Token& t)
+			{
+				if (t.Kind == TokenKind::Name)
+					return t.Is("and") || t.Is("or");
+				if (t.Kind != TokenKind::Op)
+					return false;
+				static constexpr const char* kOps[] = { ".", ":", "..", "*", "/", "%", "^", "==", "!=", "~=", "<=", ">=", "&&", "||", "~/", "(", "[" };
+				for (const char* op : kOps)
+					if (t.Text == op)
+						return true;
+				return false;
+			}
+
+			// The last token of the expression (or list) a statement keyword at
+			// `keyword` takes: to the end of its line unless brackets stay open or
+			// the line goes on; npos when there is none.
+			size_t ExpressionEnd(size_t keyword) const
+			{
+				size_t k = Sig(keyword + 1);
+				const Token& first = m_Toks[k];
+				if (first.Kind == TokenKind::Eof || first.Is("}") || first.Is(";") ||
+					(first.Line > m_Toks[keyword].EndLine && !ContinuesLine(first)))
+					return npos;
+				int depth = 0;
+				size_t last = npos;
+				for (;; k = Sig(k + 1))
+				{
+					const Token& t = m_Toks[k];
+					if (t.Kind == TokenKind::Eof)
+						break;
+					if (depth == 0 && (t.Is(";") || t.Is("}") || t.Is(")") || t.Is("]")))
+						break;
+					if (depth == 0 && last != npos && t.Line > m_Toks[last].EndLine && !AwaitsOperand(m_Toks[last]) && !ContinuesLine(t))
+						break;
+					if (t.Is("(") || t.Is("[") || t.Is("{"))
+						depth++;
+					else if (t.Is(")") || t.Is("]") || t.Is("}"))
+						depth--;
+					last = k;
+				}
+				return last;
 			}
 
 			void Error(const Token& t, std::string message, bool warning = false)
@@ -547,13 +624,414 @@ namespace cluau {
 					Const(i);
 				else if (w == "class")
 					Class(i);
+				else if (w == "abstract" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Is("class"))
+				{
+					Generate(i, "");
+					m_AbstractClassNext = true;
+				}
 				else if (w == "super" && InClass())
 					Super(i);
+				else if (w == "throw" && IsStatementStart(i) && IsKeywordUse(i))
+					Throw(i);
+				else if (w == "throw" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Line != t.Line)
+					Error(t, "throw raises a value: throw error / throw \"message\"");
+				else if (w == "try" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Is("{") && m_Toks[Sig(i + 1)].Line == t.Line)
+					Try(i);
+				else if (w == "enum" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Kind == TokenKind::Name && m_Toks[Sig(Sig(i + 1) + 1)].Is("{"))
+					Enum(i);
+				else if (w == "catch" && m_PrevSig != npos && m_TryClosed.count(m_PrevSig) && m_TryClosed[m_PrevSig].second == BlockKind::Try)
+					Catch(i);
+				else if (w == "finally" && m_PrevSig != npos && m_TryClosed.count(m_PrevSig))
+					Finally(i);
+				else if (w == "return")
+					Return(i);
+				else if ((w == "break" || w == "continue") && IsStatementStart(i) && !IsKeywordUseAsName(i))
+					Jump(i);
 				else if (w == "then" || w == "end" || w == "elseif" || w == "repeat" || w == "until")
 					Error(t, "cluau uses braces for blocks: '" + std::string(w) + "' is Luau syntax (see docs/syntax.md)");
 			}
 
-			void Header(size_t i, BlockKind kind, const char* opener, bool parenthesised)
+			// A contextual keyword (`throw`, `try`, `enum`, `abstract`) at a
+			// statement's start is the keyword unless the statement uses it as a
+			// name (`throw = 1`, `throw.x`, `throw(...)` across a line).
+			bool IsKeywordUse(size_t i) const
+			{
+				const Token& next = m_Toks[Sig(i + 1)];
+				if (next.Kind == TokenKind::Eof || next.Line != m_Toks[i].Line)
+					return false;
+				static constexpr const char* kNameUses[] = { "=", ".", ":", "[", ",", ";", "+=", "-=", "*=", "/=", "..=", "%=", "^=", "~/=", "++", "--" };
+				for (const char* use : kNameUses)
+					if (next.Is(use))
+						return false;
+				return true;
+			}
+
+			// `throw value`: raises `value` as it is (no position added, so a
+			// re-raised error keeps its own): `error(value, 0)`.
+			void Throw(size_t i)
+			{
+				const size_t last = ExpressionEnd(i);
+				if (last == npos)
+				{
+					Error(m_Toks[i], "throw raises a value: throw error / throw \"message\"");
+					return;
+				}
+				Generate(i, Raise() + "(");
+				AddAfter(last, m_Options.Script ? ")" : ", 0)");
+			}
+
+			// What raises an error as it is: in a script, the runtime's
+			// __cluau_throw; for a host, Luau's `error` (with level 0), taken by
+			// each try before a `catch (error)` can hide the name.
+			std::string Raise() const
+			{
+				if (m_Options.Script)
+					return "__cluau_throw";
+				const int t = EnclosingTry();
+				return t < 0 ? "error" : TryName(m_Tries[(size_t)t], "raise");
+			}
+
+			std::string RaiseCall(const std::string& value) const
+			{
+				return m_Options.Script ? "__cluau_throw(" + value + ")" : Raise() + "(" + value + ", 0)";
+			}
+
+			// The innermost try, catch or finally block around here (-1: none).
+			int EnclosingTry() const
+			{
+				for (size_t k = m_Stack.size(); k-- > 0;)
+				{
+					const Open& open = m_Stack[k];
+					if (open.Kind == Frame::Block &&
+						(open.Block == BlockKind::Try || open.Block == BlockKind::Catch || open.Block == BlockKind::Finally))
+						if (auto it = m_TryOf.find(open.Token); it != m_TryOf.end())
+							return (int)it->second;
+				}
+				return -1;
+			}
+
+			// `continue = 1`: Luau's `continue` is a name outside a statement of
+			// its own.
+			bool IsKeywordUseAsName(size_t i) const
+			{
+				const Token& next = m_Toks[Sig(i + 1)];
+				return next.Line == m_Toks[i].Line && !(next.Is("}") || next.Is(";") || next.Kind == TokenKind::Eof);
+			}
+
+			// ---- enum -----------------------------------------------------------
+			//
+			// enum Color { Red, Green = "green", Blue } lowers, on its lines, to a
+			// frozen table and its type:
+			//   local Color = table.freeze({ Red = "Red" :: "Red", Green = "green" :: "green", Blue = "Blue" :: "Blue" });
+			//   export type Color = "Red" | "green" | "Blue"
+			// A member's value is its name, a string, or a number (then the type is
+			// `number`: Luau has no number literal types).
+
+			void Enum(size_t i)
+			{
+				const size_t nameTok = Sig(i + 1);
+				const size_t brace = Sig(nameTok + 1);
+				const size_t close = MatchClose(brace);
+				const std::string name(m_Toks[nameTok].Text);
+				std::vector<std::string> strings;
+				std::set<std::string> names;
+				bool numbers = false;
+				for (size_t k = Sig(brace + 1); k < close;)
+				{
+					const Token& member = m_Toks[k];
+					if (member.Is(","))
+					{
+						m_Skip[k] = 1;
+						k = Sig(k + 1);
+						continue;
+					}
+					if (member.Kind != TokenKind::Name || IsExpressionWord(member.Text) || member.Is("true") || member.Is("false") || member.Is("nil"))
+					{
+						Error(member, "an enum's members are names: enum " + name + " { First, Second }");
+						break;
+					}
+					const std::string text(member.Text);
+					if (!names.insert(text).second)
+						Error(member, "enum " + name + " has '" + text + "' twice");
+					size_t last = k;
+					size_t next = Sig(k + 1);
+					std::string value = "\"" + text + "\"";
+					if (m_Toks[next].Is("="))
+					{
+						size_t v = Sig(next + 1);
+						const bool negative = m_Toks[v].Is("-") && m_Toks[Sig(v + 1)].Kind == TokenKind::Number;
+						if (negative)
+							v = Sig(v + 1);
+						if (m_Toks[v].Kind == TokenKind::String)
+							value = std::string(m_Toks[v].Text);
+						else if (m_Toks[v].Kind == TokenKind::Number)
+						{
+							value = std::string(m_Toks[v].Text);
+							numbers = true;
+						}
+						else
+						{
+							Error(m_Toks[v], "an enum member's value is a string or a number: " + text + " = 1");
+							break;
+						}
+						for (size_t s2 = next; s2 <= v; s2++)
+							m_Skip[s2] = 1;
+						last = v;
+						next = Sig(v + 1);
+					}
+					m_Skip[k] = 1;
+					const bool isString = value[0] == '"' || value[0] == '\'';
+					if (isString)
+					{
+						strings.push_back(value);
+						if (last == k)
+							Generate(k, text + " = " + value + " :: " + value);
+						else
+							AddAfter(last, " :: " + value);
+					}
+					else if (last == k)
+						Generate(k, text);
+					// Members a line apart need no comma; the table does.
+					if (!m_Toks[next].Is(",") && next < close)
+						AddAfter(last, ",");
+					k = next;
+				}
+				if (names.empty())
+					Error(m_Toks[nameTok], "enum " + name + " has no members: enum " + name + " { First, Second }");
+				std::string type;
+				if (numbers && strings.empty())
+					type = "number";
+				else if (numbers)
+					type = "string | number";
+				else
+					for (size_t k = 0; k < strings.size(); k++)
+						type += (k ? " | " : "") + strings[k];
+				if (type.empty())
+					type = "never";
+				Generate(i, m_Options.Repl ? "" : "local");
+				Generate(nameTok, name + " = table.freeze(");
+				m_Skip[nameTok] = 1;
+				m_Skip[brace] = 1;
+				m_Skip[close] = 1;
+				AddAfter(close, "); " + std::string(m_Stack.empty() ? "export " : "") + "type " + name + " = " + type);
+			}
+
+			// ---- try / catch / finally ----------------------------------------
+			//
+			// try { A } catch (error) { B } finally { C } lowers, on its lines, to
+			//   do local ok, sig, val = pcall(function() A end)
+			//   if not ok then ok, sig, val = pcall(function(error: unknown) B end, sig) end
+			//   do C end
+			//   if not ok then error(sig, 0) end  (an error neither block handled)
+			//   ... then what A or B left with: return (sig 1, its values in val),
+			//   break (2), continue (3) ...
+			// end
+			// A `return`, `break` or `continue` in A or B leaves its closure with its
+			// signal, and the statement then does it where it stands.
+
+			struct TryState
+			{
+				int Id = 0;
+				size_t Token = 0;
+				bool Returns = false, Breaks = false, Continues = false;
+				bool HasCatch = false, HasFinally = false;
+			};
+
+			std::string TryName(const TryState& t, const char* part) const { return "__try" + std::to_string(t.Id) + part; }
+
+			void Try(size_t i)
+			{
+				if (m_Options.Manifest)
+					Error(m_Toks[i], "manifests are declarations: try is not allowed");
+				TryState state;
+				state.Id = (int)m_Tries.size() + 1;
+				state.Token = i;
+				// A host's raise: Luau's `error`, or the enclosing try's (a catch
+				// around this one may hide the name).
+				const std::string raise = m_Options.Script ? std::string() : "local " + TryName(state, "raise") + " = " + Raise() + " ";
+				m_Tries.push_back(state);
+				const TryState& t = m_Tries.back();
+				Generate(i, "do " + raise + "local " + TryName(t, "ok") + ": boolean, " + TryName(t, "sig") + ": any, " + TryName(t, "val") +
+					": any = pcall(function(): ...any");
+				const size_t brace = Sig(i + 1);
+				MarkBlock(brace, BlockKind::Try, "");
+				m_TryOf[brace] = m_Tries.size() - 1;
+			}
+
+			void Catch(size_t i)
+			{
+				const size_t index = m_TryClosed[m_PrevSig].first;
+				TryState& t = m_Tries[index];
+				t.HasCatch = true;
+				Generate(i, " if not " + TryName(t, "ok") + " then " + TryName(t, "ok") + ", " + TryName(t, "sig") + ", " + TryName(t, "val") +
+					" = pcall(function");
+				const size_t open = Sig(i + 1);
+				const size_t name = Sig(open + 1);
+				if (!m_Toks[open].Is("(") || m_Toks[name].Kind != TokenKind::Name)
+				{
+					Error(m_Toks[i], "catch names the error it receives: catch (error) { }");
+					return;
+				}
+				size_t close = Sig(name + 1);
+				if (m_Toks[close].Is(":"))
+					close = Sig(SkipType(close + 1));
+				else
+					AddAfter(name, ": unknown");
+				const size_t brace = Sig(close + 1);
+				if (!m_Toks[close].Is(")") || !m_Toks[brace].Is("{"))
+				{
+					Error(m_Toks[i], "catch is catch (error) { ... }");
+					return;
+				}
+				AddAfter(close, ": ...any");
+				MarkBlock(brace, BlockKind::Catch, "");
+				m_TryOf[brace] = index;
+			}
+
+			void Finally(size_t i)
+			{
+				const size_t index = m_TryClosed[m_PrevSig].first;
+				m_Tries[index].HasFinally = true;
+				Generate(i, "");
+				const size_t brace = Sig(i + 1);
+				if (!m_Toks[brace].Is("{"))
+				{
+					Error(m_Toks[i], "finally needs a block: finally { ... }");
+					return;
+				}
+				MarkBlock(brace, BlockKind::Finally, "do");
+				m_TryOf[brace] = index;
+			}
+
+			// Where a return (or a break / continue) here goes: the try whose block
+			// it leaves first (its index), or -1 when it reaches its target first
+			// (the function for a return, a loop for a break or continue).
+			// `finally` is set when a finally block is in the way, `loop` when the
+			// target loop exists.
+			int TryInTheWay(bool jump, bool& finally, bool& loop) const
+			{
+				finally = false;
+				loop = false;
+				int found = -1;
+				for (size_t k = m_Stack.size(); k-- > 0;)
+				{
+					const Open& open = m_Stack[k];
+					if (open.Kind == Frame::Class)
+						break;
+					if (open.Kind != Frame::Block)
+						continue;
+					if (open.Block == BlockKind::Function || open.Block == BlockKind::Method)
+						break;
+					if (open.Block == BlockKind::Finally && found < 0)
+					{
+						finally = true;
+						return -1;
+					}
+					if (open.Block == BlockKind::Loop || open.Block == BlockKind::Repeat)
+					{
+						if (jump)
+						{
+							loop = true;
+							return found;
+						}
+						continue;
+					}
+					if ((open.Block == BlockKind::Try || open.Block == BlockKind::Catch) && found < 0)
+					{
+						auto it = m_TryOf.find(open.Token);
+						if (it != m_TryOf.end())
+						{
+							found = (int)it->second;
+							if (!jump)
+								return found;
+						}
+					}
+				}
+				return found;
+			}
+
+			void Return(size_t i)
+			{
+				bool finally = false, loop = false;
+				const int index = TryInTheWay(false, finally, loop);
+				if (finally)
+				{
+					Error(m_Toks[i], "a finally block runs on its way out: it cannot return");
+					return;
+				}
+				if (index < 0)
+					return;
+				m_Tries[(size_t)index].Returns = true;
+				const size_t last = ExpressionEnd(i);
+				if (last == npos)
+					Generate(i, "return 1, table.pack()");
+				else
+				{
+					Generate(i, "return 1, table.pack(");
+					AddAfter(last, ")");
+				}
+			}
+
+			void Jump(size_t i)
+			{
+				const bool isBreak = m_Toks[i].Is("break");
+				bool finally = false, loop = false;
+				const int index = TryInTheWay(true, finally, loop);
+				if (finally)
+				{
+					Error(m_Toks[i], std::string("a finally block runs on its way out: it cannot ") + (isBreak ? "break" : "continue"));
+					return;
+				}
+				if (index < 0)
+					return;
+				if (!loop)
+				{
+					Error(m_Toks[i], std::string(isBreak ? "break" : "continue") + " is not inside a loop");
+					return;
+				}
+				(isBreak ? m_Tries[(size_t)index].Breaks : m_Tries[(size_t)index].Continues) = true;
+				Generate(i, isBreak ? "return 2" : "return 3");
+			}
+
+			// After the try's last block: an error left over is raised again, and a
+	// return / break / continue from inside happens here (or travels on, out
+	// of an enclosing try). `last`: the statement ends its function, so its
+	// return is unconditional (the function returns on every path).
+	std::string TryEnd(const TryState& t, bool last)
+	{
+		const std::string ok = TryName(t, "ok"), sig = TryName(t, "sig"), val = TryName(t, "val");
+		std::string out = " if not " + ok + " then " + (m_Options.Script ? RaiseCall(sig) : TryName(t, "raise") + "(" + sig + ", 0)") + " end";
+		bool finally = false, loop = false;
+		for (const auto& [wanted, code, word] : { std::tuple{ t.Breaks, 2, "break" }, std::tuple{ t.Continues, 3, "continue" } })
+		{
+			if (!wanted)
+				continue;
+			const int outer = TryInTheWay(true, finally, loop);
+			if (outer >= 0)
+			{
+				(code == 2 ? m_Tries[(size_t)outer].Breaks : m_Tries[(size_t)outer].Continues) = true;
+				out += " if " + sig + " == " + std::to_string(code) + " then return " + std::to_string(code) + " end";
+			}
+			else
+				out += " if " + sig + " == " + std::to_string(code) + " then " + word + " end";
+		}
+		if (t.Returns)
+		{
+			const int outer = TryInTheWay(false, finally, loop);
+			if (outer >= 0)
+			{
+				m_Tries[(size_t)outer].Returns = true;
+				out += " if " + sig + " == 1 then return 1, " + val + " end";
+			}
+			else if (last)
+				out += " return table.unpack(" + val + " or {}, 1, if " + sig + " == 1 then " + val + ".n else 0)";
+			else
+				out += " if " + sig + " == 1 then return table.unpack(" + val + ", 1, " + val + ".n) end";
+		}
+		return out + " end";
+	}
+
+	void Header(size_t i, BlockKind kind, const char* opener, bool parenthesised)
 			{
 				const Token& t = m_Toks[i];
 				const size_t c = Sig(i + 1);
@@ -734,6 +1212,18 @@ namespace cluau {
 				size_t k = Sig(close + 1);
 				if (m_Toks[k].Is(":"))
 					k = Sig(SkipType(k + 1));
+				if (method && i == m_AbstractFunction)
+				{
+					// The body a subclass replaces: an error naming what is missing.
+					// (A `return` only with a declared return type: the call's own type,
+					// never, would otherwise become the method's, and an override's.)
+					const bool returns = m_Toks[Sig(close + 1)].Is(":");
+					AddAfter(m_AbstractEnd, std::string(returns ? " return " : " ") + "__cluau_abstract(\"" + m_ClassName + "\", \"" +
+						std::string(m_Toks[Sig(i + 1)].Text) + "\") end");
+					m_MethodHeaderEnd = m_AbstractEnd;
+					m_AbstractFunction = npos;
+					return;
+				}
 				if (!m_Toks[k].Is("{"))
 				{
 					Error(m_Toks[k], "a function body is a { } block");
@@ -915,9 +1405,45 @@ namespace cluau {
 				info.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
 				info.Base = base;
 				info.BaseAt = baseAt;
+				info.Abstract = m_AbstractClassNext;
+				m_AbstractClassNext = false;
+				if (info.Abstract && !m_Profile->Inheritance)
+					Error(t, "this host's classes are not abstract (or extended)");
 				info.BodyBeginLine = m_Toks[brace].Line;
 				info.BodyEndLine = m_Toks[end].Line;
 				ScanClass(brace, end, info);
+
+				// Abstract methods: declared by an abstract class, and each one defined
+				// by a class that is not (when its bases are in this file).
+				std::set<std::string> missing;
+				if (auto inherited = m_Unimplemented.find(base); inherited != m_Unimplemented.end())
+					missing = inherited->second;
+				for (const ClassMethod& m : info.Methods)
+				{
+					if (m.Abstract)
+					{
+						missing.insert(m.Name);
+						if (!info.Abstract)
+							Error(m_Toks[nameTok], m.Name + " is abstract, so " + m_ClassName + " is too: abstract class " + m_ClassName);
+					}
+					else
+						missing.erase(m.Name);
+				}
+				m_Unimplemented[m_ClassName] = missing;
+				std::string list; // the inherited ones still missing (an own abstract method is reported above)
+				for (const std::string& name : missing)
+				{
+					bool own = false;
+					for (const ClassMethod& m : info.Methods)
+						own = own || (m.Abstract && m.Name == name);
+					if (!own)
+						list += (list.empty() ? "" : ", ") + name;
+				}
+				if (!info.Abstract && !list.empty())
+				{
+					Error(m_Toks[nameTok], m_ClassName + " does not define " + list + ", which " + (base.empty() ? std::string("it") : base) +
+						" declares abstract");
+				}
 
 				// The header: the module table and the class type, on the
 				// class line.
@@ -1049,6 +1575,11 @@ namespace cluau {
 						if (m_Toks[a].Kind == TokenKind::Name)
 							attributes.push_back(std::string(m_Toks[a].Text));
 						j = Sig(a + 1);
+					}
+					if (m_Toks[j].Is("abstract") && m_Toks[Sig(j + 1)].Is("function"))
+					{
+						j = ScanAbstract(j, end, info);
+						continue;
 					}
 					if (m_Toks[j].Is("function"))
 					{
@@ -1216,6 +1747,42 @@ namespace cluau {
 				return 0;
 			}
 
+			// `abstract function Name(params): Type`: a signature, no body.
+			size_t ScanAbstract(size_t abstractTok, size_t end, ClassInfo& info)
+			{
+				const size_t fn = Sig(abstractTok + 1);
+				ClassMethod m;
+				m.Abstract = true;
+				const size_t nameTok = Sig(fn + 1);
+				if (m_Toks[nameTok].Kind != TokenKind::Name)
+					return Sig(fn + 1);
+				m.Name = std::string(m_Toks[nameTok].Text);
+				m.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
+				size_t p = Sig(nameTok + 1);
+				if (m_Toks[p].Is("<"))
+					p = Sig(MatchClose(p) + 1);
+				if (!m_Toks[p].Is("("))
+					return Sig(nameTok + 1);
+				const size_t close = MatchClose(p);
+				m.Params = Collapse(SourceText(p + 1, close));
+				size_t last = close;
+				size_t k = Sig(close + 1);
+				if (m_Toks[k].Is(":"))
+				{
+					const size_t typeEnd = SkipType(k + 1);
+					m.ReturnType = Collapse(SourceText(Sig(k + 1), typeEnd));
+					last = PrevSig(typeEnd);
+					k = Sig(typeEnd);
+				}
+				if (m_Toks[k].Is("{"))
+					Error(m_Toks[nameTok], "an abstract method has no body (a subclass gives it one): abstract function " + m.Name + "()");
+				m.BodyBeginLine = m.BodyEndLine = m_Toks[nameTok].Line;
+				info.Methods.push_back(std::move(m));
+				m_AbstractSpans.push_back({ abstractTok, fn, last });
+				(void)end;
+				return Sig(last + 1);
+			}
+
 			size_t ScanMethod(size_t fn, size_t end, ClassInfo& info)
 			{
 				ClassMethod m;
@@ -1280,6 +1847,15 @@ namespace cluau {
 
 			void ClassItem(size_t i)
 			{
+				for (const AbstractSpan& span : m_AbstractSpans)
+					if (span.Begin == i)
+					{
+						Generate(i, "");
+						m_AbstractFunction = span.Function;
+						m_AbstractEnd = span.End;
+						m_PrevSig = i;
+						return;
+					}
 				for (const SignalSpan& span : m_SignalSpans)
 				{
 					if (span.Begin != i)
@@ -1452,6 +2028,30 @@ namespace cluau {
 					m_ClassEnded = true;
 					return;
 				}
+				if (open.Block == BlockKind::Try || open.Block == BlockKind::Catch || open.Block == BlockKind::Finally)
+				{
+					const size_t index = m_TryOf[open.Token];
+					const Token& next = m_Toks[Sig(i + 1)];
+					const bool more = (open.Block == BlockKind::Try && (next.Is("catch") || next.Is("finally"))) ||
+						(open.Block == BlockKind::Catch && next.Is("finally"));
+					std::string text = open.Block == BlockKind::Try ? "end)"
+						: open.Block == BlockKind::Catch           ? "end, " + TryName(m_Tries[index], "sig") + ") end"
+																   : "end";
+					if (open.Block == BlockKind::Try && !more)
+						Error(m_Toks[m_Tries[index].Token], "try needs a catch or a finally: try { } catch (error) { }");
+					// The statement ends its function: the next token closes the function's block.
+					size_t after = Sig(i + 1);
+					while (m_Toks[after].Is(";"))
+						after = Sig(after + 1);
+					const bool lastInFunction = m_Toks[after].Is("}") && !m_Stack.empty() && m_Stack.back().Kind == Frame::Block &&
+						(m_Stack.back().Block == BlockKind::Function || m_Stack.back().Block == BlockKind::Method);
+					if (!more)
+						text += TryEnd(m_Tries[index], lastInFunction);
+					else
+						m_TryClosed[i] = { index, open.Block };
+					Generate(i, text);
+					return;
+				}
 				switch (open.Block)
 				{
 				case BlockKind::If:
@@ -1562,6 +2162,11 @@ namespace cluau {
 					if (auto gen = m_GeneratedAt.find(i); gen != m_GeneratedAt.end())
 						m_R.Generated.push_back({ { t.Line, outCol + (int)gen->second.first }, { t.Line, outCol + (int)(gen->second.first + gen->second.second) } });
 					append(text);
+					if (!m_After[i].empty())
+					{
+						m_R.Generated.push_back({ { t.EndLine, outCol }, { t.EndLine, outCol + (int)m_After[i].size() } });
+						append(m_After[i]);
+					}
 					if (!out.empty() && isWord(out.back()) && t.End < m_Src.size() && isWord(m_Src[t.End]))
 						append(" ");
 					m_R.Map.AddAnchor(t.EndLine, t.EndCol, outCol);
@@ -1576,6 +2181,7 @@ namespace cluau {
 			const ClassProfile* m_Profile = nullptr;
 			std::vector<Token> m_Toks;
 			std::vector<std::optional<std::string>> m_Repl;
+			std::vector<std::string> m_After; // generated text after a token (its replacement)
 			std::vector<BlockMark> m_BlockAt;
 			std::vector<uint8_t> m_OpenedBlock;
 			std::vector<uint8_t> m_ClosedBlock;
@@ -1606,6 +2212,20 @@ namespace cluau {
 			std::vector<SignalSpan> m_SignalSpans;
 			size_t m_StaticEnd = npos;
 			std::map<size_t, std::pair<size_t, size_t>> m_GeneratedAt; // token -> (offset, length) in its replacement
+			struct AbstractSpan
+			{
+				size_t Begin = 0;    // `abstract`
+				size_t Function = 0; // `function`
+				size_t End = 0;      // the signature's last token
+			};
+			std::vector<AbstractSpan> m_AbstractSpans;
+			size_t m_AbstractFunction = npos; // the `function` of the abstract method being read
+			size_t m_AbstractEnd = npos;
+			bool m_AbstractClassNext = false;
+			std::map<std::string, std::set<std::string>> m_Unimplemented; // a class's abstract methods no class has defined yet
+			std::vector<TryState> m_Tries;
+			std::map<size_t, size_t> m_TryOf; // a try's, catch's or finally's `{` -> its try
+			std::map<size_t, std::pair<size_t, BlockKind>> m_TryClosed; // a try's or catch's `}` that a catch / finally follows
 			std::string m_ClassName;
 			std::string m_ClassBase; // the class being translated's base ("" without one)
 			std::map<std::string, std::optional<std::string>> m_CtorParams; // each class's constructor parameters, for its subclasses
@@ -1703,9 +2323,21 @@ namespace cluau {
 				// parameters are unknown here.
 				const std::string ctor = members.CtorParams ? *members.CtorParams : std::string(", ...any");
 				ClassHeader h;
+				// An abstract class is not callable (to the checker; the runtime
+				// refuses too), and the abstract methods are listed for the
+				// runtime's check of a subclass.
+				std::string abstracts;
+				for (const ClassMethod& m : info.Methods)
+					if (m.Abstract)
+						abstracts += (abstracts.empty() ? "" : ", ") + std::string("\"") + m.Name + "\"";
+				std::string meta;
+				if (!info.Abstract)
+					meta = "__call: (unknown" + ctor + ") -> $Class";
+				if (derived)
+					meta += (meta.empty() ? "" : ", ") + std::string("__index: typeof(") + info.Base + ")";
 				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\"" + (derived ? ", __base = " + info.Base : std::string()) +
-					", __instance = (nil :: any) :: $Class }, __cluau_meta :: { __call: (unknown" + ctor + ") -> $Class" +
-					(derived ? ", __index: typeof(" + info.Base + ")" : std::string()) + " })";
+					(info.Abstract ? ", __abstract = true" : "") + (abstracts.empty() ? "" : ", __abstracts = { " + abstracts + " }") +
+					", __instance = (nil :: any) :: $Class }, __cluau_meta :: { " + meta + " })";
 				// Instances find their methods and statics in the class table
 				// (`__index`: its type, which the methods and statics after
 				// this line extend), and their metamethods in their metatable.
@@ -1732,7 +2364,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.11.0";
+		return "0.12.0";
 	}
 
 } // namespace cluau

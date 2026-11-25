@@ -1,0 +1,4 @@
+abstract.cluau:8:7: Circle does not define Area, Scale, which Shape declares abstract
+abstract.cluau:23:7: Run is abstract, so Concrete is too: abstract class Concrete
+cluau check: 2 error(s), 0 warning(s)
+exit: 1

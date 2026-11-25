@@ -1,0 +1,21 @@
+finally
+caught:	division by zero
+finally
+2	0
+pair's finally
+1	two
+loop	1
+loop	3
+handled inner
+finally before the re-raise
+false	first raised here
+false	42
+typed:	true
+count	2
+Green	404	safe
+Blue=Blue Green=Green Red=Red
+frozen:	false
+square of area 36
+false	language.cluau:142: Shape is abstract: construct one of its subclasses
+false	language.cluau:145: Unfinished does not define Scale (abstract in Shape)
+exit: 0

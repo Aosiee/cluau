@@ -1,0 +1,7 @@
+language.cluau:14:1: Expected this to be '"Blue" | "Green" | "Red"', but got '"Purple"'; none of the union options are compatible
+language.cluau:15:15: Cannot call a value of type Shape
+language.cluau:16:1: Expected this to be 'string', but got 'number'
+language.cluau:19:21: Expected this to be 'string', but got '('a, number?) -> never'
+language.cluau:21:21: Expected this to be 'string', but got 'unknown'
+cluau check: 5 error(s), 0 warning(s)
+exit: 1

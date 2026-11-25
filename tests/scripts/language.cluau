@@ -1,0 +1,146 @@
+// try / catch / finally, throw, enums and abstract classes.
+const Shape = require("./lib/shape")
+
+// try: the caught error, finally on every path, and returns from inside.
+function Divide(a: number, b: number): number {
+	try {
+		if (b == 0) {
+			throw "division by zero"
+		}
+		return a / b
+	} catch (error) {
+		print("caught:", error)
+		return 0
+	} finally {
+		print("finally")
+	}
+}
+print(Divide(6, 3), Divide(1, 0))
+
+function Pair(): (number, string) {
+	try {
+		return 1, "two"
+	} finally {
+		print("pair's finally")
+	}
+}
+print(Pair())
+
+// break and continue leave a try for the loop around it.
+for (i = 1, 5) {
+	try {
+		if (i == 2) {
+			continue
+		}
+		if (i == 4) {
+			break
+		}
+		print("loop", i)
+	} catch (error) {
+		print("never")
+	}
+}
+
+// A nested try returns through the outer one.
+function Nested(): string {
+	try {
+		try {
+			throw "inner"
+		} catch (error) {
+			return `handled {error}`
+		}
+	} catch (error) {
+		return "outer"
+	}
+}
+print(Nested())
+
+// throw re-raises a caught error as it was, inside catch (error) too.
+const rethrown, message = pcall(function() {
+	try {
+		error("first raised here", 0)
+	} catch (error) {
+		throw error
+	} finally {
+		print("finally before the re-raise")
+	}
+})
+print(rethrown, message)
+const tableOk, tableError = pcall(function() {
+	throw { code = 42 }
+})
+print(tableOk, (tableError :: { code: number }).code)
+
+// A catch's variable may be typed.
+try {
+	const missing: { x: number }? = nil
+	print((missing :: { x: number }).x)
+} catch (error: string) {
+	print("typed:", string.find(error, "attempt to index nil", 1, true) != nil)
+}
+
+// try with finally only.
+let count = 0
+try {
+	count = 1
+} finally {
+	count += 1
+}
+print("count", count)
+
+// Enums.
+enum Color { Red, Green, Blue }
+enum Status {
+	Ok = 200
+	NotFound = 404
+}
+enum Mode { Fast = "fast", Safe = "safe" }
+
+const favourite: Color = Color.Green
+print(favourite, Status.NotFound, Mode.Safe)
+const members: { string } = {}
+for (name, value in Color) {
+	table.insert(members, `{name}={value}`)
+}
+table.sort(members)
+print(table.concat(members, " "))
+print("frozen:", (pcall(function() {
+	(Color :: any).Purple = "purple" // allow-any: the test writes to the frozen table on purpose
+})))
+
+// Abstract classes.
+class Square extends Shape {
+	Side: number = 1
+
+	function Init(side: number) {
+		self.Side = side
+		self.Name = "square"
+	}
+
+	function Area(): number {
+		return self.Side * self.Side
+	}
+
+	function Scale(by: number) {
+		self.Side *= by
+	}
+}
+
+class Unfinished extends Shape {
+	function Init() {
+	}
+
+	function Area(): number {
+		return 0
+	}
+}
+
+const square = Square(3)
+square:Scale(2)
+print(square:Describe())
+print(pcall(function() {
+	return (Shape :: any)() // allow-any: constructing the abstract class on purpose
+}))
+print(pcall(function() {
+	return Unfinished()
+}))

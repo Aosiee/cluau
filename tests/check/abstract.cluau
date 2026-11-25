@@ -1,0 +1,25 @@
+// A class that leaves an abstract method undefined (reported by the
+// translation: the base is in the same file).
+abstract class Shape {
+	abstract function Area(): number
+	abstract function Scale(by: number)
+}
+
+class Circle extends Shape {
+	Radius: number = 1
+}
+
+abstract class Partial extends Shape {
+	function Area(): number {
+		return 0
+	}
+}
+
+class Whole extends Partial {
+	function Scale(by: number) {
+	}
+}
+
+class Concrete {
+	abstract function Run()
+}

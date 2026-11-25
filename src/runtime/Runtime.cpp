@@ -48,7 +48,18 @@ namespace cluau::runtime {
 		// metatable is the class table; a class's missing members are its
 		// base's (`__base`, from `extends`).
 		constexpr const char* kPrelude = R"LUAU(
-local kClassKeys = { __index = true, __name = true, __base = true, Fields = true }
+local kClassKeys = { __index = true, __name = true, __base = true, __abstract = true, __abstracts = true, Fields = true }
+
+-- The body an abstract method has until a subclass gives it one.
+function __cluau_abstract(class, method)
+	error(`{class}:{method} is abstract: a subclass of {class} defines it`, 3)
+end
+
+-- `throw value` in a script: raises the value as it is (a `catch (error)`
+-- may hide Luau's `error` where the throw is).
+function __cluau_throw(value)
+	error(value, 0)
+end
 
 __cluau_meta = {
 	__index = function(class, key)
@@ -59,7 +70,25 @@ __cluau_meta = {
 		return nil
 	end,
 	__call = function(class, ...)
+		if rawget(class, "__abstract") then
+			error(`{rawget(class, "__name")} is abstract: construct one of its subclasses`, 2)
+		end
 		if rawget(class, "__index") == nil then
+			-- Every abstract method of the bases must be defined by now.
+			local missing = {}
+			local c = class
+			while c do
+				for _, name in rawget(c, "__abstracts") or {} do
+					if class[name] == rawget(c, name) and c ~= class then
+						table.insert(missing, `{name} (abstract in {rawget(c, "__name")})`)
+					end
+				end
+				c = rawget(c, "__base")
+			end
+			if #missing > 0 then
+				table.sort(missing)
+				error(`{rawget(class, "__name")} does not define {table.concat(missing, ", ")}`, 2)
+			end
 			-- The first instance finishes the class: instances look their
 			-- methods up in it, and Luau finds metamethods without __index,
 			-- so the inherited ones are copied in.

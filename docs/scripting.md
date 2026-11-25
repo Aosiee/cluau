@@ -334,6 +334,44 @@ print(Bird("Pip", 2):Describe())   // Pip says tweet
   the same file; a subclass of another module's class that declares no
   `Init` is constructed unchecked, and `cluau check` warns about it).
 
+### Abstract classes
+
+An abstract class is a base that is not constructed itself, with methods
+its subclasses must define:
+
+```
+abstract class Shape {
+	Name: string = "shape"
+
+	abstract function Area(): number
+
+	function Describe(): string {
+		return `{self.Name} of area {self:Area()}`
+	}
+}
+
+class Square extends Shape {
+	Side: number = 1
+
+	function Area(): number {
+		return self.Side * self.Side
+	}
+}
+
+print(Square():Describe())   // shape of area 1
+```
+
+- `abstract function Name(params): Type` declares a method by its
+  signature, with no body. A class with one is `abstract class`.
+- Constructing an abstract class is an error, and a type error to `cluau
+  check`.
+- A class that is not abstract defines every abstract method it inherits.
+  When the bases are in the same file, a missing one is an error before
+  the script runs; otherwise the first construction of the class names
+  what it misses (`Square does not define Area (abstract in Shape)`).
+- An abstract class may extend another and leave some of its abstract
+  methods to its own subclasses.
+
 ## Modules
 
 `require(name)` loads a `.cluau` or `.luau` file once and returns what it

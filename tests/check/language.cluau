@@ -1,0 +1,23 @@
+// Mistakes with try, enums and abstract classes that cluau check reports.
+enum Color { Red, Green, Blue }
+
+abstract class Shape {
+	abstract function Area(): number
+}
+
+class Square extends Shape {
+	function Area(): number {
+		return 1
+	}
+}
+
+const purple: Color = "Purple"                 // not a member
+const shape = Shape()                          // an abstract class is not constructed
+const area: string = Square():Area()           // the abstract method's type holds
+
+try {
+	print(string.upper(error))                   // `error` is only the caught value inside catch
+} catch (error) {
+	print(string.upper(error))                   // the caught value is unknown until checked
+}
+print(purple, shape, area)

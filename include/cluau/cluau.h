@@ -86,6 +86,7 @@ namespace cluau {
 		std::string Params;     // the parameter list's text, translated, without the parentheses
 		std::string ReturnType; // "" when absent
 		bool ReturnsValue = false; // the body has a `return <expression>`
+		bool Abstract = false;     // `abstract function Name(...): Type`: no body, a subclass defines it
 		Range At;               // the method's name
 		int BodyBeginLine = 0;
 		int BodyEndLine = 0;
@@ -107,6 +108,7 @@ namespace cluau {
 		Range At;            // the class's name
 		std::string Base;    // `class Name extends Base`: the base class's expression ("" without one)
 		Range BaseAt;        // the base's expression
+		bool Abstract = false; // `abstract class`: not constructed itself, only its subclasses
 		// The class declares no Init and inherits one from a base the
 		// translator cannot see (another module's): its constructor's
 		// arguments cannot be typed.

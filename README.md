@@ -6,9 +6,10 @@
 [![Release](https://img.shields.io/github/v/release/Aosiee/cluau)](https://github.com/Aosiee/cluau/releases/latest)
 
 **C-syntax-flavoured Luau.** cluau is a Luau dialect: braces, C operators,
-`let` / `const` and classes, translated to standard Luau before Luau's type
-checker and compiler run. Luau's types, semantics, VM and libraries are
-unchanged, and every translated line stays on its line, so Luau's error
+`let` / `const`, classes, `try` / `catch` and enums, translated to standard
+Luau before Luau's type checker and compiler run. Luau's types, semantics,
+VM and libraries are unchanged, and every translated line stays on its
+line, so Luau's error
 messages and line-based debuggers point at the `.cluau` source.
 
 ```

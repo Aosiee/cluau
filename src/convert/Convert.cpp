@@ -438,6 +438,10 @@ namespace cluau {
 				}
 				else if (w == "let" || w == "const" || w == "class")
 					Error(t, "'" + std::string(w) + "' is a cluau keyword: rename it (left as written)");
+				else if ((w == "throw" || w == "try") && (i == 0 || (!At(i - 1).Is(".") && !At(i - 1).Is(":"))) && At(i + 1).Line == t.Line &&
+					(At(i + 1).Is("{") || (w == "throw" && (At(i + 1).Is("(") || At(i + 1).K == Kind::String))))
+					Error(t, "a call to '" + std::string(w) + "' here reads as cluau's " + std::string(w) +
+						" statement: rename the function (left as written)");
 			}
 
 			// `function [name][<generics>](params)[: type]` gets ` {` after its

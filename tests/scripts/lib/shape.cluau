@@ -1,0 +1,11 @@
+// An abstract class, for a subclass in another file.
+abstract class Shape {
+	Name: string = "shape"
+
+	abstract function Area(): number
+	abstract function Scale(by: number)
+
+	function Describe(): string {
+		return `{self.Name} of area {self:Area()}`
+	}
+}

@@ -32,6 +32,8 @@ namespace cluau::runtime {
 declare function repr(value: unknown): string
 declare function input(prompt: string?): string?
 declare __cluau_meta: unknown
+declare function __cluau_throw(value: unknown): never
+declare function __cluau_abstract(class: string, method: string): never
 )LUAU";
 
 		// Each standard module's type, as a module the checker reads for
@@ -489,7 +491,7 @@ return m :: {
 				for (const ClassInfo& c : translation->Classes)
 					if (c.UncheckedConstructor)
 						out.push_back({ display, c.At, "UncheckedConstructor",
-							c.Name + "(...)'s arguments are not checked: its Init comes from " + c.Base +
+							c.Name + "(...)'s arguments are not checked: its constructor comes from " + c.Base +
 								", another module's class (declare Init in " + c.Name + " to check them)",
 							true });
 				if (translation->HasErrors())
