@@ -1,0 +1,48 @@
+// @std/crypto and @std/encoding: known digests, HMACs (RFC 4231), base64
+// (RFC 4648), hex, random bytes, UUIDs and the comparison.
+const crypto = require("@std/crypto")
+const encoding = require("@std/encoding")
+
+print(crypto.hash("md5", ""))
+print(crypto.hash("sha1", "abc"))
+print(crypto.hash("sha256", "abc"))
+print(crypto.hash("sha512", "abc"))
+print(crypto.hash("sha256", buffer.fromstring("abc")) == crypto.hash("sha256", "abc"))
+print(#crypto.hash("sha256", "abc", { raw = true }))
+
+// RFC 4231, case 2.
+print(crypto.hmac("sha256", "Jefe", "what do ya want for nothing?"))
+
+const hasher = crypto.hasher("sha256")
+hasher:update("a"):update("b")
+hasher:update(buffer.fromstring("c"))
+print(hasher:digest() == crypto.hash("sha256", "abc"))
+print(pcall(function() {
+	hasher:digest()
+}))
+
+for (_, text in { "", "f", "fo", "foo", "foob", "fooba", "foobar" }) {
+	const encoded = encoding.toBase64(text)
+	print(`"{text}"`, encoded, encoding.fromBase64(encoded) == text)
+}
+const bytes = "\255\254\253\0\1"
+print(encoding.toBase64(bytes), encoding.toBase64(bytes, { url = true }), encoding.fromBase64(encoding.toBase64(bytes, { url = true })) == bytes)
+print(encoding.toHex("cluau"), encoding.fromHex("636C756175"), encoding.toHex(bytes))
+
+const random = crypto.randomBytes(32)
+print(#random, random != crypto.randomBytes(32))
+const id = crypto.uuid()
+print(#id, string.match(id, "^%x+%-%x+%-4%x+%-[89ab]%x+%-%x+$") != nil, id != crypto.uuid())
+print(crypto.equal("secret", "secret"), crypto.equal("secret", "secreT"), crypto.equal("a", "ab"))
+
+// The checker refuses a hash it does not know; at run time it is an error too.
+const unknown: string = "sha3"
+const attempts: { () -> ...unknown } = {
+	function() { crypto.hash(unknown :: crypto.Algorithm, "x") },
+	function() { encoding.fromBase64("a$b") },
+	function() { encoding.fromHex("abc") },
+}
+for (_, attempt in attempts) {
+	const ok, why = pcall(attempt)
+	print(ok, string.match(tostring(why), "(%a+%.%w+: .*)$"))
+}

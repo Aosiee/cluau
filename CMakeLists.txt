@@ -59,8 +59,14 @@ if(CLUAU_BUILD_RUNTIME)
     # pinned releases and linked in, so the tool stays one file. The
     # certificates come from the system at run time (src/runtime/Http.cpp).
     option(CLUAU_HTTP "Build @std/http (fetches libcurl and mbedTLS)" ON)
-    if(CLUAU_HTTP)
+    # @std/crypto, and TLS in @std/net, on the same mbedTLS.
+    option(CLUAU_CRYPTO "Build @std/crypto and TLS connections in @std/net (fetches mbedTLS)" ON)
+    if(CLUAU_HTTP OR CLUAU_CRYPTO)
         include(FetchContent)
+        # With its threading (cmake/mbedtls/cluau_config.h): transfers and
+        # connections run on several threads at once. Whatever includes its
+        # headers sees the same configuration through its targets.
+        set(MBEDTLS_USER_CONFIG_FILE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls/cluau_config.h CACHE FILEPATH "" FORCE)
         set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
         set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
         set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
@@ -77,6 +83,13 @@ if(CLUAU_BUILD_RUNTIME)
         FetchContent_MakeAvailable(mbedtls)
         unset(CMAKE_POLICY_VERSION_MINIMUM)
         set_property(DIRECTORY ${mbedtls_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+        find_package(Threads REQUIRED)
+        foreach(library mbedcrypto mbedx509 mbedtls)
+            target_include_directories(${library} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls) # threading_alt.h
+            target_link_libraries(${library} PUBLIC Threads::Threads)
+        endforeach()
+    endif()
+    if(CLUAU_HTTP)
 
         # curl finds this mbedTLS through these (its targets, not installed files).
         set(MBEDTLS_INCLUDE_DIR ${mbedtls_SOURCE_DIR}/include CACHE PATH "" FORCE)
@@ -163,7 +176,7 @@ if(CLUAU_BUILD_RUNTIME)
         COMMENT "Embedding the standard modules written in cluau")
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
         src/runtime/Check.cpp src/runtime/Json.cpp src/runtime/LanguageService.cpp src/runtime/LspServer.cpp
-        src/runtime/Debugger.cpp src/runtime/DapServer.cpp src/runtime/Profile.cpp src/runtime/Jobs.cpp src/runtime/Net.cpp
+        src/runtime/Debugger.cpp src/runtime/DapServer.cpp src/runtime/Profile.cpp src/runtime/Jobs.cpp src/runtime/Net.cpp src/runtime/Encoding.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
@@ -179,6 +192,18 @@ if(CLUAU_BUILD_RUNTIME)
         target_sources(cluau_runtime PRIVATE src/runtime/Regex.cpp)
         target_link_libraries(cluau_runtime PRIVATE pcre2-8-static)
         target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_REGEX PCRE2_CODE_UNIT_WIDTH=8 PCRE2_STATIC)
+    endif()
+    if(CLUAU_HTTP OR CLUAU_CRYPTO)
+        target_sources(cluau_runtime PRIVATE src/runtime/Tls.cpp)
+        target_link_libraries(cluau_runtime PRIVATE mbedtls mbedx509 mbedcrypto)
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_MBEDTLS)
+        if(WIN32)
+            target_link_libraries(cluau_runtime PRIVATE crypt32 bcrypt) # the system's certificates, its random numbers
+        endif()
+    endif()
+    if(CLUAU_CRYPTO)
+        target_sources(cluau_runtime PRIVATE src/runtime/Crypto.cpp)
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_CRYPTO)
     endif()
     if(CLUAU_HTTP)
         target_sources(cluau_runtime PRIVATE src/runtime/Http.cpp)

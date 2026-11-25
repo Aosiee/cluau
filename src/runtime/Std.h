@@ -53,6 +53,12 @@ namespace cluau::runtime::detail {
 	// Pushes @std/sqlite's table (when the runtime is built with it).
 	void OpenSqlite(lua_State* L);
 
+	// Pushes @std/crypto's table (when the runtime is built with it).
+	void OpenCrypto(lua_State* L);
+
+	// Pushes @std/encoding's table (base64, hex).
+	void OpenEncoding(lua_State* L);
+
 	// After a read of standard input came back empty-handed: when a Ctrl-C
 	// stopped it, raises the `interrupted` error (and does not return).
 	void RaiseIfInterrupted(lua_State* L);

@@ -1,0 +1,53 @@
+// TLS in @std/net: a server with the test certificate (which only these
+// tests trust) and clients in tasks: trusted, untrusted, the wrong name, and
+// without verification.
+const net = require("@std/net")
+const task = require("@std/task")
+
+const cert = "../http/test-cert.pem"
+const key = "../http/test-key.pem"
+const server = net.listen("127.0.0.1", 0, { tls = { certFile = cert, keyFile = key } })
+print("listening", server.tls)
+
+task.spawn(function() {
+	while (true) {
+		const ok, client = pcall(function(): net.Socket {
+			return server:accept()
+		})
+		if (!ok) {
+			break
+		}
+		task.spawn(function() {
+			for (line in client:lines()) {
+				client:write(`secure {line}\n`)
+			}
+			client:close()
+		})
+	}
+})
+
+const trusted = net.connect("127.0.0.1", server.port, { tls = true, caFile = cert })
+trusted:write("hello\n", "again\n")
+print(trusted.tls, trusted:readLine(), trusted:readLine())
+trusted:close()
+
+const byName = net.connect("localhost", server.port, { tls = true, caFile = cert })
+byName:write("by name\n")
+print(byName:readLine())
+byName:close()
+
+const untrusted, why = pcall(function() {
+	net.connect("127.0.0.1", server.port, { tls = true })
+})
+print("untrusted", untrusted, string.find(tostring(why), "not trusted", 1, true) != nil)
+
+const wrongName, nameWhy = pcall(function() {
+	net.connect("127.0.0.1", server.port, { tls = true, caFile = cert, serverName = "example.com" })
+})
+print("wrong name", wrongName, string.find(tostring(nameWhy), "not trusted", 1, true) != nil)
+
+const unverified = net.connect("127.0.0.1", server.port, { tls = true, verify = false })
+unverified:write("unverified\n")
+print(unverified:readLine())
+unverified:close()
+server:close()

@@ -6,6 +6,9 @@
 
 #include "Std.h"
 #include "Jobs.h"
+#ifdef CLUAU_HAS_MBEDTLS
+#include "Tls.h"
+#endif
 #include "Spawn.h"
 
 #include "lua.h"
@@ -2131,6 +2134,9 @@ namespace cluau::runtime::detail {
 
 	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox)
 	{
+#ifdef CLUAU_HAS_MBEDTLS
+		StartMbedtls(); // before any other use of it (Windows' mutexes)
+#endif
 		OpenFileType(L);
 		OpenChildType(L);
 		lua_newtable(L); // the registry's module table
@@ -2207,6 +2213,12 @@ namespace cluau::runtime::detail {
 			lua_setfield(L, -2, "sqlite");
 		}
 #endif
+#ifdef CLUAU_HAS_CRYPTO
+		OpenCrypto(L);
+		lua_setfield(L, -2, "crypto");
+#endif
+		OpenEncoding(L);
+		lua_setfield(L, -2, "encoding");
 
 		OpenJobs(L);
 		lua_setfield(L, -2, "_jobs");
@@ -2228,7 +2240,10 @@ namespace cluau::runtime::detail {
 
 	const char* StdNames()
 	{
-		static const std::string names = std::string("@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time")
+		static const std::string names = std::string("@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/encoding")
+#ifdef CLUAU_HAS_CRYPTO
+										 + ", @std/crypto"
+#endif
 #ifdef CLUAU_HAS_HTTP
 										 + ", @std/http"
 #endif

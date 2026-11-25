@@ -7,6 +7,7 @@
 
 #include "Std.h"
 #include "Jobs.h"
+#include "Tls.h"
 
 #include "cluau/cluau.h"
 #include "lua.h"
@@ -40,98 +41,11 @@ namespace cluau::runtime::detail {
 
 	namespace {
 
-		// ---- certificates ------------------------------------------------
-
-		struct Certificates
-		{
-			std::string File;  // a bundle file
-			std::string Dir;   // a directory of certificates
-			std::string Pem;   // certificates in memory (Windows' store)
-			std::string Where; // what was found, for an error message
-		};
-
-#ifdef _WIN32
-		// The machine's and the user's trusted roots (and intermediates), as PEM.
-		std::string WindowsStorePem()
-		{
-			std::string pem;
-			for (const wchar_t* name : { L"ROOT", L"CA" })
-			{
-				HCERTSTORE store = CertOpenSystemStoreW(0, name);
-				if (!store)
-					continue;
-				PCCERT_CONTEXT cert = nullptr;
-				while ((cert = CertEnumCertificatesInStore(store, cert)) != nullptr)
-				{
-					if (cert->dwCertEncodingType != X509_ASN_ENCODING)
-						continue;
-					DWORD length = 0;
-					if (!CryptBinaryToStringA(cert->pbCertEncoded, cert->cbCertEncoded, CRYPT_STRING_BASE64HEADER | CRYPT_STRING_NOCR, nullptr,
-							&length))
-						continue;
-					std::string text(length, '\0');
-					if (CryptBinaryToStringA(cert->pbCertEncoded, cert->cbCertEncoded, CRYPT_STRING_BASE64HEADER | CRYPT_STRING_NOCR, text.data(),
-							&length))
-					{
-						text.resize(std::strlen(text.c_str()));
-						pem += text;
-					}
-				}
-				CertCloseStore(store, 0);
-			}
-			return pem;
-		}
-#endif
-
-		const Certificates& SystemCertificates()
-		{
-			static const Certificates found = [] {
-				Certificates c;
-				std::error_code ec;
-				if (const char* file = std::getenv("SSL_CERT_FILE"); file && *file)
-				{
-					c.File = file;
-					c.Where = std::string("SSL_CERT_FILE (") + file + ")";
-				}
-				if (const char* dir = std::getenv("SSL_CERT_DIR"); dir && *dir)
-				{
-					c.Dir = dir;
-					c.Where += (c.Where.empty() ? "" : ", ") + std::string("SSL_CERT_DIR (") + dir + ")";
-				}
-				if (!c.File.empty() || !c.Dir.empty())
-					return c;
-#if defined(_WIN32)
-				c.Pem = WindowsStorePem();
-				c.Where = "the Windows certificate store";
-#else
-				static const char* kBundles[] = {
-#if defined(__APPLE__)
-					"/etc/ssl/cert.pem",
-#endif
-					"/etc/ssl/certs/ca-certificates.crt",                // Debian, Ubuntu, Arch, Gentoo
-					"/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // Fedora, RHEL
-					"/etc/pki/tls/certs/ca-bundle.crt",                  // older Fedora, RHEL
-					"/etc/ssl/ca-bundle.pem",                            // openSUSE
-					"/etc/ssl/cert.pem",                                 // Alpine, the BSDs
-					"/usr/local/share/certs/ca-root-nss.crt",            // FreeBSD
-				};
-				for (const char* bundle : kBundles)
-					if (fs::is_regular_file(bundle, ec))
-					{
-						c.File = bundle;
-						c.Where = bundle;
-						break;
-					}
-#endif
-				return c;
-			}();
-			return found;
-		}
-
 		// ---- a request ------------------------------------------------------
 
 		void InitCurl()
 		{
+			StartMbedtls();
 			static const bool done = [] {
 				curl_global_init(CURL_GLOBAL_DEFAULT);
 				return true;

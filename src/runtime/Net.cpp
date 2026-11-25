@@ -5,6 +5,17 @@
 
 #include "Std.h"
 #include "Jobs.h"
+#ifdef CLUAU_HAS_MBEDTLS
+#include "Tls.h"
+
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
+#endif
 
 #include "lua.h"
 #include "lualib.h"
@@ -137,6 +148,55 @@ namespace cluau::runtime::detail {
 			return std::string(text) + ":" + std::to_string(number);
 		}
 
+#ifdef CLUAU_HAS_MBEDTLS
+		// A TLS connection's state over its socket (which is non-blocking:
+		// mbedTLS runs one call at a time, holding Lock, and the waits for
+		// the socket happen between calls, so a read and a write in two
+		// tasks both go ahead).
+		struct TlsState
+		{
+			mbedtls_ssl_context Ssl;
+			mbedtls_ssl_config Config;
+			mbedtls_x509_crt Trusted, Own;
+			mbedtls_pk_context Key;
+			mbedtls_entropy_context Entropy;
+			mbedtls_ctr_drbg_context Random;
+			std::mutex Lock;
+
+			TlsState()
+			{
+				mbedtls_ssl_init(&Ssl);
+				mbedtls_ssl_config_init(&Config);
+				mbedtls_x509_crt_init(&Trusted);
+				mbedtls_x509_crt_init(&Own);
+				mbedtls_pk_init(&Key);
+				mbedtls_entropy_init(&Entropy);
+				mbedtls_ctr_drbg_init(&Random);
+			}
+			~TlsState()
+			{
+				mbedtls_ssl_free(&Ssl);
+				mbedtls_ssl_config_free(&Config);
+				mbedtls_x509_crt_free(&Trusted);
+				mbedtls_x509_crt_free(&Own);
+				mbedtls_pk_free(&Key);
+				mbedtls_ctr_drbg_free(&Random);
+				mbedtls_entropy_free(&Entropy);
+			}
+		};
+
+		std::string TlsError(int rc)
+		{
+			char text[200] = {};
+			mbedtls_strerror(rc, text, sizeof(text));
+			return text;
+		}
+#else
+		struct TlsState
+		{
+		};
+#endif
+
 		// A socket shared by the script's handle and the jobs using it: it is
 		// closed when the last of them lets go; Close ends the waits on it.
 		struct Socket
@@ -150,6 +210,8 @@ namespace cluau::runtime::detail {
 			double Timeout = 0; // seconds a wait may take (0: no limit)
 			std::string LocalHost, RemoteHost;
 			int LocalPort = 0, RemotePort = 0;
+			std::unique_ptr<TlsState> Tls; // a TLS connection's
+			std::string CertFile, KeyFile;  // a TLS server's
 
 			std::mutex Using;
 			int Users = 0; // the jobs waiting on it now
@@ -166,8 +228,17 @@ namespace cluau::runtime::detail {
 			void Close()
 			{
 				std::lock_guard<std::mutex> lock(Using);
-				if (Closed.exchange(true))
+				if (Closed.load())
 					return;
+#ifdef CLUAU_HAS_MBEDTLS
+				// The peer is told (when no wait is using the connection).
+				if (Tls && Users == 0)
+				{
+					std::lock_guard<std::mutex> tls(Tls->Lock);
+					mbedtls_ssl_close_notify(&Tls->Ssl);
+				}
+#endif
+				Closed = true;
 #ifdef _WIN32
 				shutdown(Handle, SD_BOTH);
 #else
@@ -324,6 +395,165 @@ namespace cluau::runtime::detail {
 			return timeout;
 		}
 
+		// ---- TLS ---------------------------------------------------------------
+
+		struct TlsOptions
+		{
+			bool Enabled = false;
+			bool Verify = true;
+			std::string CaFile, ServerName;
+		};
+
+#ifdef CLUAU_HAS_MBEDTLS
+		bool WouldBlock()
+		{
+#ifdef _WIN32
+			return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+			return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+		}
+
+		// mbedTLS's view of the (non-blocking) socket.
+		int TlsSend(void* context, const unsigned char* data, size_t size)
+		{
+			Socket& socket = *static_cast<Socket*>(context);
+#ifdef _WIN32
+			const int n = ::send(socket.Handle, reinterpret_cast<const char*>(data), (int)std::min<size_t>(size, 1 << 30), 0);
+#else
+			const ssize_t n = ::send(socket.Handle, data, size, kSendFlags);
+#endif
+			if (n < 0)
+				return WouldBlock() ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
+			return (int)n;
+		}
+
+		int TlsReceive(void* context, unsigned char* data, size_t size)
+		{
+			Socket& socket = *static_cast<Socket*>(context);
+			const auto n = ::recv(socket.Handle, reinterpret_cast<char*>(data), (int)std::min<size_t>(size, 1 << 30), 0);
+			if (n < 0)
+				return WouldBlock() ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_NET_RECV_FAILED;
+			return (int)n;
+		}
+
+		// One TLS call, retried as the socket becomes ready: its result, or
+		// false with the reason the wait ended.
+		template <typename Call>
+		bool TlsCall(Socket& socket, double timeout, Call call, int& rc, std::string& why)
+		{
+			for (;;)
+			{
+				{
+					std::lock_guard<std::mutex> lock(socket.Tls->Lock);
+					rc = call(socket.Tls->Ssl);
+				}
+				if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
+					return true;
+				const Ready ready = WaitFor(socket, rc == MBEDTLS_ERR_SSL_WANT_WRITE, timeout);
+				if (ready != Ready::Yes)
+				{
+					why = Why(ready, timeout);
+					return false;
+				}
+			}
+		}
+
+		// The handshake, as a client (`options`) or a server (`server`'s
+		// certificate and key): "" when it succeeded, else the reason.
+		std::string Handshake(Socket& socket, double timeout, const TlsOptions* options, const Socket* server, const std::string& host)
+		{
+			auto tls = std::make_unique<TlsState>();
+			int rc = mbedtls_ctr_drbg_seed(&tls->Random, mbedtls_entropy_func, &tls->Entropy, nullptr, 0);
+			if (rc == 0)
+				rc = mbedtls_ssl_config_defaults(&tls->Config, server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+					MBEDTLS_SSL_PRESET_DEFAULT);
+			if (rc != 0)
+				return TlsError(rc);
+			mbedtls_ssl_conf_rng(&tls->Config, mbedtls_ctr_drbg_random, &tls->Random);
+			if (server)
+			{
+				rc = mbedtls_x509_crt_parse_file(&tls->Own, server->CertFile.c_str());
+				if (rc < 0)
+					return "cannot read the certificate '" + server->CertFile + "': " + TlsError(rc);
+				rc = mbedtls_pk_parse_keyfile(&tls->Key, server->KeyFile.c_str(), nullptr, mbedtls_ctr_drbg_random, &tls->Random);
+				if (rc < 0)
+					return "cannot read the key '" + server->KeyFile + "': " + TlsError(rc);
+				rc = mbedtls_ssl_conf_own_cert(&tls->Config, &tls->Own, &tls->Key);
+				if (rc != 0)
+					return TlsError(rc);
+			}
+			else
+			{
+				std::string error;
+				if (options->Verify)
+				{
+					if (!LoadTrusted(tls->Trusted, options->CaFile, error))
+						return error;
+					mbedtls_ssl_conf_ca_chain(&tls->Config, &tls->Trusted, nullptr);
+				}
+				mbedtls_ssl_conf_authmode(&tls->Config, options->Verify ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
+			}
+			if ((rc = mbedtls_ssl_setup(&tls->Ssl, &tls->Config)) != 0)
+				return TlsError(rc);
+			if (!server)
+			{
+				const std::string& name = options->ServerName.empty() ? host : options->ServerName;
+				if ((rc = mbedtls_ssl_set_hostname(&tls->Ssl, name.c_str())) != 0)
+					return TlsError(rc);
+			}
+			mbedtls_ssl_set_bio(&tls->Ssl, &socket, TlsSend, TlsReceive, nullptr);
+			SetBlocking(socket.Handle, false);
+			socket.Tls = std::move(tls);
+			std::string why;
+			if (!TlsCall(socket, timeout, [](mbedtls_ssl_context& ssl) { return mbedtls_ssl_handshake(&ssl); }, rc, why))
+				return why;
+			if (rc != 0)
+			{
+				const uint32_t flags = mbedtls_ssl_get_verify_result(&socket.Tls->Ssl);
+				if (rc == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED && flags != 0)
+				{
+					char info[512] = {};
+					mbedtls_x509_crt_verify_info(info, sizeof(info), "", flags);
+					std::string text = info;
+					while (!text.empty() && (text.back() == '\n' || text.back() == ' '))
+						text.pop_back();
+					for (char& c : text)
+						if (c == '\n')
+							c = ';';
+					return "the server's certificate is not trusted (" + text + ")";
+				}
+				return TlsError(rc);
+			}
+			return {};
+		}
+#endif
+
+		TlsOptions ReadTlsOptions(lua_State* L, int index, const char* fn)
+		{
+			TlsOptions tls;
+			if (!lua_istable(L, index))
+				return tls;
+			lua_getfield(L, index, "tls");
+			tls.Enabled = lua_toboolean(L, -1);
+			lua_getfield(L, index, "verify");
+			tls.Verify = lua_isnil(L, -1) || lua_toboolean(L, -1);
+			lua_getfield(L, index, "caFile");
+			if (lua_isstring(L, -1))
+				tls.CaFile = lua_tostring(L, -1);
+			lua_getfield(L, index, "serverName");
+			if (lua_isstring(L, -1))
+				tls.ServerName = lua_tostring(L, -1);
+			lua_pop(L, 4);
+#ifndef CLUAU_HAS_MBEDTLS
+			if (tls.Enabled)
+				luaL_error(L, "%s: this cluau is built without TLS", fn);
+#else
+			(void)fn;
+#endif
+			return tls;
+		}
+
 		// ---- net.connect -------------------------------------------------
 
 		int NetConnect(lua_State* L)
@@ -333,8 +563,9 @@ namespace cluau::runtime::detail {
 			if (port <= 0 || port > 65535)
 				luaL_argerror(L, 2, "a port from 1 to 65535");
 			const double timeout = TimeoutOption(L, 3, "net.connect");
+			const TlsOptions tls = ReadTlsOptions(L, 3, "net.connect");
 			StartSockets();
-			return Await(L, [host, port, timeout]() -> JobResult {
+			return Await(L, [host, port, timeout, tls]() -> JobResult {
 				const std::string where = host + ":" + std::to_string(port);
 				addrinfo hints{};
 				hints.ai_family = AF_UNSPEC;
@@ -394,6 +625,13 @@ namespace cluau::runtime::detail {
 					return Failure("net.connect: cannot connect to " + where + ": " + why);
 				Prepare(socket->Handle);
 				socket->Addresses();
+#ifdef CLUAU_HAS_MBEDTLS
+				if (tls.Enabled)
+					if (const std::string failed = Handshake(*socket, timeout > 0 ? timeout : 30, &tls, nullptr, host); !failed.empty())
+						return Failure("net.connect: TLS with " + where + ": " + failed);
+#else
+				(void)tls;
+#endif
 				return [socket](lua_State* L) {
 					PushSocket(L, socket, kSocketMeta);
 					return 1;
@@ -410,11 +648,30 @@ namespace cluau::runtime::detail {
 			if (port < 0 || port > 65535)
 				luaL_argerror(L, 2, "a port from 0 (any free one) to 65535");
 			int backlog = 64;
+			std::string certFile, keyFile;
 			if (lua_istable(L, 3))
 			{
 				lua_getfield(L, 3, "backlog");
 				if (lua_isnumber(L, -1))
 					backlog = std::max(1, (int)lua_tointeger(L, -1));
+				lua_pop(L, 1);
+				// tls = { certFile, keyFile }: the server's certificate (chain) and key, PEM.
+				lua_getfield(L, 3, "tls");
+				if (lua_istable(L, -1))
+				{
+					lua_getfield(L, -1, "certFile");
+					lua_getfield(L, -2, "keyFile");
+					if (!lua_isstring(L, -2) || !lua_isstring(L, -1))
+						luaL_error(L, "net.listen: options.tls is { certFile = <PEM file>, keyFile = <PEM file> }");
+					certFile = lua_tostring(L, -2);
+					keyFile = lua_tostring(L, -1);
+					lua_pop(L, 2);
+#ifndef CLUAU_HAS_MBEDTLS
+					luaL_error(L, "net.listen: this cluau is built without TLS");
+#endif
+				}
+				else if (!lua_isnil(L, -1))
+					luaL_error(L, "net.listen: options.tls is { certFile = <PEM file>, keyFile = <PEM file> }");
 				lua_pop(L, 1);
 			}
 			StartSockets();
@@ -454,6 +711,20 @@ namespace cluau::runtime::detail {
 			if (server->Handle == kNoSocket)
 				luaL_error(L, "net.listen: cannot listen on %s: %s", where.c_str(), why.c_str());
 			server->Addresses();
+			server->CertFile = certFile;
+			server->KeyFile = keyFile;
+#ifdef CLUAU_HAS_MBEDTLS
+			if (!certFile.empty())
+			{
+				// Read now, so a missing or broken file is this call's error.
+				mbedtls_x509_crt cert;
+				mbedtls_x509_crt_init(&cert);
+				const int rc = mbedtls_x509_crt_parse_file(&cert, certFile.c_str());
+				mbedtls_x509_crt_free(&cert);
+				if (rc < 0)
+					luaL_error(L, "net.listen: cannot read the certificate '%s': %s", certFile.c_str(), TlsError(rc).c_str());
+			}
+#endif
 			PushSocket(L, server, kServerMeta);
 			return 1;
 		}
@@ -466,16 +737,29 @@ namespace cluau::runtime::detail {
 				Use use(*server);
 				if (!use.Entered)
 					return Failure("server:accept: the socket is closed");
-				const Ready ready = WaitFor(*server, false, timeout);
-				if (ready != Ready::Yes)
-					return Failure("server:accept: " + Why(ready, timeout));
-				const SocketHandle s = ::accept(server->Handle, nullptr, nullptr);
-				if (s == kNoSocket)
-					return Failure("server:accept: " + LastError());
-				auto socket = std::make_shared<Socket>();
-				socket->Handle = s;
-				Prepare(s);
-				socket->Addresses();
+				std::shared_ptr<Socket> socket;
+				for (;;)
+				{
+					const Ready ready = WaitFor(*server, false, timeout);
+					if (ready != Ready::Yes)
+						return Failure("server:accept: " + Why(ready, timeout));
+					const SocketHandle s = ::accept(server->Handle, nullptr, nullptr);
+					if (s == kNoSocket)
+						return Failure("server:accept: " + LastError());
+					socket = std::make_shared<Socket>();
+					socket->Handle = s;
+					Prepare(s);
+					socket->Addresses();
+#ifdef CLUAU_HAS_MBEDTLS
+					// A client whose handshake fails is let go; the next is waited for.
+					if (!server->CertFile.empty() && !Handshake(*socket, timeout > 0 ? timeout : 30, nullptr, server.get(), {}).empty())
+					{
+						socket->Close();
+						continue;
+					}
+#endif
+					break;
+				}
 				return [socket](lua_State* L) {
 					PushSocket(L, socket, kSocketMeta);
 					return 1;
@@ -497,6 +781,8 @@ namespace cluau::runtime::detail {
 				lua_pushinteger(L, server->LocalPort);
 			else if (std::strcmp(key, "host") == 0)
 				lua_pushstring(L, server->LocalHost.c_str());
+			else if (std::strcmp(key, "tls") == 0)
+				lua_pushboolean(L, !server->CertFile.empty());
 			else
 			{
 				lua_getmetatable(L, 1);
@@ -514,6 +800,32 @@ namespace cluau::runtime::detail {
 		{
 			if (socket.Ended)
 				return false;
+#ifdef CLUAU_HAS_MBEDTLS
+			if (socket.Tls)
+			{
+				unsigned char chunk[16384];
+				for (;;)
+				{
+					int rc = 0;
+					if (!TlsCall(socket, socket.Timeout, [&](mbedtls_ssl_context& ssl) { return mbedtls_ssl_read(&ssl, chunk, sizeof(chunk)); }, rc, why))
+						return false;
+					if (rc > 0)
+					{
+						socket.Buffer.append(reinterpret_cast<const char*>(chunk), (size_t)rc);
+						return true;
+					}
+					if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)
+						continue;
+					if (rc == 0 || rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || rc == MBEDTLS_ERR_NET_CONN_RESET)
+					{
+						socket.Ended = true;
+						return false;
+					}
+					why = TlsError(rc);
+					return false;
+				}
+			}
+#endif
 			const Ready ready = WaitFor(socket, false, socket.Timeout);
 			if (ready != Ready::Yes)
 			{
@@ -645,6 +957,24 @@ namespace cluau::runtime::detail {
 				if (!use.Entered)
 					return Failure("socket:write: the socket is closed");
 				size_t at = 0;
+#ifdef CLUAU_HAS_MBEDTLS
+				if (socket->Tls)
+				{
+					while (at < data.size())
+					{
+						int rc = 0;
+						std::string why;
+						const unsigned char* from = reinterpret_cast<const unsigned char*>(data.data()) + at;
+						const size_t left = data.size() - at;
+						if (!TlsCall(*socket, socket->Timeout, [&](mbedtls_ssl_context& ssl) { return mbedtls_ssl_write(&ssl, from, left); }, rc, why))
+							return Failure("socket:write: " + why);
+						if (rc < 0)
+							return Failure("socket:write: " + TlsError(rc));
+						at += (size_t)rc;
+					}
+					return [](lua_State*) { return 0; };
+				}
+#endif
 				while (at < data.size())
 				{
 					const Ready ready = WaitFor(*socket, true, socket->Timeout);
@@ -691,6 +1021,8 @@ namespace cluau::runtime::detail {
 				lua_pushstring(L, socket->RemoteHost.c_str());
 			else if (std::strcmp(key, "remotePort") == 0)
 				lua_pushinteger(L, socket->RemotePort);
+			else if (std::strcmp(key, "tls") == 0)
+				lua_pushboolean(L, socket->Tls != nullptr);
 			else
 			{
 				lua_getmetatable(L, 1);

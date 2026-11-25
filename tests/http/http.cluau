@@ -94,3 +94,16 @@ for (_, each in waits) {
 	task.join(each)
 }
 print("tasks:", task.join(hello), time.monotonic() - started < 1.2)
+
+// HTTPS in tasks side by side (TLS handshakes on several threads at once).
+const secures: { task.Task<string> } = {}
+for (i = 1, 4) {
+	table.insert(secures, task.spawn(function(): string {
+		return http.get(`{secure}/hello`, { caFile = ca }).body
+	}))
+}
+const bodies: { string } = {}
+for (_, each in secures) {
+	table.insert(bodies, task.join(each))
+}
+print("https tasks:", table.concat(bodies, ","))

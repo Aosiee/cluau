@@ -163,6 +163,7 @@ return m :: {
 )LUAU" },
 				{ "net", R"LUAU(
 export type Socket = {
+	tls: boolean,
 	localHost: string,
 	localPort: number,
 	remoteHost: string,
@@ -176,6 +177,7 @@ export type Socket = {
 	close: (self: Socket) -> (),
 }
 export type Server = {
+	tls: boolean,
 	host: string,
 	port: number,
 	accept: (self: Server, options: { timeout: number? }?) -> Socket,
@@ -183,8 +185,8 @@ export type Server = {
 }
 local m: any = nil
 return m :: {
-	connect: (host: string, port: number, options: { timeout: number? }?) -> Socket,
-	listen: (host: string, port: number, options: { backlog: number? }?) -> Server,
+	connect: (host: string, port: number, options: { timeout: number?, tls: boolean?, verify: boolean?, caFile: string?, serverName: string? }?) -> Socket,
+	listen: (host: string, port: number, options: { backlog: number?, tls: { certFile: string, keyFile: string }? }?) -> Server,
 }
 )LUAU" },
 				{ "sqlite", R"LUAU(
@@ -213,6 +215,31 @@ local m: any = nil
 return m :: {
 	open: (path: string, options: { readonly: boolean?, create: boolean? }?) -> Database,
 	version: string,
+}
+)LUAU" },
+				{ "crypto", R"LUAU(
+export type Algorithm = "md5" | "sha1" | "sha224" | "sha256" | "sha384" | "sha512"
+export type Hasher = {
+	update: (self: Hasher, data: string | buffer) -> Hasher,
+	digest: (self: Hasher, options: { raw: boolean? }?) -> string,
+}
+local m: any = nil
+return m :: {
+	hash: (algorithm: Algorithm, data: string | buffer, options: { raw: boolean? }?) -> string,
+	hmac: (algorithm: Algorithm, key: string | buffer, data: string | buffer, options: { raw: boolean? }?) -> string,
+	hasher: (algorithm: Algorithm) -> Hasher,
+	randomBytes: (count: number) -> string,
+	uuid: () -> string,
+	equal: (a: string | buffer, b: string | buffer) -> boolean,
+}
+)LUAU" },
+				{ "encoding", R"LUAU(
+local m: any = nil
+return m :: {
+	toBase64: (data: string | buffer, options: { url: boolean?, padding: boolean? }?) -> string,
+	fromBase64: (text: string | buffer) -> string,
+	toHex: (data: string | buffer) -> string,
+	fromHex: (text: string | buffer) -> string,
 }
 )LUAU" },
 				{ "regex", R"LUAU(

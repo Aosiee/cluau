@@ -75,8 +75,8 @@ only computes.
 - `require` loads `.cluau` and `.luau` modules only from under the script's
   directory, its `cluau_modules` and the search path (`CLUAU_PATH`).
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
-  `@std/path` (text only), `@std/regex`, `@std/task`, `@std/args`,
-  `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
+  `@std/path` (text only), `@std/regex`, `@std/task`, `@std/crypto`,
+  `@std/encoding`, `@std/args`, `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1008,6 +1008,24 @@ and:
 | `setTimeout(seconds?)` | how long a read or write may wait (none, or 0: no limit) |
 | `close()` | ends the connection (a wait on it in another task ends with an error) |
 
+`tls` (on a socket and a server) says whether it is encrypted.
+
+TLS: `connect`'s `options.tls = true` encrypts the connection, checking
+the server's certificate against the system's trusted certificates (or
+`options.caFile`'s, a PEM file) and its name against `host` (or
+`options.serverName`); `options.verify = false` skips both, for a server
+of one's own with a certificate nothing trusts. `listen`'s
+`options.tls = { certFile, keyFile }` (PEM files: the certificate chain and
+its key) serves TLS; a client whose handshake fails is let go and the next
+one waited for.
+
+```
+const net = require("@std/net")
+const socket = net.connect("example.com", 443, { tls = true })
+socket:write("HEAD / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+print(socket:readLine()) // HTTP/1.1 200 OK
+```
+
 ```
 const net = require("@std/net")
 const task = require("@std/task")
@@ -1023,6 +1041,50 @@ while (true) {
 	})
 }
 ```
+
+### `@std/crypto`
+
+Hashes, HMACs and randomness, on mbedTLS (built in). `data` is a string or
+a `buffer`; a digest is lowercase hex, or its bytes (a string) with
+`options.raw`.
+
+| function | is |
+|---|---|
+| `hash(algorithm, data, options?): string` | the digest: `"md5"`, `"sha1"`, `"sha224"`, `"sha256"`, `"sha384"` or `"sha512"` |
+| `hmac(algorithm, key, data, options?): string` | the HMAC of `data` with `key` |
+| `hasher(algorithm): Hasher` | a hash fed in parts: `update(data)` (which returns the hasher, to chain), then `digest(options?)` once |
+| `randomBytes(count): string` | `count` random bytes from the operating system (for keys, tokens, salts) |
+| `uuid(): string` | a random (version 4) UUID: `"9f1c...-....-4...-....-............"` |
+| `equal(a, b): boolean` | whether two secrets are equal, compared in a time that does not depend on where they differ |
+
+```
+const crypto = require("@std/crypto")
+const fs = require("@std/fs")
+print(crypto.hash("sha256", fs.read("release.tar.gz")))
+
+// A message signed with a secret key, and the signature checked.
+const key = crypto.randomBytes(32)
+const message = "pay 10 to ada"
+const signature = crypto.hmac("sha256", key, message)
+if (!crypto.equal(signature, crypto.hmac("sha256", key, message))) {
+	error("the signature does not match")
+}
+```
+
+MD5 and SHA-1 are for checksums and the formats that name them; they are
+not safe for signatures or passwords.
+
+### `@std/encoding`
+
+Bytes as text, and back. `data` is a string or a `buffer`; what is decoded
+is a string of the bytes.
+
+| function | is |
+|---|---|
+| `toBase64(data, options?): string` | base64; `options.url` for the URL-safe alphabet (`-` and `_`, unpadded unless `options.padding`) |
+| `fromBase64(text): string` | the bytes, from either alphabet, padded or not (spaces and line breaks are skipped) |
+| `toHex(data): string` | lowercase hex |
+| `fromHex(text): string` | the bytes, from hex in either case |
 
 ### `@std/sqlite`
 

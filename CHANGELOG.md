@@ -2,16 +2,25 @@
 
 Each release's notes. A release's tag message is its section here.
 
-## Unreleased
+## 0.23.0: @std/crypto, @std/encoding, TLS connections, more platforms
 
+- `@std/crypto`: hashes (MD5, SHA-1, SHA-224 to SHA-512), HMACs, a hasher
+  fed in parts, random bytes from the operating system, random UUIDs, and
+  a comparison of secrets in constant time.
+- `@std/encoding`: base64 (standard and URL-safe, padded or not) and hex.
+- TLS in `@std/net`: `net.connect(host, port, { tls = true })` checks the
+  server's certificate against the system's (or `caFile`'s) and its name;
+  `net.listen(host, port, { tls = { certFile, keyFile } })` serves TLS. A
+  read and a write in two tasks go ahead together on one connection.
+- HTTPS transfers in parallel tasks are safe: mbedTLS is built with its
+  threading.
 - Release builds for Linux on arm64 and macOS on Intel, beside Linux on
-  x86_64, macOS on Apple silicon and Windows on x86_64.
-- The Linux builds run on any distribution with glibc 2.28 or later (RHEL
-  8, Debian 10, Ubuntu 20.04 and newer): they are built in the
-  manylinux_2_28 image rather than on the newest Ubuntu.
+  x86_64, macOS on Apple silicon and Windows on x86_64. The Linux builds run
+  on any distribution with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu
+  20.04 and newer).
 - Debian (`.deb`) and RPM (`.rpm`) packages for Linux on x86_64 and arm64,
-  each installed and run on Debian 11 and 12, Ubuntu 22.04 and 26.04, Rocky
-  Linux 8 and 9, and Fedora before the release is published. They are not
+  installed and run on Debian 11 and 12, Ubuntu 22.04 and 26.04, Rocky
+  Linux 8 and 9, and Fedora before each release is published. They are not
   signed yet: `dnf install --nogpgcheck` installs one.
 - `CLUAU_REPOSITORY` points the installers at another copy of the releases,
   such as a Forgejo or Gitea server's.
