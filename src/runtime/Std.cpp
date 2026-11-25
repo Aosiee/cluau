@@ -2134,9 +2134,6 @@ namespace cluau::runtime::detail {
 
 	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox)
 	{
-#ifdef CLUAU_HAS_MBEDTLS
-		StartMbedtls(); // before any other use of it (Windows' mutexes)
-#endif
 		OpenFileType(L);
 		OpenChildType(L);
 		lua_newtable(L); // the registry's module table

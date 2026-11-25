@@ -96,6 +96,7 @@ namespace cluau::runtime::detail {
 
 		int CryptoHash(lua_State* L)
 		{
+			StartMbedtls(); // on first use, on the script's thread
 			const mbedtls_md_info_t* info = Algorithm(L, 1, "crypto.hash");
 			const std::string_view data = Bytes(L, 2);
 			unsigned char digest[MBEDTLS_MD_MAX_SIZE];
@@ -106,6 +107,7 @@ namespace cluau::runtime::detail {
 
 		int CryptoHmac(lua_State* L)
 		{
+			StartMbedtls(); // on first use, on the script's thread
 			const mbedtls_md_info_t* info = Algorithm(L, 1, "crypto.hmac");
 			const std::string_view key = Bytes(L, 2);
 			const std::string_view data = Bytes(L, 3);
@@ -152,6 +154,7 @@ namespace cluau::runtime::detail {
 
 		int CryptoHasher(lua_State* L)
 		{
+			StartMbedtls(); // on first use, on the script's thread
 			const mbedtls_md_info_t* info = Algorithm(L, 1, "crypto.hasher");
 			HasherBox* box = static_cast<HasherBox*>(lua_newuserdatadtor(L, sizeof(HasherBox), [](lua_State*, void* p) {
 				mbedtls_md_free(&static_cast<HasherBox*>(p)->Context);
@@ -233,7 +236,6 @@ namespace cluau::runtime::detail {
 
 	void OpenCrypto(lua_State* L)
 	{
-		StartMbedtls();
 		luaL_newmetatable(L, kHasherMeta);
 		lua_pushstring(L, "Hasher");
 		lua_setfield(L, -2, "__type");

@@ -565,6 +565,10 @@ namespace cluau::runtime::detail {
 			const double timeout = TimeoutOption(L, 3, "net.connect");
 			const TlsOptions tls = ReadTlsOptions(L, 3, "net.connect");
 			StartSockets();
+#ifdef CLUAU_HAS_MBEDTLS
+			if (tls.Enabled)
+				StartMbedtls(); // here, on the script's thread, before a job uses it
+#endif
 			return Await(L, [host, port, timeout, tls]() -> JobResult {
 				const std::string where = host + ":" + std::to_string(port);
 				addrinfo hints{};
@@ -716,6 +720,7 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_MBEDTLS
 			if (!certFile.empty())
 			{
+				StartMbedtls();
 				// Read now, so a missing or broken file is this call's error.
 				mbedtls_x509_crt cert;
 				mbedtls_x509_crt_init(&cert);
