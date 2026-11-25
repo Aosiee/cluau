@@ -1,0 +1,98 @@
+// @std/sqlite: a database in memory and one in a file; parameters, rows,
+// NULL and BLOBs, prepared statements, transactions and the errors.
+const sqlite = require("@std/sqlite")
+const fs = require("@std/fs")
+const path = require("@std/path")
+
+type User = { id: number, name: string, email: string? }
+
+const db = sqlite.open(":memory:")
+db:exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT); CREATE INDEX users_name ON users (name)")
+const added = db:run("INSERT INTO users (name, email) VALUES (?, ?)", "ada", "ada@example.com")
+print("added", added.changes, added.lastId)
+db:run("INSERT INTO users (name, email) VALUES (:name, :email)", { name = "grace", email = nil })
+db:run("INSERT INTO users (name) VALUES ($name)", { name = "linus" })
+
+const users: { User } = db:query("SELECT id, name, email FROM users ORDER BY id")
+for (_, user in users) {
+	print(user.id, user.name, user.email or "(no email)")
+}
+const grace: User? = db:first("SELECT * FROM users WHERE name = ?", "grace")
+print("first", if (grace != nil) grace.id else -1)
+const nobody: User? = db:first("SELECT * FROM users WHERE name = ?", "nobody")
+print("none", nobody == nil)
+for (user: User in db:rows("SELECT name FROM users WHERE id > ? ORDER BY name", 1)) {
+	print("row", user.name)
+}
+
+// A prepared statement, run again and again.
+const insert = db:prepare("INSERT INTO users (name) VALUES (?)")
+for (_, name in { "ken", "dennis", "bjarne" }) {
+	insert:run(name)
+}
+insert:close()
+type Count = { n: number }
+const count: Count? = db:first("SELECT count(*) AS n FROM users")
+print("count", if (count != nil) count.n else 0)
+const select = db:prepare("SELECT id, name FROM users WHERE id = ?")
+print("columns", table.concat(select:columns(), ","))
+const third: User? = select:first(3)
+print("third", if (third != nil) third.name else "?")
+
+// Transactions: committed, and rolled back by an error.
+const total = db:transaction(function(extra: number): number {
+	db:run("INSERT INTO users (name) VALUES (?)", "barbara")
+	return extra + 1
+}, 41)
+print("committed", total)
+const failed, problem = pcall(function() {
+	db:transaction(function() {
+		db:run("INSERT INTO users (name) VALUES (?)", "rolled back")
+		error("changed my mind")
+	})
+})
+print("rolled back", failed, string.find(tostring(problem), "changed my mind", 1, true) != nil)
+const after: Count? = db:first("SELECT count(*) AS n FROM users WHERE name = 'rolled back'")
+print("left", if (after != nil) after.n else -1)
+
+// Values: numbers, booleans, BLOBs (buffers).
+type Mixed = { i: number, r: number, t: number, b: buffer } // a boolean is stored as 1 or 0
+db:exec("CREATE TABLE mixed (i INTEGER, r REAL, t INTEGER, b BLOB)")
+const bytes = buffer.fromstring("\0\1\2")
+db:run("INSERT INTO mixed VALUES (?, ?, ?, ?)", 9007199254740991, 2.5, true, bytes)
+const mixed: Mixed? = db:first("SELECT * FROM mixed")
+if (mixed != nil) {
+	print("values", string.format("%.0f", mixed.i), mixed.r, mixed.t, typeof(mixed.b), buffer.len(mixed.b), buffer.readu8(mixed.b, 2))
+}
+
+// The errors name the call.
+const attempts: { () -> ...unknown } = {
+	function() { db:query("SELECT * FROM missing") },
+	function() { db:run("INSERT INTO users (name) VALUES (?)") },
+	function() { db:run("INSERT INTO users (name) VALUES (NULL)") },
+	function() { db:query("SELEC 1") },
+}
+for (_, attempt in attempts) {
+	const ok, why = pcall(attempt)
+	print("error", ok, string.match(tostring(why), "(db:%a+: .*)$"))
+}
+
+// A file: written, closed, opened again read-only.
+const file = path.join(fs.tempDir(), `cluau-sqlite-test-{math.floor(os.clock() * 1e6)}.db`)
+const disk = sqlite.open(file)
+disk:exec("CREATE TABLE notes (text TEXT)")
+disk:run("INSERT INTO notes VALUES (?)", "kept")
+disk:close()
+const again = sqlite.open(file, { readonly = true })
+type Note = { text: string }
+const note: Note? = again:first("SELECT text FROM notes")
+print("file", if (note != nil) note.text else "?", again.path == file)
+const refused = pcall(function() {
+	again:run("INSERT INTO notes VALUES ('no')")
+})
+print("read-only", refused)
+again:close()
+fs.remove(file)
+print(pcall(function() {
+	again:query("SELECT 1")
+}))

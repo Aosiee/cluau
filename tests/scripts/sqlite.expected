@@ -1,0 +1,23 @@
+added	1	1
+1	ada	ada@example.com
+2	grace	(no email)
+3	linus	(no email)
+first	2
+none	true
+row	grace
+row	linus
+count	6
+columns	id,name
+third	linus
+committed	42
+rolled back	false	true
+left	0
+values	9007199254740991	2.5	1	buffer	3	2
+error	false	db:query: no such table: missing
+error	false	db:run: the SQL takes 1 parameter(s), and 0 were given
+error	false	db:run: NOT NULL constraint failed: users.name
+error	false	db:query: near "SELEC": syntax error
+file	kept	true
+read-only	false
+false	sqlite.cluau:97: db:query: the database is closed
+exit: 0

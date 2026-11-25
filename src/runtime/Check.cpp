@@ -187,6 +187,34 @@ return m :: {
 	listen: (host: string, port: number, options: { backlog: number? }?) -> Server,
 }
 )LUAU" },
+				{ "sqlite", R"LUAU(
+export type Value = nil | boolean | number | string | buffer
+export type Changes = { changes: number, lastId: number }
+export type Statement = {
+	query: <T>(self: Statement, ...unknown) -> { T },
+	first: <T>(self: Statement, ...unknown) -> T?,
+	rows: <T>(self: Statement, ...unknown) -> () -> T?,
+	run: (self: Statement, ...unknown) -> Changes,
+	columns: (self: Statement) -> { string },
+	close: (self: Statement) -> (),
+}
+export type Database = {
+	path: string,
+	exec: (self: Database, sql: string) -> (),
+	query: <T>(self: Database, sql: string, ...unknown) -> { T },
+	first: <T>(self: Database, sql: string, ...unknown) -> T?,
+	rows: <T>(self: Database, sql: string, ...unknown) -> () -> T?,
+	run: (self: Database, sql: string, ...unknown) -> Changes,
+	prepare: (self: Database, sql: string) -> Statement,
+	transaction: <A..., R...>(self: Database, fn: (A...) -> R..., A...) -> R...,
+	close: (self: Database) -> (),
+}
+local m: any = nil
+return m :: {
+	open: (path: string, options: { readonly: boolean?, create: boolean? }?) -> Database,
+	version: string,
+}
+)LUAU" },
 				{ "regex", R"LUAU(
 export type Match = {
 	text: string,

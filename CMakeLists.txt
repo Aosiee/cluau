@@ -107,6 +107,28 @@ if(CLUAU_BUILD_RUNTIME)
         set_property(DIRECTORY ${curl_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
     endif()
 
+    # @std/sqlite: SQLite's amalgamation (one C file), fetched at a release
+    # and built here, without loadable extensions.
+    option(CLUAU_SQLITE "Build @std/sqlite (fetches SQLite)" ON)
+    if(CLUAU_SQLITE)
+        include(FetchContent)
+        enable_language(C)
+        FetchContent_Declare(sqlite
+            URL https://sqlite.org/2026/sqlite-amalgamation-3540100.zip
+            URL_HASH SHA3_256=92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(sqlite)
+        add_library(cluau_sqlite STATIC ${sqlite_SOURCE_DIR}/sqlite3.c)
+        target_include_directories(cluau_sqlite PUBLIC ${sqlite_SOURCE_DIR})
+        target_compile_definitions(cluau_sqlite PRIVATE SQLITE_THREADSAFE=1 SQLITE_DQS=0 SQLITE_OMIT_LOAD_EXTENSION
+            SQLITE_ENABLE_FTS5 SQLITE_ENABLE_MATH_FUNCTIONS SQLITE_DEFAULT_MEMSTATUS=0)
+        find_package(Threads REQUIRED)
+        target_link_libraries(cluau_sqlite PUBLIC Threads::Threads)
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(cluau_sqlite PRIVATE -w) # its own code, not ours to warn about
+        endif()
+    endif()
+
     # @std/regex: PCRE2 (Perl-compatible regular expressions), fetched at a
     # release and linked statically, 8-bit with Unicode, without its JIT.
     option(CLUAU_REGEX "Build @std/regex (fetches PCRE2)" ON)
@@ -147,6 +169,11 @@ if(CLUAU_BUILD_RUNTIME)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
     if(WIN32)
         target_link_libraries(cluau_runtime PRIVATE ws2_32) # @std/net
+    endif()
+    if(CLUAU_SQLITE)
+        target_sources(cluau_runtime PRIVATE src/runtime/Sqlite.cpp)
+        target_link_libraries(cluau_runtime PRIVATE cluau_sqlite)
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_SQLITE)
     endif()
     if(CLUAU_REGEX)
         target_sources(cluau_runtime PRIVATE src/runtime/Regex.cpp)

@@ -67,8 +67,8 @@ before the script (`cluau --no-native script.cluau`) interprets it instead.
 network or other programs: for a script from somewhere else, or one that
 only computes.
 
-- `@std/fs`, `@std/http` and `@std/net` are not available (`require`
-  raises an error saying so).
+- `@std/fs`, `@std/http`, `@std/net` and `@std/sqlite` are not available
+  (`require` raises an error saying so).
 - `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
   environment variables, the working directory and running commands are
   left out.
@@ -1023,6 +1023,55 @@ while (true) {
 	})
 }
 ```
+
+### `@std/sqlite`
+
+SQLite databases, with the SQLite library built in (version
+`sqlite.version`; full-text search and the math functions included).
+
+| function | is |
+|---|---|
+| `open(path, options?): Database` | the database in the file (made when missing, unless `options.create` is false); `":memory:"` for one in memory; `options.readonly` opens it read-only |
+
+A `Database` has `path`, and:
+
+| method | is |
+|---|---|
+| `exec(sql)` | runs the statements in the text (no parameters, no results): a schema, a script |
+| `query(sql, ...): {Row}` | every row of the result |
+| `first(sql, ...): Row?` | the first row, or `nil` |
+| `rows(sql, ...)` | an iterator over the rows, read as the loop goes: `for (row in db:rows(sql)) { }` |
+| `run(sql, ...): { changes, lastId }` | runs an `INSERT`, `UPDATE` or `DELETE`: the rows it changed, and the last inserted row's id |
+| `prepare(sql): Statement` | the statement compiled once, to run many times: its `query`, `first`, `rows` and `run` take the parameters; `columns()` lists the result's columns; `close()` |
+| `transaction(fn, ...)` | `fn(...)` in a transaction: committed when it returns, rolled back when it raises (and the error raised again); nested ones are savepoints. Returns what `fn` returned |
+| `close()` | closes the database (its statements too) |
+
+The parameters after the SQL fill its `?`s in order, or one table fills
+named ones (`:name`, `@name`, `$name`: the table's keys are the names). A
+row is a table of its columns by name: `NULL` is `nil` (so the column is
+missing from the table), `INTEGER` and `REAL` are numbers, `TEXT` is a
+string and a `BLOB` a `buffer`; a boolean parameter is stored as 1 or 0,
+and a buffer as a `BLOB`. A row's type is what the variable it goes to
+says it is:
+
+```
+const sqlite = require("@std/sqlite")
+
+type User = { id: number, name: string, email: string? }
+
+const db = sqlite.open("app.db")
+db:exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT)")
+db:run("INSERT INTO users (name, email) VALUES (?, ?)", "ada", "ada@example.com")
+const users: { User } = db:query("SELECT id, name, email FROM users WHERE name LIKE ?", "a%")
+for (_, user in users) {
+	print(user.id, user.name, user.email or "-")
+}
+db:close()
+```
+
+Foreign keys are enforced, and a database another program holds is
+waited on for up to five seconds. The calls run on the script's thread
+(in a task, the others wait until a query is done).
 
 ### `@std/task`
 
