@@ -2,6 +2,17 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.24.0: @std/compress and @std/zip
+
+- `@std/compress`: gzip and gunzip (gzip files, joined ones too), deflate
+  and inflate (zlib's format, or raw deflate), with a level from 0 to 9.
+- `@std/zip`: zip archives, read from a file or a string (`open`,
+  `fromString`: `entries`, `read`, `extract`) and made (`create`: `add`,
+  `addFile`, `addDirectory`, `finish`). `extract` refuses an entry that
+  would land outside its directory.
+- Both are on miniz 3.1.2, built in; `-DCLUAU_COMPRESS=OFF` builds without
+  them. The sandbox leaves `@std/zip` out.
+
 ## 0.23.0: @std/crypto, @std/encoding, TLS connections, more platforms
 
 - `@std/crypto`: hashes (MD5, SHA-1, SHA-224 to SHA-512), HMACs, a hasher

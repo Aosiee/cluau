@@ -67,8 +67,8 @@ before the script (`cluau --no-native script.cluau`) interprets it instead.
 network or other programs: for a script from somewhere else, or one that
 only computes.
 
-- `@std/fs`, `@std/http`, `@std/net` and `@std/sqlite` are not available
-  (`require` raises an error saying so).
+- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite` and `@std/zip` are
+  not available (`require` raises an error saying so).
 - `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
   environment variables, the working directory and running commands are
   left out.
@@ -76,7 +76,8 @@ only computes.
   directory, its `cluau_modules` and the search path (`CLUAU_PATH`).
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
   `@std/path` (text only), `@std/regex`, `@std/task`, `@std/crypto`,
-  `@std/encoding`, `@std/args`, `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
+  `@std/encoding`, `@std/compress`, `@std/args`, `@std/csv` and `@std/test`
+  work as usual, as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1085,6 +1086,55 @@ is a string of the bytes.
 | `fromBase64(text): string` | the bytes, from either alphabet, padded or not (spaces and line breaks are skipped) |
 | `toHex(data): string` | lowercase hex |
 | `fromHex(text): string` | the bytes, from hex in either case |
+
+### `@std/compress`
+
+Compression, in memory, as gzip files and HTTP use it (deflate). `data` is
+a string or a `buffer`; what comes out is a string of the bytes.
+
+| function | is |
+|---|---|
+| `gzip(data, options?): string` | gzip's format (what `.gz` files hold); `options.level` from 0 (stored) to 9 (smallest), 6 by default |
+| `gunzip(data): string` | the contents of gzip data (of each part, when gzip files were joined), its checksum checked |
+| `deflate(data, options?): string` | zlib's format (deflate with its header and checksum); `options.raw` for deflate alone; `options.level` |
+| `inflate(data, options?): string` | the contents of zlib data (`options.raw`: of raw deflate) |
+
+### `@std/zip`
+
+Zip archives. An archive is read whole into memory; a new one is built in
+memory and written when it is finished.
+
+| function | is |
+|---|---|
+| `open(path): Archive` | the archive in a file |
+| `fromString(data): Archive` | the archive in a string or `buffer` (a download, say) |
+| `create(path?): Writer` | a new archive, written to `path` by `finish()` (with no path, `finish()` returns it as a string) |
+
+An `Archive` has `entries()` (each `{ name, size, compressedSize,
+directory, modified }`, `modified` a time as `@std/time` has them),
+`read(name)` (an entry's contents), `extract(directory)` (every entry under
+the directory, made when missing; returns the files written) and `close()`.
+`extract` refuses an entry whose name would put it outside the directory
+(an absolute name, or one through `..`), so an archive from anywhere is
+safe to extract.
+
+A `Writer` has `add(name, data, options?)`, `addFile(name, path, options?)`
+and `addDirectory(name)` (each returns the writer, to chain;
+`options.level` as for `@std/compress`), and `finish()`.
+
+```
+const zip = require("@std/zip")
+
+const release = zip.create("release.zip")
+release:addFile("cluau/README.md", "README.md"):add("cluau/VERSION", "0.24.0\n")
+release:finish()
+
+const archive = zip.open("release.zip")
+for (_, entry in archive:entries()) {
+	print(entry.name, entry.size)
+}
+archive:extract("unpacked")
+```
 
 ### `@std/sqlite`
 

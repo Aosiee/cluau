@@ -242,6 +242,36 @@ return m :: {
 	fromHex: (text: string | buffer) -> string,
 }
 )LUAU" },
+				{ "compress", R"LUAU(
+local m: any = nil
+return m :: {
+	gzip: (data: string | buffer, options: { level: number? }?) -> string,
+	gunzip: (data: string | buffer) -> string,
+	deflate: (data: string | buffer, options: { level: number?, raw: boolean? }?) -> string,
+	inflate: (data: string | buffer, options: { raw: boolean? }?) -> string,
+}
+)LUAU" },
+				{ "zip", R"LUAU(
+export type Entry = { name: string, size: number, compressedSize: number, directory: boolean, modified: number }
+export type Archive = {
+	entries: (self: Archive) -> { Entry },
+	read: (self: Archive, name: string) -> string,
+	extract: (self: Archive, directory: string) -> number,
+	close: (self: Archive) -> (),
+}
+export type Writer = {
+	add: (self: Writer, name: string, data: string | buffer, options: { level: number? }?) -> Writer,
+	addFile: (self: Writer, name: string, path: string, options: { level: number? }?) -> Writer,
+	addDirectory: (self: Writer, name: string) -> Writer,
+	finish: (self: Writer) -> string?,
+}
+local m: any = nil
+return m :: {
+	open: (path: string) -> Archive,
+	fromString: (data: string | buffer) -> Archive,
+	create: (path: string?) -> Writer,
+}
+)LUAU" },
 				{ "regex", R"LUAU(
 export type Match = {
 	text: string,

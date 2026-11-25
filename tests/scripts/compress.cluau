@@ -1,0 +1,80 @@
+// @std/compress and @std/zip: round trips, data made by other programs
+// (Python's gzip, zlib and zipfile), archives in memory and on disk, and
+// an entry that would escape the directory it is extracted to.
+const compress = require("@std/compress")
+const zip = require("@std/zip")
+const encoding = require("@std/encoding")
+const fs = require("@std/fs")
+const path = require("@std/path")
+
+const text = string.rep("cluau compresses well. ", 200)
+const gz = compress.gzip(text)
+print("gzip", #text, #gz < #text / 10, compress.gunzip(gz) == text)
+print("empty", compress.gunzip(compress.gzip("")) == "", compress.inflate(compress.deflate("")) == "")
+print("levels", #compress.gzip(text, { level = 0 }) > #compress.gzip(text, { level = 9 }))
+print("binary", compress.gunzip(compress.gzip(buffer.fromstring("\0\1\2\255"))) == "\0\1\2\255")
+
+// What other programs wrote.
+print(compress.gunzip(encoding.fromBase64("H4sIAAAAAAAC/8tIzcnJ11FIzilNLAUArKQvogwAAAA=")))
+print(compress.gunzip(encoding.fromBase64("H4sIAAAAAAAC/8vPS1UAAElhrCMEAAAAH4sIAAAAAAAC/yspzwcAZorKEQMAAAA=")))
+print(compress.inflate(encoding.fromBase64("eJzLSM3JyddRSM4pTSwFABzoBHs=")))
+print(compress.inflate(encoding.fromBase64("K0osV0hJTctJLEkFAA=="), { raw = true }))
+print(compress.inflate(compress.deflate(text, { raw = true }), { raw = true }) == text)
+
+const python = zip.fromString(encoding.fromBase64(
+	"UEsDBBQAAAAIAPV0eV2qY8UzDQAAAAsAAAAPAAAAZG9jcy9yZWFkbWUudHh0SyvKz1UoqCzJyM8DAFBLAwQUAAAACAD1dHldAAAAAAIAAAAAAAAABgAAAGVtcHR5LwMAUEsBAhQDFAAAAAgA9XR5XapjxTMNAAAACwAAAA8AAAAAAAAAAAAAAIABAAAAAGRvY3MvcmVhZG1lLnR4dFBLAQIUAxQAAAAIAPV0eV0AAAAAAgAAAAAAAAAGAAAAAAAAAAAAEAD9QToAAABlbXB0eS9QSwUGAAAAAAIAAgBxAAAAYAAAAAAA"
+))
+for (_, entry in python:entries()) {
+	print("entry", entry.name, entry.size, entry.directory)
+}
+print(python:read("docs/readme.txt"))
+
+// An archive made here, in memory, read back.
+const writer = zip.create()
+writer:add("notes/a.txt", "first"):add("notes/b.txt", text, { level = 9 }):addDirectory("empty")
+const bytes = writer:finish()
+if (bytes != nil) {
+	const archive = zip.fromString(bytes)
+	const names: { string } = {}
+	for (_, entry in archive:entries()) {
+		table.insert(names, `{entry.name}:{entry.size}`)
+	}
+	print("made", table.concat(names, " "), archive:read("notes/b.txt") == text)
+}
+
+// On disk: written, opened, extracted.
+const dir = path.join(fs.tempDir(), `cluau-zip-test-{math.floor(os.clock() * 1e6)}`)
+fs.mkdir(dir)
+const file = path.join(dir, "out.zip")
+fs.write(path.join(dir, "source.txt"), "from a file")
+const onDisk = zip.create(file)
+onDisk:addFile("copied.txt", path.join(dir, "source.txt"))
+onDisk:add("deep/inside/note.txt", "nested")
+print("finish", onDisk:finish() == nil, fs.exists(file))
+const opened = zip.open(file)
+print("extracted", opened:extract(path.join(dir, "out")))
+print(fs.read(path.join(dir, "out", "copied.txt")), fs.read(path.join(dir, "out", "deep", "inside", "note.txt")))
+opened:close()
+
+// An entry named to leave the directory is refused.
+const evil = zip.create()
+evil:add("../escaped.txt", "no")
+const evilBytes = evil:finish()
+if (evilBytes != nil) {
+	const refused, why = pcall(function() {
+		zip.fromString(evilBytes):extract(path.join(dir, "evil"))
+	})
+	print("escape", refused, string.find(tostring(why), "outside the directory", 1, true) != nil, fs.exists(path.join(dir, "escaped.txt")))
+}
+fs.remove(dir, true)
+
+const attempts: { () -> ...unknown } = {
+	function() { compress.gunzip("not gzip at all") },
+	function() { compress.inflate("\1\2\3") },
+	function() { zip.fromString("not a zip") },
+	function() { compress.gzip("x", { level = 12 }) },
+}
+for (_, attempt in attempts) {
+	const ok, why = pcall(attempt)
+	print(ok, string.match(tostring(why), "(%a+%.%w+: [^%(]*)"))
+}

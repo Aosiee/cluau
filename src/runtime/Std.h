@@ -59,6 +59,10 @@ namespace cluau::runtime::detail {
 	// Pushes @std/encoding's table (base64, hex).
 	void OpenEncoding(lua_State* L);
 
+	// Pushes @std/compress's and @std/zip's tables (when the runtime is built with them).
+	void OpenCompress(lua_State* L);
+	void OpenZip(lua_State* L);
+
 	// After a read of standard input came back empty-handed: when a Ctrl-C
 	// stopped it, raises the `interrupted` error (and does not return).
 	void RaiseIfInterrupted(lua_State* L);

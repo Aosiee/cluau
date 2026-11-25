@@ -142,6 +142,26 @@ if(CLUAU_BUILD_RUNTIME)
         endif()
     endif()
 
+    # @std/compress and @std/zip: miniz (deflate, zlib, zip in one C file),
+    # fetched at a release and built here.
+    option(CLUAU_COMPRESS "Build @std/compress and @std/zip (fetches miniz)" ON)
+    if(CLUAU_COMPRESS)
+        include(FetchContent)
+        enable_language(C)
+        FetchContent_Declare(miniz
+            URL https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip
+            URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(miniz) # the release is the one C file and its header
+        add_library(cluau_miniz STATIC ${miniz_SOURCE_DIR}/miniz.c)
+        target_include_directories(cluau_miniz PUBLIC ${miniz_SOURCE_DIR})
+        # Files go through the runtime's own (UTF-8) paths; no zlib names.
+        target_compile_definitions(cluau_miniz PUBLIC MINIZ_NO_STDIO MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(cluau_miniz PRIVATE -w)
+        endif()
+    endif()
+
     # @std/regex: PCRE2 (Perl-compatible regular expressions), fetched at a
     # release and linked statically, 8-bit with Unicode, without its JIT.
     option(CLUAU_REGEX "Build @std/regex (fetches PCRE2)" ON)
@@ -182,6 +202,11 @@ if(CLUAU_BUILD_RUNTIME)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
     if(WIN32)
         target_link_libraries(cluau_runtime PRIVATE ws2_32) # @std/net
+    endif()
+    if(CLUAU_COMPRESS)
+        target_sources(cluau_runtime PRIVATE src/runtime/Compress.cpp)
+        target_link_libraries(cluau_runtime PRIVATE cluau_miniz)
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_COMPRESS)
     endif()
     if(CLUAU_SQLITE)
         target_sources(cluau_runtime PRIVATE src/runtime/Sqlite.cpp)

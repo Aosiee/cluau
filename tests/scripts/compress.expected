@@ -1,0 +1,22 @@
+gzip	4600	true	true
+empty	true	true
+levels	true
+binary	true
+hello, cluau
+one two
+hello, cluau
+raw deflate
+true
+entry	docs/readme.txt	11	false
+entry	empty/	0	true
+from python
+made	notes/a.txt:5 notes/b.txt:4600 empty/:0	true
+finish	true	true
+extracted	2
+from a file	nested
+escape	false	true	false
+false	compress.gunzip: the data is not gzip
+false	compress.inflate: the data is not zlib 
+false	zip.fromString: the data is not a zip archive 
+false	compress.gzip: options.level is from 0 
+exit: 0
