@@ -104,8 +104,9 @@ directory. Neither needs administrator rights.
 Run an installer again to update. The installers are
 [`installer/install.sh`](installer/install.sh) and
 [`installer/install.ps1`](installer/install.ps1). There are release builds
-for Linux (x86_64 and arm64), macOS (Apple silicon and Intel) and Windows
-(x86_64, which Windows on Arm runs too). `CLUAU_REPOSITORY` points either
+for Linux (x86_64 and arm64; any distribution with glibc 2.28 or later:
+RHEL 8, Debian 10, Ubuntu 20.04 and newer), macOS (Apple silicon and
+Intel) and Windows (x86_64, which Windows on Arm runs too). `CLUAU_REPOSITORY` points either
 installer at another copy of the repository's releases (a Forgejo or Gitea
 server's: `https://forge.example.org/owner/cluau`).
 

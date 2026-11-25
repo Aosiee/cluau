@@ -37,12 +37,15 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: true
       matrix:
         include:
-          - { name: linux-x86_64, os: ubuntu-26.04, exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"', packages: true }
-          - { name: linux-arm64, os: ubuntu-26.04-arm, exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"', packages: true }
+          # Linux: built on glibc 2.28 (manylinux_2_28, AlmaLinux 8), so the
+          # build runs on every system from RHEL 8, Debian 10 and Ubuntu 20.04 on.
+          - { name: linux-x86_64, os: ubuntu-26.04, container: 'quay.io/pypa/manylinux_2_28_x86_64', exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
+          - { name: linux-arm64, os: ubuntu-26.04-arm, container: 'quay.io/pypa/manylinux_2_28_aarch64', exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
           - { name: macos-arm64, os: macos-latest, exe: cluau, flags: '' }
           - { name: macos-x86_64, os: macos-15-intel, exe: cluau, flags: '' }
           - { name: windows-x86_64, os: windows-latest, exe: Release/cluau.exe, flags: '' }
@@ -53,6 +56,19 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.REF }}
+
+      # The build image's tools: CMake from its Python when it has none.
+      - name: Build tools
+        if: matrix.container
+        run: |
+          if ! command -v cmake > /dev/null; then
+            /opt/python/cp312-cp312/bin/pip install --quiet cmake
+            ln -sf /opt/python/cp312-cp312/bin/cmake /opt/python/cp312-cp312/bin/ctest /usr/local/bin/
+          fi
+          command -v python3 > /dev/null || ln -sf /opt/python/cp312-cp312/bin/python3 /usr/local/bin/python3
+          cmake --version | head -n 1
+          gcc --version | head -n 1
+          ldd --version | head -n 1
 
       # The tag names the version the translator reports (Version()).
       - name: Check the tag against the version
@@ -84,27 +100,63 @@ jobs:
             tar -czf "$dir.tar.gz" "$dir"
           fi
 
-      # The .deb and the .rpm, each installed and run before it is kept (the
-      # .rpm in a Fedora container).
-      - name: Linux packages
-        if: matrix.packages
-        run: |
-          sudo apt-get update -q && sudo apt-get install -y -q rpm > /dev/null
-          sh installer/packages.sh "$TAG" "cluau-$TAG-${{ matrix.name }}" .
-          sudo dpkg -i cluau_*.deb
-          (cd / && cluau --version && cluau -e 'print(require("@std/regex").compile("\\d+"):match("v42").text)')
-          sudo dpkg -r cluau
-          test ! -e /usr/bin/cluau
-          # Not signed yet (Fedora refuses an unsigned package unless told).
-          docker run --rm -v "$PWD:/packages" fedora:latest sh -c 'rpm -i --nosignature /packages/cluau-*.rpm && cluau --version && cluau -e "print(1 + 1)"'
-
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: |
-            cluau-*.*z*
-            cluau_*.deb
-            cluau-*.rpm
+          path: cluau-*.*z*
+
+  # The Debian and RPM packages, from the Linux builds, each installed and run
+  # on the oldest systems the builds support and on current ones.
+  packages:
+    name: packages (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: x86_64, os: ubuntu-26.04 }
+          - { arch: arm64, os: ubuntu-26.04-arm }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+
+      - name: Build
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q rpm > /dev/null
+          tar -xzf "dist/cluau-$TAG-linux-${{ matrix.arch }}.tar.gz"
+          sh installer/packages.sh "$TAG" "cluau-$TAG-linux-${{ matrix.arch }}" packages
+
+      - name: Installed and run
+        run: |
+          # A script that uses the bundled libraries (PCRE2, SQLite).
+          mkdir -p probe
+          printf '%s\n' 'print(require("@std/regex").compile("[0-9]+"):match("v42").text)' \
+            'print(require("@std/sqlite").open(":memory:"):first("SELECT 6 * 7 AS n").n)' > probe/check.cluau
+          check='cluau --version && cluau /probe/check.cluau'
+          for image in debian:11 debian:12 ubuntu:22.04 ubuntu:26.04; do
+            echo "== $image"
+            docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "dpkg -i /packages/cluau_*.deb > /dev/null && $check && dpkg -r cluau > /dev/null && ! test -e /usr/bin/cluau"
+          done
+          # Not signed yet (Fedora and RHEL refuse an unsigned package unless told).
+          for image in rockylinux:8 rockylinux:9 fedora:latest; do
+            echo "== $image"
+            docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "rpm -i --nosignature /packages/cluau-*.rpm && $check && rpm -e cluau && ! test -e /usr/bin/cluau"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: packages/*
 
   # The VS Code extension: its grammar's tests, then the extension in VS Code
   # (on a virtual display) against this release's Linux build, then packaged.
@@ -210,7 +262,7 @@ jobs:
           if (Test-Path $dir) { throw 'the uninstall left the install directory' }
 
   release:
-    needs: [build, installers, vscode]
+    needs: [build, packages, installers, vscode]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-26.04
     steps:
