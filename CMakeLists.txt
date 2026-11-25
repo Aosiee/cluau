@@ -118,7 +118,8 @@ if(CLUAU_BUILD_RUNTIME)
         DEPENDS ${CLUAU_STD_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_std.cmake
         COMMENT "Embedding the standard modules written in cluau")
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
-        src/runtime/Check.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
+        src/runtime/Check.cpp src/runtime/Json.cpp src/runtime/LanguageService.cpp src/runtime/LspServer.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
     if(CLUAU_HTTP)
@@ -182,6 +183,7 @@ if(CLUAU_BUILD_RUNTIME)
         # The runtime's API as a host uses it (host modules, the sandbox).
         add_executable(cluau_runtime_tests tests/main.cpp tests/runtime_tests.cpp)
         target_link_libraries(cluau_runtime_tests PRIVATE cluau_runtime Luau.VM)
+        target_include_directories(cluau_runtime_tests PRIVATE src/runtime)
         add_test(NAME cluau_runtime_tests COMMAND cluau_runtime_tests)
         # Each tests/scripts/<name>.cluau runs and its output is compared
         # with <name>.expected, and `cluau check` passes on it (or reports

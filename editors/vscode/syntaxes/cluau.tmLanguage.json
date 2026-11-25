@@ -1,0 +1,248 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "cluau",
+	"scopeName": "source.cluau",
+	"fileTypes": ["cluau"],
+	"firstLineMatch": "^#!.*\\bcluau\\b",
+	"patterns": [
+		{ "include": "#shebang" },
+		{ "include": "#comments" },
+		{ "include": "#strings" },
+		{ "include": "#declarations" },
+		{ "include": "#keywords" },
+		{ "include": "#attributes" },
+		{ "include": "#numbers" },
+		{ "include": "#constants" },
+		{ "include": "#annotations" },
+		{ "include": "#calls" },
+		{ "include": "#operators" },
+		{ "include": "#punctuation" }
+	],
+	"repository": {
+		"shebang": {
+			"match": "\\A#!.*$",
+			"name": "comment.line.shebang.cluau"
+		},
+		"comments": {
+			"patterns": [
+				{
+					"begin": "/\\*",
+					"end": "\\*/",
+					"name": "comment.block.cluau",
+					"beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.cluau" } },
+					"endCaptures": { "0": { "name": "punctuation.definition.comment.end.cluau" } }
+				},
+				{
+					"begin": "//",
+					"end": "$",
+					"name": "comment.line.double-slash.cluau",
+					"beginCaptures": { "0": { "name": "punctuation.definition.comment.cluau" } }
+				}
+			]
+		},
+		"escapes": {
+			"patterns": [
+				{ "match": "\\\\(?:[abfnrtvz\\\\\"'`{}\\n]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[0-9]{1,3})", "name": "constant.character.escape.cluau" },
+				{ "match": "\\\\.", "name": "invalid.illegal.escape.cluau" }
+			]
+		},
+		"strings": {
+			"patterns": [
+				{
+					"begin": "\"",
+					"end": "\"|$",
+					"name": "string.quoted.double.cluau",
+					"beginCaptures": { "0": { "name": "punctuation.definition.string.begin.cluau" } },
+					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } },
+					"patterns": [{ "include": "#escapes" }]
+				},
+				{
+					"begin": "'",
+					"end": "'|$",
+					"name": "string.quoted.single.cluau",
+					"beginCaptures": { "0": { "name": "punctuation.definition.string.begin.cluau" } },
+					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } },
+					"patterns": [{ "include": "#escapes" }]
+				},
+				{
+					"begin": "`",
+					"end": "`",
+					"name": "string.interpolated.cluau",
+					"beginCaptures": { "0": { "name": "punctuation.definition.string.begin.cluau" } },
+					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } },
+					"patterns": [
+						{ "include": "#escapes" },
+						{
+							"begin": "\\{",
+							"end": "\\}",
+							"name": "meta.template.expression.cluau",
+							"beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.cluau" } },
+							"endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.cluau" } },
+							"contentName": "source.cluau",
+							"patterns": [{ "include": "$self" }]
+						}
+					]
+				},
+				{
+					"begin": "\\[(=*)\\[",
+					"end": "\\]\\1\\]",
+					"name": "string.quoted.other.multiline.cluau",
+					"beginCaptures": { "0": { "name": "punctuation.definition.string.begin.cluau" } },
+					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } }
+				}
+			]
+		},
+		"declarations": {
+			"patterns": [
+				{
+					"match": "\\b(?:(abstract)\\s+)?(class)\\s+([A-Za-z_]\\w*)(?:\\s+(extends)\\s+([A-Za-z_][\\w.]*))?",
+					"captures": {
+						"1": { "name": "storage.modifier.abstract.cluau" },
+						"2": { "name": "storage.type.class.cluau" },
+						"3": { "name": "entity.name.type.class.cluau" },
+						"4": { "name": "storage.modifier.extends.cluau" },
+						"5": { "name": "entity.other.inherited-class.cluau" }
+					}
+				},
+				{
+					"match": "\\b(enum)\\s+([A-Za-z_]\\w*)",
+					"captures": {
+						"1": { "name": "storage.type.enum.cluau" },
+						"2": { "name": "entity.name.type.enum.cluau" }
+					}
+				},
+				{
+					"match": "\\b(?:(abstract)\\s+)?(function)\\s+((?:[A-Za-z_]\\w*\\s*[.:]\\s*)*)([A-Za-z_]\\w*)\\s*(?=[<(])",
+					"captures": {
+						"1": { "name": "storage.modifier.abstract.cluau" },
+						"2": { "name": "storage.type.function.cluau" },
+						"3": { "name": "entity.name.namespace.cluau" },
+						"4": { "name": "entity.name.function.cluau" }
+					}
+				},
+				{
+					"match": "\\b(signal)\\s+([A-Za-z_]\\w*)\\s*(?=\\()",
+					"captures": {
+						"1": { "name": "storage.type.signal.cluau" },
+						"2": { "name": "entity.name.function.signal.cluau" }
+					}
+				},
+				{
+					"match": "\\b(?:(export)\\s+)?(type)\\s+([A-Za-z_]\\w*)(?=\\s*(?:<[^>]*>)?\\s*=)",
+					"captures": {
+						"1": { "name": "storage.modifier.export.cluau" },
+						"2": { "name": "storage.type.type.cluau" },
+						"3": { "name": "entity.name.type.alias.cluau" }
+					}
+				},
+				{
+					"match": "\\b(static)\\s+([A-Za-z_]\\w*)",
+					"captures": {
+						"1": { "name": "storage.modifier.static.cluau" },
+						"2": { "name": "variable.other.property.static.cluau" }
+					}
+				}
+			]
+		},
+		"keywords": {
+			"patterns": [
+				{
+					"match": "\\b(?:if|else|while|for|do|in|return|break|continue|try|catch|finally|throw)\\b",
+					"name": "keyword.control.cluau"
+				},
+				{
+					"match": "\\b(?:let|const|local|function|class|enum|signal|extends|abstract|static)\\b",
+					"name": "storage.type.cluau"
+				},
+				{
+					"match": "\\b(?:and|or|not)\\b",
+					"name": "keyword.operator.logical.cluau"
+				},
+				{
+					"match": "\\btypeof\\b",
+					"name": "keyword.operator.typeof.cluau"
+				},
+				{
+					"match": "\\b(?:self|super)\\b",
+					"name": "variable.language.self.cluau"
+				}
+			]
+		},
+		"attributes": {
+			"match": "(@)([A-Za-z_]\\w*)",
+			"name": "meta.attribute.cluau",
+			"captures": {
+				"1": { "name": "punctuation.definition.attribute.cluau" },
+				"2": { "name": "entity.other.attribute-name.cluau" }
+			}
+		},
+		"numbers": {
+			"patterns": [
+				{ "match": "\\b0[xX][0-9A-Fa-f_]+\\b", "name": "constant.numeric.hex.cluau" },
+				{ "match": "\\b0[bB][01_]+\\b", "name": "constant.numeric.binary.cluau" },
+				{
+					"match": "(?:\\b[0-9][0-9_]*(?:\\.[0-9_]*)?|\\.[0-9][0-9_]*)(?:[eE][+-]?[0-9_]+)?\\b",
+					"name": "constant.numeric.decimal.cluau"
+				}
+			]
+		},
+		"constants": {
+			"patterns": [
+				{ "match": "\\b(?:true|false)\\b", "name": "constant.language.boolean.cluau" },
+				{ "match": "\\bnil\\b", "name": "constant.language.nil.cluau" },
+				{ "match": "\\.\\.\\.", "name": "constant.language.vararg.cluau" }
+			]
+		},
+		"annotations": {
+			"comment": "A type after a declaration's colon (`x: number`, `): string`); `obj:Method()` has no space after its colon.",
+			"match": "(?<=[\\w)\\]?])\\s*(:)\\s+((?:[A-Za-z_][\\w]*\\.)*[A-Za-z_][\\w]*)",
+			"captures": {
+				"1": { "name": "punctuation.separator.type.cluau" },
+				"2": { "name": "entity.name.type.cluau" }
+			}
+		},
+		"calls": {
+			"patterns": [
+				{
+					"match": "\\b(?:print|require|repr|input|assert|error|pcall|xpcall|select|type|typeof|tostring|tonumber|pairs|ipairs|next|setmetatable|getmetatable|rawget|rawset|rawequal|rawlen|unpack)\\b(?=\\s*\\()",
+					"name": "support.function.builtin.cluau"
+				},
+				{
+					"match": "\\b(?:math|string|table|coroutine|bit32|utf8|os|debug|buffer|vector)\\b(?=\\s*\\.)",
+					"name": "support.constant.library.cluau"
+				},
+				{
+					"match": "(?<=:)([A-Za-z_]\\w*)\\s*(?=\\()",
+					"captures": { "1": { "name": "entity.name.function.method.cluau" } }
+				},
+				{
+					"match": "\\b([A-Za-z_]\\w*)\\s*(?=\\()",
+					"captures": { "1": { "name": "entity.name.function.call.cluau" } }
+				}
+			]
+		},
+		"operators": {
+			"patterns": [
+				{ "match": "\\+\\+|--", "name": "keyword.operator.increment.cluau" },
+				{ "match": "&&|\\|\\||!(?!=)", "name": "keyword.operator.logical.cluau" },
+				{ "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.cluau" },
+				{ "match": "(?:\\+|-|\\*|/|~/|%|\\^|\\.\\.)=", "name": "keyword.operator.assignment.compound.cluau" },
+				{ "match": "=", "name": "keyword.operator.assignment.cluau" },
+				{ "match": "~/|\\+|-|\\*|/|%|\\^", "name": "keyword.operator.arithmetic.cluau" },
+				{ "match": "\\.\\.", "name": "keyword.operator.concatenation.cluau" },
+				{ "match": "#", "name": "keyword.operator.length.cluau" },
+				{ "match": "->", "name": "keyword.operator.type.function.cluau" },
+				{ "match": "[|&?]", "name": "keyword.operator.type.cluau" }
+			]
+		},
+		"punctuation": {
+			"patterns": [
+				{ "match": "[{}]", "name": "punctuation.section.braces.cluau" },
+				{ "match": "[()]", "name": "punctuation.section.parens.cluau" },
+				{ "match": "[\\[\\]]", "name": "punctuation.section.brackets.cluau" },
+				{ "match": "[,;]", "name": "punctuation.separator.cluau" },
+				{ "match": "[.:]", "name": "punctuation.accessor.cluau" }
+			]
+		}
+	}
+}

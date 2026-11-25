@@ -1,0 +1,119 @@
+{
+	"name": "cluau",
+	"displayName": "cluau",
+	"description": "cluau, C-syntax-flavoured Luau: highlighting, and the checker's errors, completion, hover and navigation as you type.",
+	"version": "0.15.0",
+	"publisher": "aosiee",
+	"license": "SEE LICENSE IN LICENSE",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Aosiee/cluau"
+	},
+	"homepage": "https://github.com/Aosiee/cluau/tree/main/editors/vscode",
+	"bugs": {
+		"url": "https://github.com/Aosiee/cluau/issues"
+	},
+	"engines": {
+		"vscode": "^1.82.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Linters",
+		"Formatters"
+	],
+	"keywords": [
+		"cluau",
+		"luau",
+		"lua",
+		"scripting"
+	],
+	"main": "./src/extension.js",
+	"activationEvents": [],
+	"contributes": {
+		"languages": [
+			{
+				"id": "cluau",
+				"aliases": [
+					"cluau"
+				],
+				"extensions": [
+					".cluau"
+				],
+				"firstLine": "^#!.*\\bcluau\\b",
+				"configuration": "./language-configuration.json"
+			}
+		],
+		"grammars": [
+			{
+				"language": "cluau",
+				"scopeName": "source.cluau",
+				"path": "./syntaxes/cluau.tmLanguage.json"
+			}
+		],
+		"commands": [
+			{
+				"command": "cluau.run",
+				"title": "Run File",
+				"category": "cluau",
+				"icon": "$(play)"
+			},
+			{
+				"command": "cluau.restartServer",
+				"title": "Restart Language Server",
+				"category": "cluau"
+			}
+		],
+		"menus": {
+			"editor/title/run": [
+				{
+					"command": "cluau.run",
+					"when": "resourceLangId == cluau"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "cluau.run",
+					"when": "editorLangId == cluau"
+				}
+			]
+		},
+		"configuration": {
+			"title": "cluau",
+			"properties": {
+				"cluau.path": {
+					"type": "string",
+					"default": "cluau",
+					"markdownDescription": "The `cluau` program (0.15.0 or later): a path, or a name found on `PATH`."
+				},
+				"cluau.modules": {
+					"type": "object",
+					"default": {},
+					"additionalProperties": {
+						"type": "string"
+					},
+					"markdownDescription": "A host's modules, typed from files: `{ \"@game/world\": \"types/world.luau\" }` (as `cluau check --module`). Paths are relative to the workspace folder."
+				},
+				"cluau.trace.server": {
+					"type": "string",
+					"enum": [
+						"off",
+						"messages",
+						"verbose"
+					],
+					"default": "off",
+					"description": "Logs the messages between the editor and the language server (in the cluau output channel)."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"test": "node test/grammar.js"
+	},
+	"dependencies": {
+		"vscode-languageclient": "9.0.1"
+	},
+	"devDependencies": {
+		"@vscode/vsce": "3.2.1",
+		"ovsx": "0.10.1"
+	}
+}

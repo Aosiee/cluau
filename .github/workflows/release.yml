@@ -76,6 +76,61 @@ jobs:
           name: ${{ matrix.name }}
           path: cluau-*.*z*
 
+  # The VS Code extension: its grammar's tests, then the extension in VS Code
+  # (on a virtual display) against this release's Linux build, then packaged.
+  vscode:
+    name: VS Code extension
+    needs: build
+    runs-on: ubuntu-26.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist
+
+      - name: Check the tag against the extension's version
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "v$version" != "$TAG" ]; then
+            echo "the tag is $TAG, but editors/vscode/package.json says $version"
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Grammar
+        run: node test/grammar.js
+
+      - name: In VS Code
+        run: |
+          tar -xzf "../../dist/cluau-$TAG-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
+          curl -fsSL -o "$RUNNER_TEMP/vscode.tar.gz" https://update.code.visualstudio.com/1.95.3/linux-x64/stable
+          tar -xzf "$RUNNER_TEMP/vscode.tar.gz" -C "$RUNNER_TEMP"
+          CLUAU_EDITOR_ARGS=--no-sandbox xvfb-run -a node test/editor/run.js "$RUNNER_TEMP/VSCode-linux-x64/code" "$RUNNER_TEMP/cluau-$TAG-linux-x86_64/cluau"
+
+      - name: Package
+        run: |
+          cp ../../LICENSE .
+          npx vsce package --out "../../cluau-vscode-$TAG.vsix"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode
+          path: cluau-vscode-*.vsix
+
   # The installers, run against this release's own downloads before they are
   # published: each installs, runs a script from PATH, and uninstalls.
   installers:
@@ -125,7 +180,7 @@ jobs:
           if (Test-Path $dir) { throw 'the uninstall left the install directory' }
 
   release:
-    needs: [build, installers]
+    needs: [build, installers, vscode]
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
@@ -155,7 +210,7 @@ jobs:
             echo "irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex"
             echo '```'
             echo
-            echo "Downloads: the \`cluau\` command line (run and check scripts, the REPL, translate, convert) for each platform, with the licence, the README, the syntax guide and the scripting guide, and the installers. To embed the translator, build from source (no dependencies)."
+            echo "Downloads: the \`cluau\` command line (run and check scripts, the REPL, the language server, translate, convert) for each platform, with the licence, the README, the syntax guide and the scripting guide; the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`, also on the VS Code Marketplace and Open VSX). To embed the translator, build from source (no dependencies)."
           } > notes.md
           cp installer/install.sh installer/install.ps1 dist/
           (cd dist && sha256sum * > SHA256SUMS)
@@ -171,3 +226,40 @@ jobs:
           else
             gh release create "$TAG" dist/* --title "$title" --notes-file notes.md --verify-tag
           fi
+
+  # The extension on the VS Code Marketplace and Open VSX, once the release
+  # is out. Each is published when its token is set (VSCE_PAT, OVSX_PAT).
+  marketplaces:
+    needs: release
+    runs-on: ubuntu-26.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: editors/vscode
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: vscode
+          path: dist
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: VS Code Marketplace
+        if: env.VSCE_PAT != ''
+        run: npx vsce publish --packagePath "../../dist/cluau-vscode-$TAG.vsix" --pat "$VSCE_PAT"
+
+      - name: Open VSX
+        if: env.OVSX_PAT != ''
+        run: npx ovsx publish "../../dist/cluau-vscode-$TAG.vsix" --pat "$OVSX_PAT"

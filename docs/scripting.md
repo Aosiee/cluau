@@ -40,6 +40,7 @@ print(repr(counter.Counts))
 | `cluau check script.cluau...` | type-checks scripts without running them (see [Checking](#checking)) |
 | `cluau test [-k text] [path...]` | runs the test cases in `*_test.cluau` files (see [Testing](#testing)) |
 | `cluau fmt [--check] [path...]` | formats `.cluau` files (see [Formatting](#formatting)) |
+| `cluau lsp` | the language server, for editors (see [Editors](#editors)) |
 | `cluau --sandbox script.cluau` | a script without file, network or process access (see [The sandbox](#the-sandbox)) |
 
 The arguments after the script are `process.args`. A script's first line
@@ -228,6 +229,48 @@ with status 1 when a file would change, for CI; `--indent "    "` indents
 with spaces instead of a tab; `cluau fmt -` formats standard input to
 standard output. A file that does not lex (an unterminated string) is
 reported and left alone.
+
+## Editors
+
+`cluau lsp` is a language server: an editor starts it and gets, for each
+open `.cluau` file, what `cluau check` reports as you type (for the file
+and the modules it requires), completion with the types of names, members
+and the standard modules, hover (a name's type and the comment above its
+declaration), signature help, go to definition (locals, functions, class
+members in other modules, `require` paths), references and renaming of
+local names, the outline of classes, functions and variables, and
+formatting (`cluau fmt`). It finds modules as `cluau` does, and takes the
+same `--module <name>=<file>` options as `cluau check` for a host's
+modules.
+
+The VS Code extension (in `editors/vscode`; on the VS Code Marketplace and
+Open VSX as *cluau*, and as a `.vsix` with each release) starts it, and
+adds highlighting and a *Run File* command. It needs `cluau` on `PATH` (or
+the `cluau.path` setting).
+
+Another editor runs `cluau lsp` on standard input and output for the
+`cluau` file type. In Neovim (0.11 or later):
+
+```lua
+vim.filetype.add({ extension = { cluau = "cluau" } })
+vim.lsp.config("cluau", { cmd = { "cluau", "lsp" }, filetypes = { "cluau" }, root_markers = { "cluau.toml", ".git" } })
+vim.lsp.enable("cluau")
+```
+
+In Helix (`languages.toml`):
+
+```toml
+[language-server.cluau]
+command = "cluau"
+args = ["lsp"]
+
+[[language]]
+name = "cluau"
+scope = "source.cluau"
+file-types = ["cluau"]
+comment-token = "//"
+language-servers = ["cluau"]
+```
 
 ## The interactive prompt
 

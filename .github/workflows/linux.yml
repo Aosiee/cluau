@@ -41,3 +41,7 @@ jobs:
       - name: Formatting
         if: matrix.name == 'gcc'
         run: build/cluau fmt --check src tests hamr.cluau
+
+      - name: The editor grammar
+        if: matrix.name == 'gcc'
+        run: node editors/vscode/test/grammar.js

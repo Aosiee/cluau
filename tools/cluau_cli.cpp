@@ -71,6 +71,8 @@ namespace {
 		"                                           packages from Git repositories (cluau.toml, cluau.lock, cluau_modules/)\n"
 		"       cluau check [--loose] [--lint] [--module <@alias/name>=<file>]... <script.cluau>...\n"
 		"                                           type-check scripts (and the modules they require) without running them\n"
+		"       cluau lsp [--module <@alias/name>=<file>]...\n"
+		"                                           the language server, for editors (on standard input and output)\n"
 		"       cluau translate [--manifest|--script] <file.cluau>\n"
 		"       cluau convert [--verify] <file.luau>\n"
 		"       cluau fmt [--check] [--indent <text>] [path...]   format .cluau files (every one under a directory; no path: .)\n"
@@ -295,6 +297,43 @@ namespace {
 		return dirs;
 	}
 
+	// --module @game/world=types/world.luau: a host's module typed from a
+	// file (a .cluau one from its source). Nonzero: the exit status.
+	int ModuleOption(const std::string& spec, cluau::runtime::CheckOptions& options)
+	{
+		const size_t eq = spec.find('=');
+		if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size())
+			return Usage();
+		const std::string path = spec.substr(eq + 1);
+		std::string text;
+		if (!Read(path, text))
+			return 2;
+		const bool cluauSource = path.size() > 6 && path.compare(path.size() - 6, 6, ".cluau") == 0;
+		(cluauSource ? options.ModuleSources : options.Modules)[spec.substr(0, eq)] = text;
+		return 0;
+	}
+
+	// cluau lsp: the language server, on standard input and output.
+	int Lsp(int argc, char** argv)
+	{
+		cluau::runtime::CheckOptions options;
+		for (int i = 2; i < argc; i++)
+		{
+			const std::string arg = argv[i];
+			if (arg == "--module")
+			{
+				if (const int status = ModuleOption(++i < argc ? argv[i] : "", options))
+					return status;
+			}
+			else if (arg == "--stdio")
+				continue; // how editors' clients ask for standard input and output
+			else
+				return Usage();
+		}
+		options.SearchPath = SearchPath();
+		return cluau::runtime::ServeLanguageServer(options);
+	}
+
 	int Check(int argc, char** argv)
 	{
 		std::vector<std::string> files;
@@ -308,17 +347,8 @@ namespace {
 				options.Lint = true;
 			else if (arg == "--module")
 			{
-				// --module @game/world=types/world.luau
-				const std::string spec = ++i < argc ? argv[i] : "";
-				const size_t eq = spec.find('=');
-				if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size())
-					return Usage();
-				const std::string path = spec.substr(eq + 1);
-				std::string text;
-				if (!Read(path, text))
-					return 2;
-				const bool cluauSource = path.size() > 6 && path.compare(path.size() - 6, 6, ".cluau") == 0;
-				(cluauSource ? options.ModuleSources : options.Modules)[spec.substr(0, eq)] = text;
+				if (const int status = ModuleOption(++i < argc ? argv[i] : "", options))
+					return status;
 			}
 			else if (arg[0] == '-' && arg.size() > 1)
 				return Usage();
@@ -485,6 +515,8 @@ int main(int argc, char** argv)
 #ifdef CLUAU_HAS_RUNTIME
 	if (first == "check")
 		return Check(argc, argv);
+	if (first == "lsp")
+		return Lsp(argc, argv);
 	if (first == "test")
 		return Test(argc, argv);
 	if (first == "init" || first == "add" || first == "remove" || first == "install" || first == "update" || first == "list")

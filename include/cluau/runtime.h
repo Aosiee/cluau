@@ -150,4 +150,13 @@ namespace cluau::runtime {
 	// file and position.
 	std::vector<CheckFinding> Check(const std::vector<std::string>& files, const CheckOptions& options = {});
 
+	// ---- the language server (`cluau lsp`) --------------------------------
+
+	// Speaks the Language Server Protocol on standard input and output
+	// until the editor ends the session: the checker's findings as the
+	// files change, completion, hover, signature help, go to definition,
+	// references and renaming of locals, the outline and formatting. The
+	// options are the checker's. Returns the exit status.
+	int ServeLanguageServer(const CheckOptions& options = {});
+
 } // namespace cluau::runtime

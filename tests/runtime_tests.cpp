@@ -1,12 +1,17 @@
 #include "test.h"
 
 #include "cluau/runtime.h"
+#include "Json.h"
+#include "LspServer.h"
 
 #include "lua.h"
 #include "lualib.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <random>
 
 namespace {
 
@@ -60,9 +65,31 @@ namespace {
 		return runtime.RunSource(source, "-e");
 	}
 
+	// A directory of this run's own (test builds may run side by side),
+	// removed at the end.
+	const std::filesystem::path& TempDir()
+	{
+		static const struct Dir
+		{
+			std::filesystem::path Path;
+			Dir()
+			{
+				std::random_device random;
+				Path = std::filesystem::temp_directory_path() / ("cluau_runtime_tests_" + std::to_string(random()) + std::to_string(random()));
+				std::filesystem::create_directories(Path);
+			}
+			~Dir()
+			{
+				std::error_code ec;
+				std::filesystem::remove_all(Path, ec);
+			}
+		} dir;
+		return dir.Path;
+	}
+
 	std::string Temp(const std::string& name, const std::string& text)
 	{
-		const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
+		const std::filesystem::path path = TempDir() / name;
 		std::ofstream(path, std::ios::binary) << text;
 		return path.string();
 	}
@@ -161,4 +188,286 @@ TEST("check: the host's modules are typed by CheckOptions")
 	CHECK(!cluau::runtime::Check({ good }).empty());
 	std::filesystem::remove(good);
 	std::filesystem::remove(bad);
+}
+
+// ---- the language server ---------------------------------------------------
+
+
+namespace {
+
+	using cluau::runtime::detail::Json;
+	using cluau::runtime::detail::LspServer;
+
+	struct Session
+	{
+		LspServer Server;
+		std::vector<Json> Notes; // the notifications the last message raised
+		int Id = 0;
+
+		Json Request(const std::string& method, Json params)
+		{
+			Json message = Json::Object().Set("jsonrpc", "2.0").Set("id", ++Id).Set("method", method).Set("params", std::move(params));
+			return Take(Server.Handle(message.Dump()));
+		}
+
+		void Notify(const std::string& method, Json params)
+		{
+			Json message = Json::Object().Set("jsonrpc", "2.0").Set("method", method).Set("params", std::move(params));
+			Take(Server.Handle(message.Dump()));
+		}
+
+		Json Take(const std::vector<std::string>& out)
+		{
+			Notes.clear();
+			Json response;
+			for (const std::string& text : out)
+			{
+				std::optional<Json> m = Json::Parse(text);
+				CHECK(m.has_value());
+				if (!m)
+					continue;
+				if (m->Has("id"))
+					response = *m;
+				else
+					Notes.push_back(*m);
+			}
+			return response;
+		}
+
+		// The diagnostics last published for a file.
+		Json Diagnostics(const std::string& uri) const
+		{
+			for (const Json& note : Notes)
+				if (note["method"].String() == "textDocument/publishDiagnostics" && note["params"]["uri"].String() == uri)
+					return note["params"]["diagnostics"];
+			return {};
+		}
+	};
+
+	Json At(const std::string& uri, int line, int character)
+	{
+		return Json::Object()
+			.Set("textDocument", Json::Object().Set("uri", uri))
+			.Set("position", Json::Object().Set("line", line).Set("character", character));
+	}
+
+	Json OpenedDocument(const std::string& uri, const std::string& text)
+	{
+		return Json::Object().Set(
+			"textDocument", Json::Object().Set("uri", uri).Set("languageId", "cluau").Set("version", 1).Set("text", text));
+	}
+
+	// A project on disk: main.cluau requires ./shapes.
+	struct Project
+	{
+		std::filesystem::path Dir;
+		std::string Main, Shapes;
+
+		Project()
+		{
+			Dir = TempDir() / "lsp";
+			std::filesystem::create_directories(Dir);
+			std::ofstream(Dir / "shapes.cluau", std::ios::binary) << "// A point on the plane.\n"
+																	 "class Point {\n"
+																	 "\tX: number = 0\n"
+																	 "\tY: number = 0\n"
+																	 "\n"
+																	 "\t// How far from the origin.\n"
+																	 "\tfunction Length(): number {\n"
+																	 "\t\treturn math.sqrt(self.X * self.X + self.Y * self.Y)\n"
+																	 "\t}\n"
+																	 "}\n"
+																	 "\n"
+																	 "return { Point = Point }\n";
+			Main = LspServer::UriFromPath((Dir / "main.cluau").generic_u8string());
+			Shapes = LspServer::UriFromPath((Dir / "shapes.cluau").generic_u8string());
+		}
+		~Project()
+		{
+			std::error_code ec;
+			std::filesystem::remove_all(Dir, ec);
+		}
+	};
+
+	const char* kMain = "const fs = require(\"@std/fs\")\n"
+						"const shapes = require(\"./shapes\")\n"
+						"\n"
+						"// The number of lines in a file.\n"
+						"function count(path: string, limit: number): number {\n"
+						"\treturn #string.split(fs.read(path), \"\\n\")\n"
+						"}\n"
+						"\n"
+						"const p = shapes.Point()\n"
+						"print(p:Length(), count(\"x\", 3))\n"
+						"let total = count(\"main.cluau\", 1) + 1\n"
+						"print(total, missing)\n";
+
+} // namespace
+
+TEST("json: values read back as they were written")
+{
+	std::optional<Json> v = Json::Parse(R"({"a": [1, 2.5, "x\"y", true, null], "b": {"c": "\u00e9\ud83d\ude00"}, "n": -3e2})");
+	CHECK(v.has_value());
+	if (!v)
+		return;
+	CHECK_EQ((*v)["a"].Size(), size_t(5));
+	CHECK_EQ((*v)["a"][1].Number(), 2.5);
+	CHECK_EQ((*v)["a"][2].String(), std::string("x\"y"));
+	CHECK((*v)["a"][4].IsNull());
+	CHECK_EQ((*v)["b"]["c"].String(), std::string("\xc3\xa9\xf0\x9f\x98\x80"));
+	CHECK_EQ((*v)["n"].Int(), -300);
+	CHECK((*v)["missing"]["deeper"].IsNull());
+	CHECK_EQ(Json::Parse(v->Dump())->Dump(), v->Dump());
+	CHECK_EQ(Json::Object().Set("k", "a\nb").Set("n", 3).Dump(), std::string(R"({"k":"a\nb","n":3})"));
+	CHECK(!Json::Parse("{\"a\": }").has_value());
+	CHECK(!Json::Parse("[1, 2").has_value());
+}
+
+TEST("lsp: an opened script's problems are published at their lines")
+{
+	Project project;
+	Session s;
+	const Json init = s.Request("initialize", Json::Object().Set("capabilities", Json::Object()));
+	CHECK(init["result"]["capabilities"]["hoverProvider"].Bool());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, kMain));
+	const Json diagnostics = s.Diagnostics(project.Main);
+	CHECK_EQ(diagnostics.Size(), size_t(1));
+	CHECK_EQ(diagnostics[0]["range"]["start"]["line"].Int(), 11);
+	CHECK_EQ(diagnostics[0]["range"]["start"]["character"].Int(), 13);
+	CHECK_EQ(diagnostics[0]["range"]["end"]["character"].Int(), 20);
+	CHECK(diagnostics[0]["message"].String().find("missing") != std::string::npos);
+	// Fixed in the buffer: nothing to say.
+	std::string fixed = kMain;
+	fixed.replace(fixed.find("missing"), 7, "total");
+	s.Notify("textDocument/didChange", Json::Object()
+										   .Set("textDocument", Json::Object().Set("uri", project.Main))
+										   .Set("contentChanges", Json::Array().Push(Json::Object().Set("text", fixed))));
+	CHECK_EQ(s.Diagnostics(project.Main).Size(), size_t(0));
+	CHECK(s.Diagnostics(project.Main).IsArray());
+	// Closed: its diagnostics are cleared.
+	s.Notify("textDocument/didClose", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main)));
+	CHECK(s.Diagnostics(project.Main).IsArray());
+	CHECK_EQ(s.Diagnostics(project.Main).Size(), size_t(0));
+}
+
+TEST("lsp: completion, hover and signature help know the script's types")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	std::string text = kMain;
+	text += "print(fs.re)\nprint(count(\"a\", \n";
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, text));
+
+	auto labels = [](const Json& items) {
+		std::vector<std::string> out;
+		for (const Json& item : items.Items())
+			out.push_back(item["label"].String());
+		return out;
+	};
+	const std::vector<std::string> members = labels(s.Request("textDocument/completion", At(project.Main, 12, 11))["result"]);
+	CHECK(std::find(members.begin(), members.end(), "read") != members.end());
+	CHECK(std::find(members.begin(), members.end(), "readBuffer") != members.end());
+	const std::vector<std::string> methods = labels(s.Request("textDocument/completion", At(project.Main, 9, 8))["result"]);
+	CHECK(std::find(methods.begin(), methods.end(), "Length") != methods.end());
+
+	auto hover = [&](int line, int character) {
+		return s.Request("textDocument/hover", At(project.Main, line, character))["result"]["contents"]["value"].String();
+	};
+	CHECK_EQ(hover(10, 6), std::string("```luau\ntotal: number\n```"));
+	CHECK_EQ(hover(9, 6), std::string("```luau\np: Point\n```"));
+	CHECK_EQ(hover(9, 10), std::string("```luau\nPoint:Length(): number\n```\n\nHow far from the origin."));
+	CHECK_EQ(hover(8, 19), std::string("```luau\nclass Point\n```\n\nA point on the plane."));
+	CHECK_EQ(hover(9, 20), std::string("```luau\ncount: (path: string, limit: number) -> number\n```\n\nThe number of lines in a file."));
+
+	const Json signature = s.Request("textDocument/signatureHelp", At(project.Main, 13, 17))["result"];
+	CHECK_EQ(signature["signatures"][0]["label"].String(), std::string("count(path: string, limit: number): number"));
+	CHECK_EQ(signature["activeParameter"].Int(), 1);
+}
+
+TEST("lsp: definitions, references, renaming, the outline and formatting")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, kMain));
+
+	const Json method = s.Request("textDocument/definition", At(project.Main, 9, 10))["result"];
+	CHECK_EQ(method["uri"].String(), project.Shapes);
+	CHECK_EQ(method["range"]["start"]["line"].Int(), 6);
+	CHECK_EQ(method["range"]["start"]["character"].Int(), 10);
+	const Json function = s.Request("textDocument/definition", At(project.Main, 9, 19))["result"];
+	CHECK_EQ(function["uri"].String(), project.Main);
+	CHECK_EQ(function["range"]["start"]["line"].Int(), 4);
+	CHECK_EQ(function["range"]["start"]["character"].Int(), 9);
+	const Json module = s.Request("textDocument/definition", At(project.Main, 1, 26))["result"];
+	CHECK_EQ(module["uri"].String(), project.Shapes);
+
+	Json refs = At(project.Main, 11, 7);
+	refs.Set("context", Json::Object().Set("includeDeclaration", true));
+	const Json uses = s.Request("textDocument/references", refs)["result"];
+	CHECK_EQ(uses.Size(), size_t(2));
+	CHECK_EQ(uses[0]["range"]["start"]["line"].Int(), 10);
+	CHECK_EQ(uses[0]["range"]["start"]["character"].Int(), 4);
+
+	Json rename = At(project.Main, 10, 5);
+	rename.Set("newName", "sum");
+	const Json edits = s.Request("textDocument/rename", rename)["result"]["changes"][project.Main];
+	CHECK_EQ(edits.Size(), size_t(2));
+	CHECK_EQ(edits[1]["newText"].String(), std::string("sum"));
+	rename.Set("newName", "while");
+	CHECK(s.Request("textDocument/rename", rename).Has("error"));
+
+	const Json outline = s.Request("textDocument/documentSymbol", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main)))["result"];
+	std::vector<std::string> names;
+	for (const Json& symbol : outline.Items())
+		names.push_back(symbol["name"].String());
+	std::string joined;
+	for (const std::string& n : names)
+		joined += n + " ";
+	CHECK_EQ(joined, std::string("fs shapes count p total "));
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Shapes, "class Point {\n\tX: number = 0\n\tfunction Length(): number { return 0 }\n}\nreturn { Point = Point }\n"));
+	const Json classes = s.Request("textDocument/documentSymbol", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Shapes)))["result"];
+	CHECK_EQ(classes[0]["name"].String(), std::string("Point"));
+	CHECK_EQ(classes[0]["children"].Size(), size_t(2));
+
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "if (x) {\ny()\n}\n"));
+	const Json format = s.Request("textDocument/formatting", Json::Object()
+															  .Set("textDocument", Json::Object().Set("uri", project.Main))
+															  .Set("options", Json::Object().Set("tabSize", 2).Set("insertSpaces", true)))["result"];
+	CHECK_EQ(format.Size(), size_t(1));
+	CHECK_EQ(format[0]["newText"].String(), std::string("if (x) {\n  y()\n}\n"));
+}
+
+TEST("lsp: columns are UTF-16 code units, and messages are framed on the wire")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	// "é" is two bytes, one UTF-16 unit; "😀" four bytes, two units.
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "const s = \"\xc3\xa9\xf0\x9f\x98\x80\"; print(s, nope)\n"));
+	const Json diagnostics = s.Diagnostics(project.Main);
+	CHECK_EQ(diagnostics.Size(), size_t(1));
+	CHECK_EQ(diagnostics[0]["range"]["start"]["character"].Int(), 26); // 29 in bytes
+
+	std::FILE* in = std::tmpfile();
+	std::FILE* out = std::tmpfile();
+	CHECK(in && out);
+	if (!in || !out)
+		return;
+	for (const std::string& body : { std::string(R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})"),
+			 std::string(R"({"jsonrpc":"2.0","id":2,"method":"shutdown"})"), std::string(R"({"jsonrpc":"2.0","method":"exit"})") })
+		std::fprintf(in, "Content-Length: %zu\r\n\r\n%s", body.size(), body.c_str());
+	std::rewind(in);
+	LspServer server;
+	CHECK_EQ(server.Serve(in, out), 0);
+	std::rewind(out);
+	std::string written;
+	for (int c; (c = std::fgetc(out)) != EOF;)
+		written += (char)c;
+	CHECK(written.rfind("Content-Length: ", 0) == 0);
+	CHECK(written.find("\"serverInfo\"") != std::string::npos);
+	CHECK(written.find("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}") != std::string::npos);
+	std::fclose(in);
+	std::fclose(out);
 }

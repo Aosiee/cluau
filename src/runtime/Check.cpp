@@ -7,6 +7,7 @@
 #include "cluau/runtime.h"
 #include "Resolve.h"
 #include "Std.h"
+#include "Analysis.h"
 
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Config.h"
@@ -260,6 +261,15 @@ return m :: {
 			std::vector<std::string> UserModules;               // files read, in order
 			// Requires that name no module: (module, line) -> what `require` says.
 			std::map<std::pair<std::string, int>, std::string> NotFound;
+			std::map<std::string, std::string> Buffers; // an editor's unsaved text, by module name
+			std::map<std::string, std::string> Texts;   // each file's text as read (before translation)
+
+			std::optional<std::string> TextOf(const std::string& name) const
+			{
+				if (auto buffer = Buffers.find(name); buffer != Buffers.end())
+					return buffer->second;
+				return ReadFile(fs::u8path(name));
+			}
 
 			std::optional<Luau::SourceCode> readSource(const Luau::ModuleName& name) override
 			{
@@ -297,9 +307,12 @@ return m :: {
 						UserModules.push_back(name);
 					return Luau::SourceCode{ it->second, Luau::SourceCode::Module };
 				}
-				std::optional<std::string> text = ReadFile(fs::u8path(name));
+				std::optional<std::string> text = TextOf(name);
 				if (!text)
 					return std::nullopt;
+				Texts[name] = *text;
+				for (auto it = NotFound.begin(); it != NotFound.end();)
+					it = it->first.first == name ? NotFound.erase(it) : std::next(it);
 				if (std::find(UserModules.begin(), UserModules.end(), name) == UserModules.end())
 					UserModules.push_back(name);
 				if (!IsCluau(name))
@@ -390,80 +403,153 @@ return m :: {
 
 	} // namespace
 
-	std::vector<CheckFinding> Check(const std::vector<std::string>& paths, const CheckOptions& options)
+	namespace {
+
+		// `{|` and `|}` read as `{` and `}`.
+		std::string Plain(std::string text)
+		{
+			for (const char* marker : { "{|", "|}" })
+				for (size_t at = text.find(marker); at != std::string::npos; at = text.find(marker, at))
+					text.erase(marker[0] == '{' ? at + 1 : at, 1);
+			return text;
+		}
+
+		// A subclass's type prints as its whole structure (Luau names an
+		// intersection by its parts): each class's type as it prints (plain,
+		// longest first), with the class's name, so messages can say the name.
+		std::vector<std::pair<std::string, std::string>> ClassTypeNames(Luau::Frontend& frontend, const Files& files)
+		{
+			std::vector<std::pair<std::string, std::string>> classNames; // printed type, class name
+			for (const auto& [moduleName, translation] : files.Translations)
+				if (Luau::ModulePtr m = frontend.moduleResolver.getModule(moduleName))
+					for (const ClassInfo& c : translation.Classes)
+						if (auto it = m->exportedTypeBindings.find(c.Name); it != m->exportedTypeBindings.end())
+						{
+							// Its structure, as a copy of the type in another module prints.
+							Luau::ToStringOptions structural;
+							structural.ignoreSyntheticName = true;
+							const std::string printed = Luau::toString(it->second.type, structural);
+							if (printed != c.Name)
+								classNames.emplace_back(Plain(printed), c.Name);
+						}
+			std::sort(classNames.begin(), classNames.end(), [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+			return classNames;
+		}
+
+	} // namespace
+
+	struct detail::Analysis::Impl
 	{
-		std::vector<CheckFinding> out;
-		Files files;
+		CheckOptions Options;
+		struct Files Files;
+		struct Modes Modes;
+		std::unique_ptr<Luau::Frontend> Frontend;
+		bool GlobalsLoaded = true;
+	};
+
+	detail::Analysis::Analysis(const CheckOptions& options)
+		: m(std::make_unique<Impl>())
+	{
+		m->Options = options;
 		std::error_code ec;
-		files.StartDir = fs::current_path(ec);
-		for (const std::string& dir : options.SearchPath)
-			files.SearchDirs.push_back(files.StartDir / fs::u8path(dir));
-		files.HostTypes = &options.Modules;
-		files.HostSources = &options.ModuleSources;
-		Modes modes;
-		modes.Modules = &files;
+		m->Files.StartDir = fs::current_path(ec);
+		for (const std::string& dir : m->Options.SearchPath)
+			m->Files.SearchDirs.push_back(m->Files.StartDir / fs::u8path(dir));
+		m->Files.HostTypes = &m->Options.Modules;
+		m->Files.HostSources = &m->Options.ModuleSources;
+		m->Modes.Modules = &m->Files;
 		Luau::FrontendOptions frontendOptions;
 		frontendOptions.retainFullTypeGraphs = true; // the strict rules read the inferred types
 		// Luau's original type solver: the new one (Luau 0.748) does not yet
 		// find a subclass's inherited methods through its intersection type,
 		// and misreads pcall's arguments and optional option tables.
-		Luau::Frontend frontend(Luau::SolverMode::Old, &files, &modes, frontendOptions);
-		Luau::registerBuiltinGlobals(frontend, frontend.globals);
-		Luau::LoadDefinitionFileResult loaded =
-			frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, kGlobals, "@cluau", false, false);
-		if (!loaded.success)
-			out.push_back({ "<runtime globals>", {}, "Internal", "the runtime's global declarations do not load", false });
-		Luau::freeze(frontend.globals.globalTypes);
-
-		std::vector<std::string> roots;
-		for (const std::string& path : paths)
+		m->Frontend = std::make_unique<Luau::Frontend>(Luau::SolverMode::Old, &m->Files, &m->Modes, frontendOptions);
+		Luau::Frontend& frontend = *m->Frontend;
+		for (const bool forAutocomplete : { false, true })
 		{
-			const fs::path file = files.StartDir / fs::u8path(path);
-			if (!fs::is_regular_file(file, ec))
-			{
-				out.push_back({ path, {}, "Missing", "cannot read the file", false });
-				continue;
-			}
-			const std::string name = detail::ModuleKey(file);
-			files.MainDirs[name] = fs::u8path(name).parent_path();
-			files.RootOf[name] = name;
-			roots.push_back(name);
+			Luau::GlobalTypes& globals = forAutocomplete ? frontend.globalsForAutocomplete : frontend.globals;
+			Luau::registerBuiltinGlobals(frontend, globals, forAutocomplete);
+			Luau::LoadDefinitionFileResult loaded =
+				frontend.loadDefinitionFile(globals, globals.globalScope, kGlobals, "@cluau", false, forAutocomplete);
+			m->GlobalsLoaded = m->GlobalsLoaded && loaded.success;
+			Luau::freeze(globals.globalTypes);
 		}
+	}
 
-		std::vector<Luau::TypeError> errors;
-		for (const std::string& root : roots)
-		{
-			Luau::CheckResult result = frontend.check(root);
-			errors.insert(errors.end(), result.errors.begin(), result.errors.end());
-		}
+	detail::Analysis::~Analysis() = default;
 
-		// A subclass's type prints as its whole structure (Luau names an
-		// intersection by its parts): errors say the class's name instead.
-		std::vector<std::pair<std::string, std::string>> classNames; // printed type, class name
-		for (const auto& [name, translation] : files.Translations)
-			if (Luau::ModulePtr m = frontend.moduleResolver.getModule(name))
-				for (const ClassInfo& c : translation.Classes)
-					if (auto it = m->exportedTypeBindings.find(c.Name); it != m->exportedTypeBindings.end())
-					{
-						// Its structure, as a copy of the type in another module prints.
-						Luau::ToStringOptions structural;
-						structural.ignoreSyntheticName = true;
-						const std::string printed = Luau::toString(it->second.type, structural);
-						if (printed != c.Name)
-							classNames.emplace_back(printed, c.Name);
-					}
-		std::sort(classNames.begin(), classNames.end(), [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
-		// A quoted type in an error is the class's when it reads as the class's
-		// type does (whole, or cut short by Luau: `... *TRUNCATED*` after a
-		// prefix of it), `{| |}` and `{ }` alike.
-		auto plain = [](std::string text) {
-			for (const char* marker : { "{|", "|}" })
-				for (size_t at = text.find(marker); at != std::string::npos; at = text.find(marker, at))
-					text.erase(marker[0] == '{' ? at + 1 : at, 1);
-			return text;
-		};
-		for (auto& [printed, name] : classNames)
-			printed = plain(printed);
+	Luau::Frontend& detail::Analysis::Frontend() { return *m->Frontend; }
+
+	bool detail::Analysis::GlobalsLoaded() const { return m->GlobalsLoaded; }
+
+	std::string detail::Analysis::AddRoot(const fs::path& file)
+	{
+		const std::string name = detail::ModuleKey(file);
+		m->Files.MainDirs[name] = fs::u8path(name).parent_path();
+		m->Files.RootOf[name] = name;
+		return name;
+	}
+
+	void detail::Analysis::SetBuffer(const std::string& name, std::optional<std::string> text)
+	{
+		if (text)
+			m->Files.Buffers[name] = std::move(*text);
+		else
+			m->Files.Buffers.erase(name);
+		m->Frontend->markDirty(name);
+	}
+
+	void detail::Analysis::MarkDirty(const std::string& name) { m->Frontend->markDirty(name); }
+
+	std::optional<std::string> detail::Analysis::TextOf(const std::string& name) const
+	{
+		if (auto it = m->Files.Texts.find(name); it != m->Files.Texts.end() && !m->Frontend->isDirty(name))
+			return it->second;
+		return m->Files.TextOf(name);
+	}
+
+	const TranslateResult* detail::Analysis::Translation(const std::string& name) const
+	{
+		auto it = m->Files.Translations.find(name);
+		return it == m->Files.Translations.end() ? nullptr : &it->second;
+	}
+
+	const std::vector<std::string>& detail::Analysis::UserModules() const { return m->Files.UserModules; }
+
+	std::string detail::Analysis::Display(const std::string& name) const { return m->Files.Display(name); }
+
+	std::optional<std::string> detail::Analysis::Resolve(const std::string& from, const std::string& request)
+	{
+		Luau::AstExprConstantString expr(Luau::Location{}, Luau::AstArray<char>{ const_cast<char*>(request.data()), request.size() },
+			Luau::AstExprConstantString::QuoteStyle::QuotedSimple);
+		const Luau::ModuleInfo context{ from };
+		Luau::TypeCheckLimits limits;
+		if (std::optional<Luau::ModuleInfo> found = m->Files.resolveModule(&context, &expr, limits))
+			return found->name;
+		return std::nullopt;
+	}
+
+	std::optional<std::string> detail::Analysis::ClassNameOf(Luau::TypeId type)
+	{
+		Luau::ToStringOptions structural;
+		structural.ignoreSyntheticName = true;
+		const std::string printed = Plain(Luau::toString(type, structural));
+		for (const auto& [classType, className] : ClassTypeNames(*m->Frontend, m->Files))
+			if (classType == printed)
+				return className;
+		return std::nullopt;
+	}
+
+	std::vector<CheckFinding> detail::Analysis::Findings(const std::string& name)
+	{
+		std::vector<CheckFinding> out;
+		Luau::Frontend& frontend = *m->Frontend;
+		const CheckOptions& options = m->Options;
+		Files& files = m->Files;
+		Luau::ModulePtr module = frontend.moduleResolver.getModule(name);
+
+		const std::vector<std::pair<std::string, std::string>> classNames = ClassTypeNames(frontend, files);
+		auto plain = Plain;
 		auto nameClasses = [&](std::string message) {
 			constexpr std::string_view kCut = "... *TRUNCATED*";
 			for (size_t open = message.find('\''); open != std::string::npos; open = message.find('\'', open + 1))
@@ -480,13 +566,13 @@ return m :: {
 					quoted.erase(mark, 1);
 					suffix = "?";
 				}
-				for (const auto& [printed, name] : classNames)
+				for (const auto& [printed, className] : classNames)
 				{
 					const bool cut = quoted.size() > kCut.size() && quoted.compare(quoted.size() - kCut.size(), kCut.size(), kCut) == 0;
 					const size_t length = cut ? quoted.size() - kCut.size() : quoted.size();
 					if (cut ? printed.compare(0, length, quoted, 0, length) == 0 : printed == quoted)
 					{
-						message.replace(open + 1, close - open - 1, name + suffix);
+						message.replace(open + 1, close - open - 1, className + suffix);
 						break;
 					}
 				}
@@ -503,30 +589,27 @@ return m :: {
 					message.erase(parts, next - parts);
 			return message;
 		};
-		std::set<std::string> reported;
-		for (const std::string& name : files.UserModules)
+
+		const std::string display = files.Display(name);
+		auto tr = files.Translations.find(name);
+		const TranslateResult* translation = tr == files.Translations.end() ? nullptr : &tr->second;
+		if (translation)
 		{
-			if (!reported.insert(name).second)
-				continue;
-			const std::string display = files.Display(name);
-			auto tr = files.Translations.find(name);
-			const TranslateResult* translation = tr == files.Translations.end() ? nullptr : &tr->second;
-			if (translation)
-			{
-				for (const Diagnostic& d : translation->Diagnostics)
-					out.push_back({ display, d.At, "cluau", d.Message, d.Warning });
-				for (const ClassInfo& c : translation->Classes)
-					if (c.UncheckedConstructor)
-						out.push_back({ display, c.At, "UncheckedConstructor",
-							c.Name + "(...)'s arguments are not checked: its constructor comes from " + c.Base +
-								", another module's class (declare Init in " + c.Name + " to check them)",
-							true });
-				if (translation->HasErrors())
-					continue; // the translation's Luau is not the script: its errors would mislead
-			}
-			std::set<std::string> seen; // Luau reports a module's errors once per checked root
-			std::set<int> unresolvedLines;
-			for (const Luau::TypeError& e : errors)
+			for (const Diagnostic& d : translation->Diagnostics)
+				out.push_back({ display, d.At, "cluau", d.Message, d.Warning });
+			for (const ClassInfo& c : translation->Classes)
+				if (c.UncheckedConstructor)
+					out.push_back({ display, c.At, "UncheckedConstructor",
+						c.Name + "(...)'s arguments are not checked: its constructor comes from " + c.Base +
+							", another module's class (declare Init in " + c.Name + " to check them)",
+						true });
+			if (translation->HasErrors())
+				return out; // the translation's Luau is not the script: its errors would mislead
+		}
+		std::set<std::string> seen;
+		std::set<int> unresolvedLines;
+		if (module)
+			for (const Luau::TypeError& e : module->errors)
 			{
 				if (e.moduleName != name)
 					continue;
@@ -553,37 +636,62 @@ return m :: {
 				if (seen.insert(key).second)
 					out.push_back(std::move(f));
 			}
-			const Luau::SourceModule* source = frontend.getSourceModule(name);
-			Luau::ModulePtr module = frontend.moduleResolver.getModule(name);
-			if (options.Lint && source && source->root && module)
-				for (const Luau::LintWarning& w :
-					Luau::lint(source->root, *source->names, frontend.globals.globalScope, module.get(), source->hotcomments, LintOptions()))
-				{
-					Position begin{ (int)w.location.begin.line, (int)w.location.begin.column };
-					if (translation)
-					{
-						// Not in what the translation generated (a class's header).
-						bool generated = false;
-						for (const Range& g : translation->Generated)
-							generated = generated || (begin.Line == g.Begin.Line && begin.Col >= g.Begin.Col && begin.Col < g.End.Col);
-						if (generated)
-							continue;
-						begin = translation->Map.FromLuau(begin);
-					}
-					out.push_back({ display, { begin, begin }, std::string("lint:") + Luau::LintWarning::getName(w.code), w.text, true });
-				}
-			if (translation && !options.Loose)
+		const Luau::SourceModule* source = frontend.getSourceModule(name);
+		if (options.Lint && source && source->root && module)
+			for (const Luau::LintWarning& w :
+				Luau::lint(source->root, *source->names, frontend.globals.globalScope, module.get(), source->hotcomments, LintOptions()))
 			{
-				if (source && module)
-					for (const check::Finding& c : check::Run(*source, *module, *translation))
-					{
-						// An unresolved require's value is any: the not-found error says it.
-						if (c.Code == "NoAny" && unresolvedLines.count(translation->Map.ToLuau(c.At.Begin).Line))
-							continue;
-						out.push_back({ display, c.At, c.Code, c.Message, c.Warning });
-					}
+				Position begin{ (int)w.location.begin.line, (int)w.location.begin.column };
+				if (translation)
+				{
+					// Not in what the translation generated (a class's header).
+					bool generated = false;
+					for (const Range& g : translation->Generated)
+						generated = generated || (begin.Line == g.Begin.Line && begin.Col >= g.Begin.Col && begin.Col < g.End.Col);
+					if (generated)
+						continue;
+					begin = translation->Map.FromLuau(begin);
+				}
+				out.push_back({ display, { begin, begin }, std::string("lint:") + Luau::LintWarning::getName(w.code), w.text, true });
 			}
+		if (translation && !options.Loose && source && module)
+			for (const check::Finding& c : check::Run(*source, *module, *translation))
+			{
+				// An unresolved require's value is any: the not-found error says it.
+				if (c.Code == "NoAny" && unresolvedLines.count(translation->Map.ToLuau(c.At.Begin).Line))
+					continue;
+				out.push_back({ display, c.At, c.Code, c.Message, c.Warning });
+			}
+		std::stable_sort(out.begin(), out.end(), [](const CheckFinding& a, const CheckFinding& b) { return a.At.Begin < b.At.Begin; });
+		return out;
+	}
+
+	std::vector<CheckFinding> Check(const std::vector<std::string>& paths, const CheckOptions& options)
+	{
+		std::vector<CheckFinding> out;
+		detail::Analysis analysis(options);
+		if (!analysis.GlobalsLoaded())
+			out.push_back({ "<runtime globals>", {}, "Internal", "the runtime's global declarations do not load", false });
+		std::error_code ec;
+		const fs::path start = fs::current_path(ec);
+		std::vector<std::string> roots;
+		for (const std::string& path : paths)
+		{
+			const fs::path file = start / fs::u8path(path);
+			if (!fs::is_regular_file(file, ec))
+			{
+				out.push_back({ path, {}, "Missing", "cannot read the file", false });
+				continue;
+			}
+			roots.push_back(analysis.AddRoot(file));
 		}
+		for (const std::string& root : roots)
+			analysis.Frontend().check(root);
+		std::set<std::string> reported;
+		for (const std::string& name : analysis.UserModules())
+			if (reported.insert(name).second)
+				for (CheckFinding& f : analysis.Findings(name))
+					out.push_back(std::move(f));
 		std::stable_sort(out.begin(), out.end(), [](const CheckFinding& a, const CheckFinding& b) {
 			return a.File != b.File ? a.File < b.File : a.At.Begin < b.At.Begin;
 		});

@@ -126,6 +126,28 @@ suite:step("docs-examples", {
 	},
 })
 
+// The VS Code extension: its grammar's tests, and the extension in an editor
+// against the release build when the editor and the extension's packages
+// (`npm ci` in editors/vscode) are there.
+const editor = suite:var("editor", "/usr/share/vscodium/codium")
+suite:step("editor", {
+	doc = "Runs the VS Code extension's grammar tests, then the extension in VS Code or VSCodium (the editor variable: its program) against the release build.",
+	needs = { "build:release" },
+	timeout = 180,
+	budget = 15,
+	paths = { "editors/**", "src/**", "include/**", "tools/**" },
+	run = function(ctx: Context) {
+		ctx:run({ "node", "editors/vscode/test/grammar.js" })
+		const packages = ctx:run({ "test", "-d", "editors/vscode/node_modules/vscode-languageclient" }, { allowFail = true })
+		const found = ctx:run({ "test", "-x", editor }, { allowFail = true })
+		if (packages.code != 0 || found.code != 0) {
+			ctx:log("the editor test is left out: it needs `npm ci` in editors/vscode and the editor program (--var editor=<program>)\n")
+			return
+		}
+		ctx:run({ "node", "editors/vscode/test/editor/run.js", editor, "build-hamr-release/cluau" })
+	},
+})
+
 // The repository's own .cluau files stay as cluau fmt has them.
 suite:step("format", {
 	doc = "Checks the repository's .cluau files with cluau fmt --check.",
