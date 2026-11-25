@@ -34,8 +34,9 @@ script the way `python script.py` does, with a REPL, `require` for other
 files and a standard library for files, paths, processes, JSON, times,
 HTTP, command-line arguments and CSV, and
 `cluau check script.cluau` type-checks it (and the modules it requires)
-without running it, `cluau test` runs its test files, `cluau fmt` formats
-it, and `cluau add` brings in packages from Git repositories. Scripts run
+without running it, `cluau test` runs its test files (with
+`--coverage`, the lines they missed), `cluau profile` shows where its time
+goes, `cluau fmt` formats it, and `cluau add` brings in packages from Git repositories. Scripts run
 as native code on x64 and arm64, and `cluau --sandbox` runs one without
 file, network or process access. `cluau lsp` is a language server for
 editors, `cluau debug` a debugger for them, and the VS Code extension

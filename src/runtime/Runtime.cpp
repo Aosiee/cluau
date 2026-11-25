@@ -3,6 +3,7 @@
 
 #include "cluau/runtime.h"
 #include "Debugger.h"
+#include "Profile.h"
 #include "Resolve.h"
 #include "Std.h"
 
@@ -137,12 +138,18 @@ __cluau_meta = {
 
 		volatile std::sig_atomic_t g_Interrupt = 0;
 		bool g_Interrupted = false; // the last run ended in an interrupt
+		detail::Profiler* g_Profiler = nullptr; // the profiling runtime's (one at a time)
 
-		// Luau's interrupt callback: a pending Ctrl-C becomes an error in
-		// the running script (once: the callback is off until the next run).
+		// Luau's interrupt callback: a sample for the profiler when one is
+		// due; a pending Ctrl-C becomes an error in the running script
+		// (once: the callback is off until the next run).
 		void Interrupt(lua_State* L, int gc)
 		{
-			if (gc >= 0 || !g_Interrupt)
+			if (gc >= 0)
+				return;
+			if (g_Profiler && g_Profiler->Due())
+				g_Profiler->Sample(L);
+			if (!g_Interrupt)
 				return;
 			g_Interrupt = 0;
 			g_Interrupted = true;
@@ -215,6 +222,27 @@ __cluau_meta = {
 		// A debugger (`cluau debug`): told of each chunk loaded and of an
 		// error that ends the script; null otherwise.
 		detail::DebugHooks* Debug = nullptr;
+		// The chunks loaded from files, kept for their coverage (Options::Coverage).
+		std::vector<std::pair<std::string, int>> CoverageChunks;
+		std::unique_ptr<detail::Profiler> Profile;
+		bool Reported = false; // the profile's report is written
+
+		void ReportProfile()
+		{
+			if (!Profile || Reported)
+				return;
+			Reported = true;
+			Profile->Stop();
+			std::fflush(stdout);
+			std::fputs(("\n" + Profile->Report((size_t)std::max(1, Opts.ProfileTop))).c_str(), stderr);
+			if (!Opts.ProfileFolded.empty())
+			{
+				std::ofstream out(fs::u8path(Opts.ProfileFolded), std::ios::binary);
+				out << Profile->Folded();
+				if (!out)
+					std::fprintf(stderr, "cluau: cannot write '%s'\n", Opts.ProfileFolded.c_str());
+			}
+		}
 
 		// The sandbox's files: a module required in it must be under the
 		// main script's directory, a search directory, or a cluau_modules
@@ -387,11 +415,19 @@ __cluau_meta = {
 			// locals' names.
 			copts.optimizationLevel = Debug ? 0 : 1;
 			copts.debugLevel = Debug ? 2 : 1;
+			copts.coverageLevel = Opts.Coverage ? 1 : 0;
 			const std::string bytecode = Luau::compile(result.Luau, copts);
 			const std::string chunkname = "@" + name;
 			const bool loadFailed = luau_load(L, chunkname.c_str(), bytecode.data(), bytecode.size(), 0) != 0;
 			if (!loadFailed && Debug)
 				Debug->OnLoaded(L, name, FileOf(name));
+			if (!loadFailed && Opts.Coverage)
+				if (const std::string file = FileOf(name); !file.empty())
+				{
+					lua_pushvalue(L, -1);
+					CoverageChunks.push_back({ file, lua_ref(L, -1) });
+					lua_pop(L, 1);
+				}
 			// Native code costs about 5 microseconds a line to generate: the
 			// bundled modules that only parse arguments, run tests or manage
 			// packages stay interpreted; @std/csv's parsing gains from it.
@@ -484,6 +520,8 @@ __cluau_meta = {
 	};
 
 	namespace {
+
+		Runtime::Impl* g_ProfiledRuntime = nullptr; // the runtime g_Profiler samples for
 
 		// Runs the module chunk on top of L's stack and keeps its value (true
 		// for none) under `key`, the module's identity; returns the value.
@@ -1030,7 +1068,7 @@ end
 		rt.StartDir = fs::current_path(ec);
 		rt.MainDir = rt.StartDir;
 		lua_State* L = rt.L = luaL_newstate();
-		rt.Native = rt.Opts.Native && Luau::CodeGen::isSupported();
+		rt.Native = rt.Opts.Native && !rt.Opts.Coverage && Luau::CodeGen::isSupported();
 		if (rt.Native)
 			Luau::CodeGen::create(L);
 		luaL_openlibs(L);
@@ -1057,15 +1095,56 @@ end
 
 		if (rt.Opts.CatchInterrupt)
 			CatchSigint();
+		if (rt.Opts.Profile)
+		{
+			rt.Profile = std::make_unique<detail::Profiler>();
+			g_Profiler = rt.Profile.get();
+			// process.exit ends the process: the report goes first.
+			detail::SetExitHook([](int) {
+				if (g_ProfiledRuntime)
+					g_ProfiledRuntime->ReportProfile();
+			});
+			g_ProfiledRuntime = &rt;
+		}
 	}
 
 	Runtime::~Runtime()
 	{
+		if (m_Impl->Profile)
+		{
+			m_Impl->ReportProfile();
+			g_Profiler = nullptr;
+			g_ProfiledRuntime = nullptr;
+			detail::SetExitHook(nullptr);
+		}
 		if (m_Impl->L)
 			lua_close(m_Impl->L);
 	}
 
 	lua_State* Runtime::State() const { return m_Impl->L; }
+
+	std::map<std::string, std::map<int, int>> Runtime::Coverage() const
+	{
+		std::map<std::string, std::map<int, int>> out;
+		lua_State* L = m_Impl->L;
+		for (const auto& [file, ref] : m_Impl->CoverageChunks)
+		{
+			std::map<int, int>& lines = out[file];
+			lua_getref(L, ref);
+			// Each function of the chunk (and the functions inside it).
+			lua_getcoverage(L, -1, &lines, [](void* context, const char*, int, int, const int* hits, size_t size) {
+				auto& lines = *static_cast<std::map<int, int>*>(context);
+				for (size_t line = 1; line < size; line++)
+					if (hits[line] >= 0)
+					{
+						int& count = lines[(int)line];
+						count = std::max(count, hits[line]);
+					}
+			});
+			lua_pop(L, 1);
+		}
+		return out;
+	}
 
 	namespace {
 

@@ -40,6 +40,7 @@ print(repr(counter.Counts))
 | `cluau check script.cluau...` | type-checks scripts without running them (see [Checking](#checking)) |
 | `cluau test [-k text] [path...]` | runs the test cases in `*_test.cluau` files (see [Testing](#testing)) |
 | `cluau fmt [--check] [path...]` | formats `.cluau` files (see [Formatting](#formatting)) |
+| `cluau profile script.cluau [args...]` | runs a script and reports where its time went (see [Profiling](#profiling)) |
 | `cluau lsp` | the language server, for editors (see [Editors](#editors)) |
 | `cluau debug` | the debugger, for editors (see [Debugging](#debugging)) |
 | `cluau --sandbox script.cluau` | a script without file, network or process access (see [The sandbox](#the-sandbox)) |
@@ -210,6 +211,53 @@ tests/shapes_test.cluau
 - The exit status is 1 when a case failed, a file did not finish, or
   nothing ran, so `cluau test` fits a CI step.
 - Hidden directories (`.git`, ...) are skipped.
+
+`--coverage` also counts the lines the tests ran, in every file they
+loaded (not the test files themselves, nor packages in `cluau_modules`),
+and reports the lines that never ran:
+
+```
+$ cluau test --coverage
+...
+coverage (lines run):
+  shapes.cluau     12/13     92%   not run: 13
+  total            12/13     92%
+```
+
+A line counts when it holds a statement. `--lcov <file>` writes the same
+counts as LCOV, which editors' coverage extensions and CI services read.
+The tests run interpreted under `--coverage`.
+
+## Profiling
+
+`cluau profile script.cluau [args...]` runs the script and then reports,
+on stderr, where its time went: each function's own time (its code and
+the C functions it calls) and its total time (with what it calls), and
+the lines that took the most:
+
+```
+$ cluau profile render.cluau
+...
+profile: 1.204 s, 1187 ms sampled
+
+   self   total  function
+   41.2%   58.0%  Shade (render.cluau:31)
+   16.8%   16.8%  Dot (vec.cluau:4)
+   ...
+
+   self  line
+   22.9%  render.cluau:36
+   ...
+```
+
+It samples the stack about once a millisecond, at Luau's safepoints
+(calls and loops); time inside a long C call (a sleep, a read, a download)
+goes to the line that made the call. `--top n` shows `n` functions (20 by
+default). `--folded file` writes the samples as folded stacks
+(`outer;inner count` per line), which flame graph tools (`flamegraph.pl`,
+speedscope, Inferno) draw. Native code is profiled as it runs; with
+`--no-native`, a loop's time is on its `for` or `while` line rather than
+its body.
 
 ## Formatting
 

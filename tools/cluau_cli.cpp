@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -66,7 +67,11 @@ namespace {
 		"       cluau -e '<code>' [args...]         run code given on the command line\n"
 		"       cluau - [args...]                   run the script on standard input\n"
 		"       cluau [-i]                          the interactive prompt (-i: even when stdin is not a terminal)\n"
-		"       cluau test [-k <text>] [path...]      run the @std/test cases in *_test.cluau files (no path: .)\n"
+		"       cluau test [-k <text>] [--coverage] [--lcov <file>] [path...]\n"
+		"                                           run the @std/test cases in *_test.cluau files (no path: .);\n"
+		"                                           --coverage reports the lines the tests did not run\n"
+		"       cluau profile [--top <n>] [--folded <file>] <script.cluau> [args...]\n"
+		"                                           run a script and report where its time went\n"
 		"       cluau init | add <repository>[@ref] | remove <name> | install | update [name...] | list\n"
 		"                                           packages from Git repositories (cluau.toml, cluau.lock, cluau_modules/)\n"
 		"       cluau check [--loose] [--lint] [--module <@alias/name>=<file>]... <script.cluau>...\n"
@@ -390,11 +395,124 @@ namespace {
 	// cluau test: every *_test.cluau under the paths (and files named), each
 	// in a runtime of its own, then a summary. The exit status is 1 when a
 	// case failed, a file did not run, or there was nothing to run.
+	// The coverage of the files the tests ran (not the test files, nor
+	// packages): each file's lines run of its lines with code, and the
+	// lines not run; LCOV to `lcov` when it names a file. False when that
+	// file cannot be written.
+	bool ReportCoverage(const std::map<std::string, std::map<int, int>>& lines, const std::string& lcov)
+	{
+		namespace fs = std::filesystem;
+		std::error_code ec;
+		const fs::path cwd = fs::current_path(ec);
+		struct Row
+		{
+			std::string Shown, File;
+			int Run = 0, Total = 0;
+			std::string Missed;
+		};
+		std::vector<Row> rows;
+		for (const auto& [file, hits] : lines)
+		{
+			const std::string generic = fs::u8path(file).generic_u8string();
+			if ((generic.size() > 11 && generic.compare(generic.size() - 11, 11, "_test.cluau") == 0) ||
+				generic.find("/cluau_modules/") != std::string::npos || hits.empty())
+				continue;
+			Row row;
+			row.File = file;
+			const fs::path rel = fs::u8path(file).lexically_relative(cwd);
+			row.Shown = !rel.empty() && *rel.begin() != ".." ? rel.generic_u8string() : generic;
+			// The lines not run, as ranges ("7-9, 14"): runs of missed lines
+			// with no line of code between them that ran.
+			int from = 0, to = 0;
+			auto flush = [&] {
+				if (!from)
+					return;
+				row.Missed += (row.Missed.empty() ? "" : ", ") + std::to_string(from) + (to > from ? "-" + std::to_string(to) : "");
+				from = 0;
+			};
+			for (const auto& [line, count] : hits)
+			{
+				row.Total++;
+				if (count > 0)
+				{
+					row.Run++;
+					flush();
+				}
+				else if (from)
+					to = line;
+				else
+					from = to = line;
+			}
+			flush();
+			rows.push_back(std::move(row));
+		}
+		std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.Shown < b.Shown; });
+		size_t width = 5;
+		for (const Row& row : rows)
+			width = std::max(width, row.Shown.size());
+		int run = 0, total = 0;
+		std::printf("\ncoverage (lines run):\n");
+		for (const Row& row : rows)
+		{
+			run += row.Run;
+			total += row.Total;
+			std::printf("  %-*s  %5d/%-5d %3d%%%s%s\n", (int)width, row.Shown.c_str(), row.Run, row.Total, row.Total ? 100 * row.Run / row.Total : 100,
+				row.Missed.empty() ? "" : "   not run: ", row.Missed.c_str());
+		}
+		std::printf("  %-*s  %5d/%-5d %3d%%\n", (int)width, "total", run, total, total ? 100 * run / total : 100);
+		if (lcov.empty())
+			return true;
+		std::ofstream out(fs::u8path(lcov), std::ios::binary);
+		for (const Row& row : rows)
+		{
+			out << "TN:\nSF:" << row.File << "\n";
+			for (const auto& [line, count] : lines.at(row.File))
+				out << "DA:" << line << "," << count << "\n";
+			out << "LF:" << row.Total << "\nLH:" << row.Run << "\nend_of_record\n";
+		}
+		if (!out)
+		{
+			std::fprintf(stderr, "cluau: cannot write '%s'\n", lcov.c_str());
+			return false;
+		}
+		return true;
+	}
+
+	// cluau profile: runs the script, sampling where its time goes.
+	int Profile(int argc, char** argv)
+	{
+		int at = 2;
+		int top = 20;
+		std::string folded;
+		for (; at < argc; at++)
+		{
+			const std::string arg = argv[at];
+			if (arg == "--top" && at + 1 < argc)
+				top = std::max(1, std::atoi(argv[++at]));
+			else if (arg == "--folded" && at + 1 < argc)
+				folded = argv[++at];
+			else if (arg.rfind("-", 0) == 0)
+				return Usage();
+			else
+				break;
+		}
+		if (at >= argc)
+			return Usage();
+		cluau::runtime::Options options = RunOptions(argc, argv, at + 1);
+		options.Profile = true;
+		options.ProfileTop = top;
+		options.ProfileFolded = folded;
+		cluau::runtime::Runtime runtime(options);
+		return runtime.RunFile(argv[at]);
+	}
+
 	int Test(int argc, char** argv)
 	{
 		namespace fs = std::filesystem;
 		std::string filter;
 		std::vector<std::string> paths;
+		bool coverage = false;
+		std::string lcov;
 		for (int i = 2; i < argc; i++)
 		{
 			const std::string arg = argv[i];
@@ -403,6 +521,15 @@ namespace {
 				if (++i >= argc)
 					return Usage();
 				filter = argv[i];
+			}
+			else if (arg == "--coverage")
+				coverage = true;
+			else if (arg == "--lcov")
+			{
+				if (++i >= argc)
+					return Usage();
+				lcov = argv[i];
+				coverage = true;
 			}
 			else if (arg.rfind("-", 0) == 0)
 				return Usage();
@@ -448,14 +575,21 @@ namespace {
 			return 1;
 		}
 		int passed = 0, failed = 0, skipped = 0, broken = 0;
+		std::map<std::string, std::map<int, int>> lines; // the lines run, by file, over every test file
 		for (const std::string& file : files)
 		{
 			std::printf("%s\n", file.c_str());
 			std::fflush(stdout);
-			cluau::runtime::Runtime runtime(RunOptions(argc, argv, argc));
+			cluau::runtime::Options options = RunOptions(argc, argv, argc);
+			options.Coverage = coverage;
+			cluau::runtime::Runtime runtime(options);
 			cluau::runtime::Runtime::TestCounts counts;
 			if (!runtime.RunTest(file, filter, counts))
 				broken++;
+			if (coverage)
+				for (const auto& [covered, hits] : runtime.Coverage())
+					for (const auto& [line, count] : hits)
+						lines[covered][line] += count;
 			passed += counts.Passed;
 			failed += counts.Failed;
 			skipped += counts.Skipped;
@@ -469,6 +603,8 @@ namespace {
 		if (broken)
 			summary += ", " + std::to_string(broken) + " file(s) did not finish";
 		std::printf("%s (%zu file(s))\n", summary.c_str(), files.size());
+		if (coverage && !ReportCoverage(lines, lcov))
+			return 1;
 		return failed || broken || passed + skipped == 0 ? 1 : 0;
 	}
 
@@ -536,6 +672,8 @@ int main(int argc, char** argv)
 		return Debug(argc, argv);
 	if (first == "test")
 		return Test(argc, argv);
+	if (first == "profile")
+		return Profile(argc, argv);
 	if (first == "init" || first == "add" || first == "remove" || first == "install" || first == "update" || first == "list")
 	{
 		// The package commands are written in cluau (src/runtime/std/_packages.cluau).

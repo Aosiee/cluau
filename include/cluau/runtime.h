@@ -44,6 +44,16 @@ namespace cluau::runtime {
 		// cluau_modules and the search path. Luau itself has no file or
 		// process functions, so the script reaches nothing else.
 		bool Sandbox = false;
+		// Count the times each line runs (`cluau test --coverage`): read
+		// back by Coverage(). The code is interpreted.
+		bool Coverage = false;
+		// Sample where the time goes (`cluau profile`): when the script
+		// ends (or calls process.exit) the report goes to stderr, with the
+		// `ProfileTop` busiest functions, and the folded stacks to the file
+		// `ProfileFolded` names (none for "").
+		bool Profile = false;
+		int ProfileTop = 20;
+		std::string ProfileFolded;
 	};
 
 	class Runtime
@@ -78,6 +88,10 @@ namespace cluau::runtime {
 		bool RunTest(const std::string& path, const std::string& filter, TestCounts& counts);
 
 		lua_State* State() const;
+
+		// With Options::Coverage: for each file run (its absolute path), its
+		// lines with code (1-based) and the times each ran.
+		std::map<std::string, std::map<int, int>> Coverage() const;
 
 		// ---- the host's modules ---------------------------------------
 		//

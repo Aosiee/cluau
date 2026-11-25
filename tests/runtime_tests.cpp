@@ -18,6 +18,7 @@
 #include <mutex>
 #include <random>
 #include <set>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -520,6 +521,58 @@ TEST("lsp: workspace symbols, and inlay hints for the types of names declared wi
 		labels[std::to_string(hint["position"]["line"].Int()) + ":" + std::to_string(hint["position"]["character"].Int())] = hint["label"].String();
 	CHECK_EQ(labels["8:7"], std::string(": Point"));
 	CHECK_EQ(labels["10:9"], std::string(": number"));
+}
+
+TEST("coverage: each line with code, and the times it ran")
+{
+	const std::string file = Temp("covered.cluau", "function half(n: number): number {\n" // 1
+												   "\tif (n < 0) {\n"                    // 2
+												   "\t\terror(\"negative\")\n"          // 3
+												   "\t}\n"                               // 4
+												   "\treturn n / 2\n"                    // 5
+												   "}\n"                                  // 6
+												   "for (i = 1, 3) {\n"                   // 7
+												   "\thalf(i)\n"                         // 8
+												   "}\n");                                // 9
+	cluau::runtime::Options options;
+	options.Coverage = true;
+	cluau::runtime::Runtime runtime(options);
+	CHECK_EQ(runtime.RunFile(file), 0);
+	const auto coverage = runtime.Coverage();
+	CHECK_EQ(coverage.size(), size_t(1));
+	if (coverage.empty())
+		return;
+	const std::map<int, int>& lines = coverage.begin()->second;
+	CHECK(lines.count(3) && lines.at(3) == 0); // the error never ran
+	CHECK(lines.count(5) && lines.at(5) == 3);
+	CHECK(lines.count(8) && lines.at(8) == 3);
+	CHECK(!lines.count(4) && !lines.count(6)); // no code
+}
+
+TEST("profile: samples name the functions the time went to, as folded stacks")
+{
+	const std::string file = Temp("busy.cluau", "function spin(): number {\n"
+												"\tlet total = 0\n"
+												"\tconst stop = os.clock() + 0.15\n"
+												"\twhile (os.clock() < stop) {\n"
+												"\t\ttotal += 1\n"
+												"\t}\n"
+												"\treturn total\n"
+												"}\n"
+												"spin()\n");
+	const std::filesystem::path folded = TempDir() / "busy.folded";
+	{
+		cluau::runtime::Options options;
+		options.Profile = true;
+		options.ProfileFolded = folded.u8string();
+		cluau::runtime::Runtime runtime(options);
+		CHECK_EQ(runtime.RunFile(file), 0);
+	}
+	std::ifstream in(folded, std::ios::binary);
+	std::stringstream text;
+	text << in.rdbuf();
+	CHECK(text.str().find("(top level) (") != std::string::npos);
+	CHECK(text.str().find(";spin (") != std::string::npos);
 }
 
 TEST("lsp: columns are UTF-16 code units, and messages are framed on the wire")
