@@ -9,8 +9,8 @@
 `let` / `const`, classes, `try` / `catch` and enums, translated to standard
 Luau before Luau's type checker and compiler run. Luau's types, semantics,
 VM and libraries are unchanged, and every translated line stays on its
-line, so Luau's error
-messages and line-based debuggers point at the `.cluau` source.
+line, so Luau's error messages and line-based debuggers point at the
+`.cluau` source.
 
 ```
 class Player {
