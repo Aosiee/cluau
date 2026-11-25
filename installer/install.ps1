@@ -3,11 +3,14 @@
 # the user's PATH. No administrator rights are needed.
 #
 #   irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
-#   .\install.ps1 [-Version vX.Y.Z] [-InstallDir <dir>] [-NoModifyPath] [-AssociateFiles] [-Uninstall]
+#   .\install.ps1 [-Version vX.Y.Z] [-InstallDir <dir>] [-NoModifyPath] [-AssociateFiles] [-AddToPathExt] [-Uninstall]
 #
 # The command goes to <InstallDir>\bin (InstallDir is
 # %LOCALAPPDATA%\Programs\cluau unless -InstallDir names another), the guides
-# to <InstallDir>\doc. -AssociateFiles also opens .cluau files with cluau
+# to <InstallDir>\doc. -AddToPathExt (which implies -AssociateFiles) adds
+# .CLUAU to the user's PATHEXT, so a script on PATH runs by its name alone
+# (`deploy` for deploy.cluau) in cmd.exe and PowerShell; -Uninstall takes it
+# out again. -AssociateFiles also opens .cluau files with cluau
 # (double-click, or `script.cluau` typed in cmd.exe), for the current user.
 #
 # The environment can stand in for the options when the script is piped to
@@ -23,6 +26,7 @@ param(
     [string]$InstallDir = $(if ($env:CLUAU_INSTALL_DIR) { $env:CLUAU_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\cluau' }),
     [switch]$NoModifyPath,
     [switch]$AssociateFiles,
+    [switch]$AddToPathExt,
     [switch]$Uninstall
 )
 
@@ -55,6 +59,32 @@ function Test-SameDir([string]$A, [string]$B) {
     return $A.TrimEnd('\') -ieq $B.TrimEnd('\')
 }
 
+# PATHEXT: a user's value replaces the machine's (it is not added to it), so
+# the user's is the machine's with .CLUAU after it.
+function Add-PathExt {
+    $current = [Environment]::GetEnvironmentVariable('PATHEXT', 'User')
+    if (-not $current) { $current = [Environment]::GetEnvironmentVariable('PATHEXT', 'Machine') }
+    $entries = @($current -split ';' | Where-Object { $_ -ne '' })
+    if ($entries -inotcontains '.CLUAU') {
+        [Environment]::SetEnvironmentVariable('PATHEXT', (($entries + '.CLUAU') -join ';'), 'User')
+        $env:PATHEXT = "$env:PATHEXT;.CLUAU"
+        Say 'added .CLUAU to your PATHEXT: a script on PATH runs by its name (in a new terminal)'
+    }
+}
+
+function Remove-PathExt {
+    $current = [Environment]::GetEnvironmentVariable('PATHEXT', 'User')
+    if (-not $current) { return }
+    $entries = @($current -split ';' | Where-Object { $_ -ne '' -and $_ -ine '.CLUAU' })
+    $machine = [Environment]::GetEnvironmentVariable('PATHEXT', 'Machine')
+    # What is left is the machine's own: the user's value goes.
+    $value = if (($entries -join ';') -ieq $machine) { $null } else { $entries -join ';' }
+    if ($value -ne $current) {
+        [Environment]::SetEnvironmentVariable('PATHEXT', $value, 'User')
+        Say 'removed .CLUAU from your PATHEXT'
+    }
+}
+
 if ($Uninstall) {
     $removed = $false
     if (Test-Path $InstallDir) {
@@ -70,6 +100,7 @@ if ($Uninstall) {
     foreach ($key in $FileTypeKey, $ProgIdKey) {
         if (Test-Path $key) { Remove-Item -Recurse -Force $key }
     }
+    Remove-PathExt
     if ($removed) { Say "removed cluau from $InstallDir" } else { Say "cluau is not installed in $InstallDir" }
     return
 }
@@ -150,7 +181,7 @@ $installed = & $Target --version
 if ($LASTEXITCODE -ne 0) { Fail "the installed $Target does not run on this system" }
 Say "installed $installed to $Target"
 
-if ($AssociateFiles) {
+if ($AssociateFiles -or $AddToPathExt) {
     New-Item -Force $FileTypeKey | Out-Null
     Set-Item $FileTypeKey 'cluau.script'
     New-Item -Force "$ProgIdKey\shell\open\command" | Out-Null
@@ -158,6 +189,7 @@ if ($AssociateFiles) {
     Set-Item "$ProgIdKey\shell\open\command" "`"$Target`" `"%1`" %*"
     Say '.cluau files now open with cluau'
 }
+if ($AddToPathExt) { Add-PathExt }
 
 if (@(Get-UserPath | Where-Object { Test-SameDir $_ $BinDir }).Count -gt 0) {
     Say "$BinDir is on your PATH: run ``cluau`` to start (in a new terminal)"

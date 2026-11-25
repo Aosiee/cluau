@@ -100,7 +100,8 @@ directory. Neither needs administrator rights.
   user's `PATH`. Run the script itself (`.\install.ps1`, downloaded from the
   release) for its options: `-Version vX.Y.Z`, `-InstallDir`,
   `-NoModifyPath`, `-AssociateFiles` (open `.cluau` files with cluau),
-  `-Uninstall`.
+  `-AddToPathExt` (also run a script on `PATH` by its name alone: `deploy`
+  for `deploy.cluau`), `-Uninstall`.
 
 Run an installer again to update. The installers are
 [`installer/install.sh`](installer/install.sh) and

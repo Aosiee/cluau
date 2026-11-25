@@ -254,12 +254,23 @@ jobs:
         run: |
           $env:CLUAU_DOWNLOAD_URL = "$PWD\dist"
           $dir = Join-Path $env:RUNNER_TEMP 'cluau'
-          ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -AssociateFiles
+          ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -AddToPathExt
           & (Join-Path $dir 'bin\cluau.exe') -e 'print("ran from", require("@std/process").platform)'
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq (Join-Path $dir 'bin') })) { throw 'the user PATH has no cluau' }
+          # A script on PATH, run by its name alone (PATHEXT and the association).
+          $scripts = Join-Path $env:RUNNER_TEMP 'scripts'
+          New-Item -ItemType Directory -Force $scripts | Out-Null
+          $mark = Join-Path $env:RUNNER_TEMP 'ran-by-name.txt'
+          Set-Content -Path (Join-Path $scripts 'hello.cluau') -Value "require(`"@std/fs`").write([[$mark]], `"yes`")"
+          $env:Path = "$scripts;$(Join-Path $dir 'bin');$env:Path"
+          $env:PATHEXT = [Environment]::GetEnvironmentVariable('PATHEXT', 'User')
+          where.exe hello
+          cmd /c hello
+          if (-not (Test-Path $mark)) { throw 'hello did not run by its name' }
           ./installer/install.ps1 -InstallDir $dir -Uninstall
           if (Test-Path $dir) { throw 'the uninstall left the install directory' }
+          if ([Environment]::GetEnvironmentVariable('PATHEXT', 'User') -match '\.CLUAU') { throw 'the uninstall left .CLUAU in PATHEXT' }
 
   release:
     needs: [build, packages, installers, vscode]
