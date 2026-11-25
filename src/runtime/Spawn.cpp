@@ -29,6 +29,9 @@
 #include <thread>
 #include <unistd.h>
 
+// The process's environment (a child's starts from it).
+extern char** environ;
+
 #endif
 
 namespace cluau::runtime::detail {
@@ -412,8 +415,6 @@ namespace cluau::runtime::detail {
 			int Out = -1; // its output (we read)
 			int Err = -1; // its standard error, captured on its own
 		};
-
-		extern "C" char** environ;
 
 		// One launch at a time: a child made while another's pipes are being
 		// set up would hold their ends (and delay the other's end of output).
