@@ -165,7 +165,7 @@ return m :: {
 				return Luau::SourceCode{ t.Luau, Luau::SourceCode::Module };
 			}
 
-			std::optional<Luau::ModuleInfo> resolveModule(const Luau::ModuleInfo* context, Luau::AstExpr* node) override
+			std::optional<Luau::ModuleInfo> resolveModule(const Luau::ModuleInfo* context, Luau::AstExpr* node, const Luau::TypeCheckLimits&) override
 			{
 				auto* expr = node->as<Luau::AstExprConstantString>();
 				if (!expr)
@@ -231,7 +231,7 @@ return m :: {
 				Nonstrict.mode = Luau::Mode::Nonstrict;
 				Strict.mode = Luau::Mode::Strict;
 			}
-			const Luau::Config& getConfig(const Luau::ModuleName& name) const override
+			const Luau::Config& getConfig(const Luau::ModuleName& name, const Luau::TypeCheckLimits&) const override
 			{
 				return IsCluau(name) || StartsWith(name, "@std/") ? Strict : Nonstrict;
 			}
@@ -250,7 +250,10 @@ return m :: {
 		Modes modes;
 		Luau::FrontendOptions frontendOptions;
 		frontendOptions.retainFullTypeGraphs = true; // the strict rules read the inferred types
-		Luau::Frontend frontend(&files, &modes, frontendOptions);
+		// Luau's original type solver: the new one (Luau 0.748) does not yet
+		// find a subclass's inherited methods through its intersection type,
+		// and misreads pcall's arguments and optional option tables.
+		Luau::Frontend frontend(Luau::SolverMode::Old, &files, &modes, frontendOptions);
 		Luau::registerBuiltinGlobals(frontend, frontend.globals);
 		Luau::LoadDefinitionFileResult loaded =
 			frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, kGlobals, "@cluau", false, false);

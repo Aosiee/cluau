@@ -117,8 +117,8 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build
 `--prefix ~/.local` for a user install) with the guides beside it; a
 release's archive holds the same tool, to put on `PATH` by hand.
 
-The build fetches Luau (`CLUAU_LUAU_TAG`, 0.688) for the runtime;
-`-DCLUAU_LUAU_DIR=<dir>` uses a local checkout instead, and
+The build fetches Luau 0.748 for the runtime and the checker (`-DCLUAU_LUAU_VERSION=<tag>` picks another release);
+`-DCLUAU_LUAU_DIR=<dir>` uses a local checkout instead (Luau 0.748 or later), and
 `-DCLUAU_BUILD_RUNTIME=OFF` builds the translator and the tool's translate
 and convert commands with no Luau at all. `ctest` runs the translator's
 tests, the script tests (`tests/scripts/*.cluau` against their `.expected`

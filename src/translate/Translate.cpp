@@ -267,7 +267,7 @@ namespace cluau {
 				return std::min(j, m_Toks.size() - 1);
 			}
 
-			bool IsMember(size_t i) const
+			bool IsMember() const
 			{
 				return m_PrevSig != npos && (m_Toks[m_PrevSig].Is(".") || m_Toks[m_PrevSig].Is(":") || m_Toks[m_PrevSig].Is("::"));
 			}
@@ -496,7 +496,7 @@ namespace cluau {
 			void Name(size_t i)
 			{
 				const Token& t = m_Toks[i];
-				if (IsMember(i))
+				if (IsMember())
 					return;
 				const std::string_view w = t.Text;
 				if (w == "if")
@@ -1729,7 +1729,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.7.0";
+		return "0.7.1";
 	}
 
 } // namespace cluau

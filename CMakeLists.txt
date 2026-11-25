@@ -5,7 +5,7 @@
 # host's CMake build (Kiln's external build) adds with add_subdirectory,
 # where the runtime is off and cluau_check builds against CLUAU_LUAU_DIR's
 # headers for a host that links its own Luau.
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 project(cluau CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -18,14 +18,23 @@ add_library(cluau_translator STATIC
 )
 target_include_directories(cluau_translator PUBLIC include PRIVATE src/translate)
 
-set(CLUAU_LUAU_DIR "" CACHE PATH "A Luau checkout (the runtime's Luau; without the runtime, builds cluau_check)")
+set(CLUAU_LUAU_DIR "" CACHE PATH "A Luau checkout, 0.748 or later (the runtime's Luau; without the runtime, builds cluau_check)")
 
 # The runtime (`cluau script.cluau`, the REPL, require, the standard
 # modules, `cluau check`) runs on Luau's VM, compiler and analysis: CLUAU_LUAU_DIR's checkout when
-# given, else Luau fetched at CLUAU_LUAU_TAG. A host that embeds only the
+# given, else Luau fetched at the pinned release. A host that embeds only the
 # translator leaves it off (the default under add_subdirectory).
 option(CLUAU_BUILD_RUNTIME "Build the script runtime (needs Luau)" ${PROJECT_IS_TOP_LEVEL})
-set(CLUAU_LUAU_TAG "0.688" CACHE STRING "The Luau release the runtime fetches (without CLUAU_LUAU_DIR)")
+# The Luau release cluau is built and tested with. CLUAU_LUAU_VERSION
+# overrides it; left empty, a build directory follows the pinned release
+# when cluau updates it (a cached default would keep the old one).
+set(CLUAU_LUAU_PINNED "0.748")
+set(CLUAU_LUAU_VERSION "" CACHE STRING "A Luau release to fetch instead of cluau's pinned one (without CLUAU_LUAU_DIR)")
+if(CLUAU_LUAU_VERSION)
+    set(cluau_luau_tag ${CLUAU_LUAU_VERSION})
+else()
+    set(cluau_luau_tag ${CLUAU_LUAU_PINNED})
+endif()
 if(CLUAU_BUILD_RUNTIME)
     if(NOT TARGET Luau.VM)
         set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
@@ -36,7 +45,7 @@ if(CLUAU_BUILD_RUNTIME)
             include(FetchContent)
             FetchContent_Declare(luau
                 GIT_REPOSITORY https://github.com/luau-lang/luau.git
-                GIT_TAG ${CLUAU_LUAU_TAG}
+                GIT_TAG ${cluau_luau_tag}
                 GIT_SHALLOW TRUE)
             FetchContent_MakeAvailable(luau)
             # Only what the runtime links is built.

@@ -84,8 +84,8 @@ count = 2
 
 ```
 $ cluau check greet.cluau
-greet.cluau:6:13: Type 'number' could not be converted into 'string'
-greet.cluau:7:7: Unknown global 'Greeet'
+greet.cluau:6:13: Expected this to be 'string', but got 'number'
+greet.cluau:7:7: Unknown global 'Greeet'; consider assigning to it first
 greet.cluau:8:1: 'count' is const and cannot be assigned
 cluau check: 3 error(s), 0 warning(s)
 ```
@@ -364,8 +364,8 @@ The runtime is a library (`cluau_runtime`, `include/cluau/runtime.h`):
 `cluau::runtime::Runtime` runs a file (`RunFile`), source text
 (`RunSource`) or the prompt (`Repl`), and `State()` is its `lua_State` for a
 host to add its own globals; `cluau::runtime::Check` is `cluau check`. It
-builds against Luau's VM, compiler and analysis: the
-checkout `CLUAU_LUAU_DIR` names, else Luau fetched at `CLUAU_LUAU_TAG`
-(CMake's FetchContent). `CLUAU_BUILD_RUNTIME` is on for a standalone build
+builds against Luau's VM, compiler and analysis: the checkout
+`CLUAU_LUAU_DIR` names, else the Luau release cluau pins, which CMake
+fetches (`CLUAU_LUAU_VERSION` picks another). `CLUAU_BUILD_RUNTIME` is on for a standalone build
 and off under `add_subdirectory`, so a host that embeds only the translator
 needs no Luau.

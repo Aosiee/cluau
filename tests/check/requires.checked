@@ -1,7 +1,7 @@
-lib/greet.cluau:5:1: Type 'string' could not be converted into 'number'
+lib/greet.cluau:5:1: Expected this to be 'number', but got 'string'
 requires.cluau:4:17: module './lib/missing' not found (looked for lib/missing[.cluau|.luau])
 requires.cluau:5:14: no standard module '@std/nope'
-requires.cluau:8:19: Type 'number' could not be converted into 'string'
-requires.cluau:9:7: Key 'Goodbye' not found in table '{| Hello: (string) -> string |}'
+requires.cluau:8:19: Expected this to be 'string', but got 'number'
+requires.cluau:9:7: Key 'Goodbye' not found in table '{ Hello: (string) -> string }'
 cluau check: 5 error(s), 0 warning(s)
 exit: 1
