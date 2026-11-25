@@ -14,9 +14,15 @@ namespace cluau::runtime::detail {
 	// The registry field holding the standard modules ({ fs = ..., ... }).
 	inline constexpr const char* kStdRegistry = "_cluau_std";
 
-	// Builds `@std/fs`, `@std/path`, `@std/process`, `@std/io` and
-	// `@std/json` into the registry, and sets the globals `input` and `repr`.
-	void OpenStd(lua_State* L, const std::vector<std::string>& args);
+	// Builds the standard modules written in C++ into the registry, and
+	// sets the global `input`. In the sandbox (`sandbox`), @std/fs and
+	// @std/http are left out and @std/process keeps only `args`,
+	// `platform`, `script`, `exit` and `sleep`.
+	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox);
+
+	// The standard modules the sandbox does without (no file or network
+	// access, no programs run): the name after `@std/`.
+	bool SandboxLeavesOut(const std::string& name);
 
 	// `process.script`: the running script's path ("-e", "stdin" for source
 	// text, "" in the REPL).

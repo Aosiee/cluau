@@ -40,6 +40,7 @@ print(repr(counter.Counts))
 | `cluau check script.cluau...` | type-checks scripts without running them (see [Checking](#checking)) |
 | `cluau test [-k text] [path...]` | runs the test cases in `*_test.cluau` files (see [Testing](#testing)) |
 | `cluau fmt [--check] [path...]` | formats `.cluau` files (see [Formatting](#formatting)) |
+| `cluau --sandbox script.cluau` | a script without file, network or process access (see [The sandbox](#the-sandbox)) |
 
 The arguments after the script are `process.args`. A script's first line
 may be `#!/usr/bin/env cluau`, so a script marked executable runs by itself
@@ -49,6 +50,34 @@ A `.luau` file runs as Luau (it is not translated).
 
 The exit status is 0, 1 after an error, 2 when the script cannot be read,
 130 after Ctrl-C, or the code passed to `process.exit(code)`.
+
+On x64 and arm64, scripts and the modules they require run as native code
+(Luau's code generator): arithmetic, calls and loops run about 1.7 times
+as fast as interpreted (code that mostly builds tables gains less), and
+errors, tracebacks and Ctrl-C behave the same.
+Generating it takes a few milliseconds for a long script; `--no-native`
+before the script (`cluau --no-native script.cluau`) interprets it instead.
+
+## The sandbox
+
+`cluau --sandbox script.cluau` runs a script that cannot touch files, the
+network or other programs: for a script from somewhere else, or one that
+only computes.
+
+- `@std/fs` and `@std/http` are not available (`require` raises an error
+  saying so).
+- `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
+  environment variables, the working directory and running commands are
+  left out.
+- `require` loads `.cluau` and `.luau` modules only from under the script's
+  directory, its `cluau_modules` and the search path (`CLUAU_PATH`).
+- `@std/io` (standard input and output), `@std/json`, `@std/time`,
+  `@std/path` (text only), `@std/args`, `@std/csv` and `@std/test` work as
+  usual, as do Luau's own libraries, which have no file or process access.
+
+`--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
+`cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
+too. A host embedding the runtime sets `Options::Sandbox`.
 
 ## Errors
 
@@ -756,3 +785,46 @@ fetches (`CLUAU_LUAU_VERSION` picks another). `@std/http` adds libcurl
 `-DCLUAU_HTTP=OFF` builds without it. `CLUAU_BUILD_RUNTIME` is on for a standalone build
 and off under `add_subdirectory`, so a host that embeds only the translator
 needs no Luau.
+
+`Options` sets the script's arguments, the search path, Ctrl-C handling,
+native code (`Native`, on by default) and the sandbox (`Sandbox`).
+
+### Host modules
+
+A host gives its scripts modules of its own beside `@std`, under an alias
+it chooses: `@<alias>/<name>`, any alias but `std`. A module is made in C++
+(a function that returns the module's value) or written in cluau (its
+source text); each is loaded on its first `require` and kept.
+
+```cpp
+int OpenWorld(lua_State* L)
+{
+	lua_newtable(L);
+	lua_pushcfunction(L, Spawn, "spawn");
+	lua_setfield(L, -2, "spawn");
+	return 1;
+}
+
+cluau::runtime::Runtime runtime(options);
+runtime.AddModule("@game/world", OpenWorld);
+runtime.AddModuleSource("@game/util", utilSource); // cluau source text
+runtime.RunFile("scripts/level.cluau"); // require("@game/world")
+```
+
+For `cluau check`, a module made in C++ is described by a Luau file that
+returns a value of the module's type; types it declares with `export type`
+are named through the module (`world.Entity`):
+
+```luau
+export type Entity = { name: string, health: number }
+local m: any = nil
+return m :: {
+	spawn: (name: string) -> Entity,
+	find: (name: string) -> Entity?,
+}
+```
+
+`cluau check --module @game/world=types/world.luau script.cluau` reads it
+(a `.cluau` file given that way is typed from its source), as
+`CheckOptions::Modules` and `CheckOptions::ModuleSources` do for
+`cluau::runtime::Check`.

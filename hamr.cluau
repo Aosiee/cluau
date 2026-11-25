@@ -28,9 +28,12 @@ for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 		},
 	})
 	suite:step(`tests:{name}`, {
-		doc = "The translator's and the converter's tests.",
+		doc = "The translator's and the converter's tests, and the runtime's API as a host uses it.",
 		needs = { `build:{name}` },
-		run = { `{dir}/cluau_tests` },
+		run = function(ctx: Context) {
+			ctx:run({ `{dir}/cluau_tests` })
+			ctx:run({ `{dir}/cluau_runtime_tests` })
+		},
 		findings = hamr.findings.failLines("test", "FAIL"),
 		timeout = 300,
 		budget = 10,

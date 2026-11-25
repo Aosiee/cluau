@@ -1,0 +1,27 @@
+// Tables, strings and classes: building, sorting, formatting.
+class Point {
+	X: number = 0
+	Y: number = 0
+
+	function Init(x: number, y: number) {
+		self.X = x
+		self.Y = y
+	}
+
+	function Length(): number {
+		return math.sqrt(self.X * self.X + self.Y * self.Y)
+	}
+}
+
+const points: { Point } = {}
+for (i = 1, 300000) {
+	table.insert(points, Point(i % 97, i % 89))
+}
+table.sort(points, function(a: Point, b: Point): boolean {
+	return a:Length() < b:Length()
+})
+const parts: { string } = {}
+for (i = 1, 200000) {
+	table.insert(parts, `{i}:{i * 2}`)
+}
+print(#points, #table.concat(parts, ","))

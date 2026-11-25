@@ -120,7 +120,7 @@ if(CLUAU_BUILD_RUNTIME)
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
         src/runtime/Check.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
-    target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis)
+    target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
     if(CLUAU_HTTP)
         target_sources(cluau_runtime PRIVATE src/runtime/Http.cpp)
         target_link_libraries(cluau_runtime PRIVATE CURL::libcurl)
@@ -179,6 +179,10 @@ if(CLUAU_BUILD_RUNTIME)
     target_link_libraries(cluau PRIVATE cluau_runtime)
     target_compile_definitions(cluau PRIVATE CLUAU_HAS_RUNTIME)
     if(CLUAU_BUILD_TESTS)
+        # The runtime's API as a host uses it (host modules, the sandbox).
+        add_executable(cluau_runtime_tests tests/main.cpp tests/runtime_tests.cpp)
+        target_link_libraries(cluau_runtime_tests PRIVATE cluau_runtime Luau.VM)
+        add_test(NAME cluau_runtime_tests COMMAND cluau_runtime_tests)
         # Each tests/scripts/<name>.cluau runs and its output is compared
         # with <name>.expected, and `cluau check` passes on it (or reports
         # what <name>.checked says); each tests/check/<name>.cluau is checked

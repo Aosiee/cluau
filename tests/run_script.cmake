@@ -5,7 +5,8 @@
 # repl_*.cluau is fed to the REPL (`cluau -i`) instead of run.
 # -DMODE=check runs `cluau check <name>.cluau` instead and compares with
 # <name>.checked (no such file: the check must pass with nothing to say); a
-# first line `// cluau check --lint` passes the check those flags.
+# first line `// cluau check --lint` passes the check those flags, and a
+# first line `// cluau --sandbox` runs the script with those.
 # -DUPDATE=ON rewrites the expected file.
 get_filename_component(dir ${SCRIPT} DIRECTORY)
 get_filename_component(name ${SCRIPT} NAME_WE)
@@ -24,7 +25,13 @@ elseif(name MATCHES "^repl_")
     set(command ${CLUAU} -i)
     set(input ${SCRIPT})
 else()
-    set(command ${CLUAU} ${name}.cluau alpha beta)
+    # A first line `// cluau <flags>` runs the script with those flags.
+    file(STRINGS ${SCRIPT} first LIMIT_COUNT 1)
+    set(flags "")
+    if(first MATCHES "^// cluau (--.*)$")
+        separate_arguments(flags UNIX_COMMAND "${CMAKE_MATCH_1}")
+    endif()
+    set(command ${CLUAU} ${flags} ${name}.cluau alpha beta)
     if(EXISTS ${dir}/${name}.stdin)
         set(input ${dir}/${name}.stdin)
     endif()

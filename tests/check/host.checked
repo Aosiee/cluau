@@ -1,0 +1,5 @@
+host.cluau:7:19: Expected this to be 'string', but got 'number'
+host.cluau:9:7: Value of type 'Entity?' could be nil
+host.cluau:10:7: unknown alias in '@game/other' (the standard modules are @std/<name>)
+cluau check: 3 error(s), 0 warning(s)
+exit: 1

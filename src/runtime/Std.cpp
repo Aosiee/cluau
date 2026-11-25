@@ -2084,28 +2084,41 @@ namespace cluau::runtime::detail {
 
 	} // namespace
 
-	void OpenStd(lua_State* L, const std::vector<std::string>& args)
+	bool SandboxLeavesOut(const std::string& name) { return name == "fs" || name == "http" || name == "_packages"; }
+
+	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox)
 	{
 		OpenFileType(L);
 		OpenChildType(L);
 		lua_newtable(L); // the registry's module table
 
-		lua_newtable(L);
-		SetFunctions(L, kFs);
-		lua_setfield(L, -2, "fs");
+		if (!sandbox)
+		{
+			lua_newtable(L);
+			SetFunctions(L, kFs);
+			lua_setfield(L, -2, "fs");
+		}
 
 		lua_newtable(L);
 		SetFunctions(L, kPath);
 		lua_setfield(L, -2, "path");
 
 		lua_newtable(L);
-		SetFunctions(L, kProcess);
+		if (sandbox)
+		{
+			const luaL_Reg kSandboxProcess[] = { { "exit", ProcessExit }, { "sleep", ProcessSleep }, { nullptr, nullptr } };
+			SetFunctions(L, kSandboxProcess);
+		}
+		else
+		{
+			SetFunctions(L, kProcess);
+			lua_pushstring(L, Executable().c_str());
+			lua_setfield(L, -2, "executable");
+		}
 		PushStrings(L, args);
 		lua_setfield(L, -2, "args");
 		lua_pushstring(L, Platform());
 		lua_setfield(L, -2, "platform");
-		lua_pushstring(L, Executable().c_str());
-		lua_setfield(L, -2, "executable");
 		lua_pushstring(L, "");
 		lua_setfield(L, -2, "script");
 		lua_setfield(L, -2, "process");
@@ -2129,8 +2142,11 @@ namespace cluau::runtime::detail {
 		lua_setfield(L, -2, "time");
 
 #ifdef CLUAU_HAS_HTTP
-		OpenHttp(L);
-		lua_setfield(L, -2, "http");
+		if (!sandbox)
+		{
+			OpenHttp(L);
+			lua_setfield(L, -2, "http");
+		}
 #endif
 
 		lua_setfield(L, LUA_REGISTRYINDEX, kStdRegistry);

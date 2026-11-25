@@ -1,0 +1,15 @@
+// cluau --sandbox
+// The sandbox: no file, network or process access.
+const process = require("@std/process")
+print(process.args[1], process.platform != "")
+print(process.run == nil, process.env == nil, process.spawn == nil, process.chdir == nil)
+
+print(pcall(require, "@std/fs"))
+print(pcall(require, "@std/http"))
+
+// Modules from the script's directory load; those outside it do not.
+print(require("./lib/greet").Hello("sandbox"))
+const outside = pcall(require, "../check/lib/greet")
+print(outside)
+
+print(require("@std/json").encode({ ran = true }))

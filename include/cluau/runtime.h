@@ -13,6 +13,7 @@
 
 #include "cluau/cluau.h"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -33,6 +34,16 @@ namespace cluau::runtime {
 		// error instead of ending the process (a second one ends it). The
 		// command line sets it; a host that handles SIGINT itself leaves it.
 		bool CatchInterrupt = false;
+		// Scripts and modules compile to native code (Luau's code generator,
+		// on x64 and arm64; elsewhere they are interpreted either way).
+		bool Native = true;
+		// The sandbox: no file, network or process access. @std/fs and
+		// @std/http are not available, @std/process has only `args`,
+		// `platform`, `script`, `exit` and `sleep`, and `require` loads
+		// modules only from under the main script's directory, its
+		// cluau_modules and the search path. Luau itself has no file or
+		// process functions, so the script reaches nothing else.
+		bool Sandbox = false;
 	};
 
 	class Runtime
@@ -68,6 +79,22 @@ namespace cluau::runtime {
 
 		lua_State* State() const;
 
+		// ---- the host's modules ---------------------------------------
+		//
+		// A host gives its scripts modules of its own beside @std, under an
+		// alias of its choosing: `require("@game/world")`. The name is
+		// `@<alias>/<name>` (any alias but `std`); registering a name again
+		// replaces it. Each is loaded on its first require and kept, as
+		// files are. `cluau check` types them through CheckOptions::Modules.
+		// False when the name is not of that form.
+
+		// A module made in C++: `open` is called (with no arguments) on the
+		// first require and returns the module's value.
+		bool AddModule(const std::string& name, int (*open)(lua_State*));
+		// A module written in cluau (its source text), run on the first
+		// require; errors name it by `name`.
+		bool AddModuleSource(const std::string& name, const std::string& source);
+
 		struct Impl; // the runtime's state (Runtime.cpp)
 
 	private:
@@ -91,6 +118,18 @@ namespace cluau::runtime {
 		// Luau's lint warnings too (unused locals, shadowing, unreachable
 		// code, ...): `cluau check --lint`.
 		bool Lint = false;
+		// The host's modules (Runtime::AddModule), by name ("@game/world"):
+		// each is Luau source whose returned value has the module's type,
+		// for instance
+		//     export type Entity = { name: string, health: number }
+		//     local m: any = nil
+		//     return m :: { spawn: (name: string) -> Entity }
+		// (types declared with `export type` can be named as
+		// `world.Entity`). `cluau check --module <name>=<file>` reads one.
+		std::map<std::string, std::string> Modules;
+		// Modules written in cluau (Runtime::AddModuleSource): typed from
+		// their source, as files are.
+		std::map<std::string, std::string> ModuleSources;
 	};
 
 	struct CheckFinding

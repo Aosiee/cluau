@@ -1,0 +1,7 @@
+// Startup: the standard modules written in cluau, loaded and used once.
+const args = require("@std/args")
+const csv = require("@std/csv")
+const json = require("@std/json")
+const cli = args.parser({ name = "startup" })
+cli:flag("v")
+print(#csv.parse("a,b\n1,2\n"), json.encode({ 1 }), cli:tryParse({}) != nil)

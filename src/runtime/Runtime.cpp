@@ -5,6 +5,7 @@
 #include "Resolve.h"
 #include "Std.h"
 
+#include "Luau/CodeGen.h"
 #include "Luau/Compiler.h"
 #include "lua.h"
 #include "lualib.h"
@@ -202,6 +203,46 @@ __cluau_meta = {
 		fs::path MainDir;  // the main script's directory (bare requires search it first)
 		std::set<std::string> Loading; // modules whose chunk is running (a require cycle)
 		std::map<std::string, std::string> Sources; // each chunk's source, by the name errors give it
+		bool Native = false; // chunks compile to native code (where Luau's code generator supports the machine)
+		// The host's modules (AddModule), by the name `require` gives them.
+		struct HostModule
+		{
+			lua_CFunction Open = nullptr;
+			std::string Source; // written in cluau, when Open is null
+		};
+		std::map<std::string, HostModule> HostModules;
+
+		// The sandbox's files: a module required in it must be under the
+		// main script's directory, a search directory, or a cluau_modules
+		// directory up from the main script's.
+		bool SandboxAllows(const fs::path& file, const std::vector<fs::path>& searchDirs) const
+		{
+			auto under = [](const fs::path& path, const fs::path& root) {
+				std::error_code ec;
+				const fs::path canonicalRoot = fs::weakly_canonical(root, ec);
+				if (ec)
+					return false;
+				const fs::path rel = path.lexically_relative(canonicalRoot);
+				return !rel.empty() && *rel.begin() != ".." && !rel.is_absolute();
+			};
+			std::error_code ec;
+			const fs::path path = fs::weakly_canonical(file, ec);
+			if (ec)
+				return false;
+			if (under(path, MainDir))
+				return true;
+			for (const fs::path& dir : searchDirs)
+				if (under(path, dir))
+					return true;
+			for (fs::path dir = MainDir; !dir.empty(); dir = dir.parent_path())
+			{
+				if (under(path, dir / "cluau_modules"))
+					return true;
+				if (dir == dir.parent_path())
+					break;
+			}
+			return false;
+		}
 
 		// Line `line` (1-based) of a chunk's source, its indentation removed
 		// (how much in `indent`); "" when there is no such line.
@@ -336,11 +377,20 @@ __cluau_meta = {
 				std::fputs(warnings.c_str(), stderr);
 
 			Luau::CompileOptions copts;
+			// Level 1: level 2's inlining measured no faster on scripts, and
+			// it takes inlined calls' frames out of tracebacks.
 			copts.optimizationLevel = 1;
 			copts.debugLevel = 1;
 			const std::string bytecode = Luau::compile(result.Luau, copts);
 			const std::string chunkname = "@" + name;
-			if (luau_load(L, chunkname.c_str(), bytecode.data(), bytecode.size(), 0) != 0)
+			const bool loadFailed = luau_load(L, chunkname.c_str(), bytecode.data(), bytecode.size(), 0) != 0;
+			// Native code costs about 5 microseconds a line to generate: the
+			// bundled modules that only parse arguments, run tests or manage
+			// packages stay interpreted; @std/csv's parsing gains from it.
+			const bool tooling = StartsWith(name, "@std/") && name != "@std/csv";
+			if (!loadFailed && Native && !tooling)
+				Luau::CodeGen::compile(L, -1, 0);
+			if (loadFailed)
 			{
 				size_t len = 0;
 				const char* msg = lua_tolstring(L, -1, &len);
@@ -409,6 +459,29 @@ __cluau_meta = {
 
 	namespace {
 
+		// Runs the module chunk on top of L's stack and keeps its value (true
+		// for none) under `key`, the module's identity; returns the value.
+		int CallModule(lua_State* L, Runtime::Impl& rt, const std::string& key)
+		{
+			struct Guard
+			{
+				std::set<std::string>& Set;
+				std::string Key;
+				~Guard() { Set.erase(Key); }
+			} guard{ rt.Loading, key };
+			rt.Loading.insert(key);
+			lua_call(L, 0, 1);
+			if (lua_isnil(L, -1))
+			{
+				lua_pop(L, 1);
+				lua_pushboolean(L, 1);
+			}
+			lua_getfield(L, LUA_REGISTRYINDEX, kModulesRegistry);
+			lua_pushvalue(L, -2);
+			lua_setfield(L, -2, key.c_str());
+			lua_pop(L, 1);
+			return 1;
+		}
 
 		int Require(lua_State* L)
 		{
@@ -416,6 +489,8 @@ __cluau_meta = {
 			const std::string name = luaL_checkstring(L, 1);
 			if (StartsWith(name, "@std/"))
 			{
+				if (rt.Opts.Sandbox && detail::SandboxLeavesOut(name.substr(5)))
+					luaL_error(L, "%s is not available in the sandbox", name.c_str());
 				lua_getfield(L, LUA_REGISTRYINDEX, detail::kStdRegistry);
 				lua_getfield(L, -1, name.c_str() + 5);
 				if (!lua_isnil(L, -1))
@@ -435,6 +510,28 @@ __cluau_meta = {
 				lua_pushvalue(L, -1);
 				lua_setfield(L, -3, name.c_str() + 5);
 				return 1;
+			}
+			if (auto host = rt.HostModules.find(name); host != rt.HostModules.end())
+			{
+				lua_getfield(L, LUA_REGISTRYINDEX, kModulesRegistry);
+				lua_getfield(L, -1, name.c_str());
+				if (!lua_isnil(L, -1))
+					return 1;
+				lua_pop(L, 2);
+				if (rt.Loading.count(name))
+					luaL_error(L, "require cycle: '%s' is still loading (it requires itself through the modules it requires)", name.c_str());
+				if (host->second.Open)
+					lua_pushcfunction(L, host->second.Open, name.c_str());
+				else
+				{
+					std::string error;
+					if (rt.Load(L, host->second.Source, name, false, false, error) != LoadStatus::Ok)
+					{
+						lua_pushlstring(L, error.data(), error.size());
+						lua_error(L);
+					}
+				}
+				return CallModule(L, rt, name);
 			}
 			if (StartsWith(name, "@"))
 				luaL_error(L, "unknown alias in '%s' (the standard modules are @std/<name>)", name.c_str());
@@ -464,6 +561,9 @@ __cluau_meta = {
 					tried += (tried.empty() ? "" : ", ") + rt.Display(base) + "[.cluau|.luau]";
 				luaL_error(L, "module '%s' not found (looked for %s)", name.c_str(), tried.c_str());
 			}
+			if (rt.Opts.Sandbox && !rt.SandboxAllows(found, searchDirs))
+				luaL_error(L, "module '%s' is outside the sandbox (it loads modules from the script's directory, cluau_modules and the search path)",
+					rt.Display(found).c_str());
 			const std::string key = detail::ModuleKey(found);
 
 			lua_getfield(L, LUA_REGISTRYINDEX, kModulesRegistry);
@@ -483,24 +583,7 @@ __cluau_meta = {
 				lua_pushlstring(L, error.data(), error.size());
 				lua_error(L);
 			}
-			struct Guard
-			{
-				std::set<std::string>& Set;
-				std::string Key;
-				~Guard() { Set.erase(Key); }
-			} guard{ rt.Loading, key };
-			rt.Loading.insert(key);
-			lua_call(L, 0, 1);
-			if (lua_isnil(L, -1))
-			{
-				lua_pop(L, 1);
-				lua_pushboolean(L, 1);
-			}
-			lua_getfield(L, LUA_REGISTRYINDEX, kModulesRegistry);
-			lua_pushvalue(L, -2);
-			lua_setfield(L, -2, key.c_str());
-			lua_pop(L, 1);
-			return 1;
+			return CallModule(L, rt, key);
 		}
 
 		// ---- repr ---------------------------------------------------------
@@ -849,6 +932,9 @@ __cluau_meta = {
 		rt.StartDir = fs::current_path(ec);
 		rt.MainDir = rt.StartDir;
 		lua_State* L = rt.L = luaL_newstate();
+		rt.Native = rt.Opts.Native && Luau::CodeGen::isSupported();
+		if (rt.Native)
+			Luau::CodeGen::create(L);
 		luaL_openlibs(L);
 
 		lua_pushlightuserdata(L, &rt);
@@ -860,7 +946,7 @@ __cluau_meta = {
 		lua_setglobal(L, "require");
 		lua_pushcfunction(L, ReprGlobal, "repr");
 		lua_setglobal(L, "repr");
-		detail::OpenStd(L, rt.Opts.Args);
+		detail::OpenStd(L, rt.Opts.Args, rt.Opts.Sandbox);
 
 		Luau::CompileOptions copts;
 		copts.debugLevel = 1;
@@ -882,6 +968,33 @@ __cluau_meta = {
 	}
 
 	lua_State* Runtime::State() const { return m_Impl->L; }
+
+	namespace {
+
+		bool HostModuleName(const std::string& name)
+		{
+			const size_t slash = name.find('/');
+			return name.size() > 1 && name[0] == '@' && slash != std::string::npos && slash > 1 && slash + 1 < name.size() &&
+				!StartsWith(name, "@std/");
+		}
+
+	} // namespace
+
+	bool Runtime::AddModule(const std::string& name, int (*open)(lua_State*))
+	{
+		if (!HostModuleName(name) || !open)
+			return false;
+		m_Impl->HostModules[name] = { open, {} };
+		return true;
+	}
+
+	bool Runtime::AddModuleSource(const std::string& name, const std::string& source)
+	{
+		if (!HostModuleName(name))
+			return false;
+		m_Impl->HostModules[name] = { nullptr, source };
+		return true;
+	}
 
 	int Runtime::RunFile(const std::string& path)
 	{

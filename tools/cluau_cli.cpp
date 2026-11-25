@@ -61,14 +61,15 @@ namespace {
 	}
 
 	const char* kUsage =
-		"usage: cluau <script.cluau> [args...]      run a script (also: cluau run <script> [args...])\n"
+		"usage: cluau [--sandbox] [--no-native] <script.cluau> [args...]\n"
+		"                                           run a script (also: cluau run <script> [args...])\n"
 		"       cluau -e '<code>' [args...]         run code given on the command line\n"
 		"       cluau - [args...]                   run the script on standard input\n"
 		"       cluau [-i]                          the interactive prompt (-i: even when stdin is not a terminal)\n"
 		"       cluau test [-k <text>] [path...]      run the @std/test cases in *_test.cluau files (no path: .)\n"
 		"       cluau init | add <repository>[@ref] | remove <name> | install | update [name...] | list\n"
 		"                                           packages from Git repositories (cluau.toml, cluau.lock, cluau_modules/)\n"
-		"       cluau check [--loose] [--lint] <script.cluau>...\n"
+		"       cluau check [--loose] [--lint] [--module <@alias/name>=<file>]... <script.cluau>...\n"
 		"                                           type-check scripts (and the modules they require) without running them\n"
 		"       cluau translate [--manifest|--script] <file.cluau>\n"
 		"       cluau convert [--verify] <file.luau>\n"
@@ -76,10 +77,17 @@ namespace {
 		"       cluau --version\n"
 		"\n"
 		"`cluau check` is Luau's type checker in strict mode plus cluau's strict rules (exit status 1 on an error);\n"
-		"--loose leaves out cluau's strict rules, --lint adds Luau's lint warnings.\n"
+		"--loose leaves out cluau's strict rules, --lint adds Luau's lint warnings, --module types a host's module\n"
+		"(a .luau file returning a value of its type, or the module's .cluau source).\n"
+		"--sandbox runs without file, network or process access (no @std/fs, @std/http, or programs run);\n"
+		"--no-native interprets the bytecode instead of compiling it to native code. Either goes before the\n"
+		"command (cluau --sandbox -e '...', cluau --sandbox test).\n"
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
 		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
 		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/args and @std/csv.\n";
+
+	bool g_Sandbox = false; // --sandbox
+	bool g_Native = true;   // --no-native turns it off
 
 	int Usage(int status = 2)
 	{
@@ -298,6 +306,20 @@ namespace {
 				options.Loose = true;
 			else if (arg == "--lint")
 				options.Lint = true;
+			else if (arg == "--module")
+			{
+				// --module @game/world=types/world.luau
+				const std::string spec = ++i < argc ? argv[i] : "";
+				const size_t eq = spec.find('=');
+				if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size())
+					return Usage();
+				const std::string path = spec.substr(eq + 1);
+				std::string text;
+				if (!Read(path, text))
+					return 2;
+				const bool cluauSource = path.size() > 6 && path.compare(path.size() - 6, 6, ".cluau") == 0;
+				(cluauSource ? options.ModuleSources : options.Modules)[spec.substr(0, eq)] = text;
+			}
 			else if (arg[0] == '-' && arg.size() > 1)
 				return Usage();
 			else
@@ -412,6 +434,8 @@ namespace {
 			options.Args.push_back(argv[i]);
 		options.SearchPath = SearchPath();
 		options.CatchInterrupt = true;
+		options.Sandbox = g_Sandbox;
+		options.Native = g_Native;
 		return options;
 	}
 #endif
@@ -426,6 +450,24 @@ namespace {
 
 int main(int argc, char** argv)
 {
+	// The runtime's flags, before the command: taken out of the arguments.
+	std::vector<char*> rest{ argv[0] };
+	int at = 1;
+	for (; at < argc; at++)
+	{
+		const std::string arg = argv[at];
+		if (arg == "--sandbox")
+			g_Sandbox = true;
+		else if (arg == "--no-native")
+			g_Native = false;
+		else
+			break;
+	}
+	rest.insert(rest.end(), argv + at, argv + argc);
+	rest.push_back(nullptr);
+	argc = (int)rest.size() - 1;
+	argv = rest.data();
+
 	const std::string first = argc > 1 ? argv[1] : "";
 	if (first == "translate")
 		return Translate(argc, argv);

@@ -252,6 +252,8 @@ return m :: {
 		{
 			fs::path StartDir;
 			std::vector<fs::path> SearchDirs;
+			const std::map<std::string, std::string>* HostTypes = nullptr;   // CheckOptions::Modules
+			const std::map<std::string, std::string>* HostSources = nullptr; // CheckOptions::ModuleSources
 			std::map<std::string, fs::path> MainDirs;           // a checked script's module name -> its directory
 			std::map<std::string, std::string> RootOf;          // module name -> the checked script that reached it
 			std::map<std::string, TranslateResult> Translations; // .cluau modules read
@@ -276,6 +278,23 @@ return m :: {
 					auto it = StdTypes().find(name.substr(5));
 					if (it == StdTypes().end())
 						return std::nullopt;
+					return Luau::SourceCode{ it->second, Luau::SourceCode::Module };
+				}
+				// The host's modules: their errors are reported as the files' are.
+				if (auto it = HostSources->find(name); it != HostSources->end())
+				{
+					if (std::find(UserModules.begin(), UserModules.end(), name) == UserModules.end())
+						UserModules.push_back(name);
+					TranslateOptions options;
+					options.Script = true;
+					options.Profile = &ScriptProfile();
+					const TranslateResult& t = Translations[name] = Translate(it->second, options);
+					return Luau::SourceCode{ t.Luau, Luau::SourceCode::Module };
+				}
+				if (auto it = HostTypes->find(name); it != HostTypes->end())
+				{
+					if (std::find(UserModules.begin(), UserModules.end(), name) == UserModules.end())
+						UserModules.push_back(name);
 					return Luau::SourceCode{ it->second, Luau::SourceCode::Module };
 				}
 				std::optional<std::string> text = ReadFile(fs::u8path(name));
@@ -309,6 +328,8 @@ return m :: {
 					}
 					return Luau::ModuleInfo{ request };
 				}
+				if (HostTypes->count(request) || HostSources->count(request))
+					return Luau::ModuleInfo{ request };
 				if (StartsWith(request, "@") || !context)
 				{
 					if (context)
@@ -351,6 +372,7 @@ return m :: {
 		// modules in their own (Luau's default, nonstrict).
 		struct Modes : Luau::ConfigResolver
 		{
+			const Files* Modules = nullptr;
 			Luau::Config Nonstrict;
 			Luau::Config Strict;
 			Modes()
@@ -360,7 +382,9 @@ return m :: {
 			}
 			const Luau::Config& getConfig(const Luau::ModuleName& name, const Luau::TypeCheckLimits&) const override
 			{
-				return IsCluau(name) || StartsWith(name, "@std/") ? Strict : Nonstrict;
+				const bool strict =
+					IsCluau(name) || StartsWith(name, "@std/") || Modules->HostTypes->count(name) || Modules->HostSources->count(name);
+				return strict ? Strict : Nonstrict;
 			}
 		};
 
@@ -374,7 +398,10 @@ return m :: {
 		files.StartDir = fs::current_path(ec);
 		for (const std::string& dir : options.SearchPath)
 			files.SearchDirs.push_back(files.StartDir / fs::u8path(dir));
+		files.HostTypes = &options.Modules;
+		files.HostSources = &options.ModuleSources;
 		Modes modes;
+		modes.Modules = &files;
 		Luau::FrontendOptions frontendOptions;
 		frontendOptions.retainFullTypeGraphs = true; // the strict rules read the inferred types
 		// Luau's original type solver: the new one (Luau 0.748) does not yet

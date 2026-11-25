@@ -1,0 +1,10 @@
+// cluau check --module @game/world=lib/world.luau
+// A host's module, typed from the file --module gives it.
+const world = require("@game/world")
+
+const hero: world.Entity = world.spawn("hero")
+print(hero.name, hero.health)
+print(world.spawn(42))
+const found = world.find("hero")
+print(found.health)
+print(require("@game/other"))
