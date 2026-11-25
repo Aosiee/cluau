@@ -1,0 +1,38 @@
+# Builds the translator, the converter and the tool on Linux (GCC and Clang) and
+# runs the tests, on every push.
+name: Linux
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc, cxx: g++ }
+          - { name: clang, cxx: clang++ }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_TESTS=ON -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          cmake --build build --config Release -j 4
+
+      - name: Test
+        run: build/cluau_tests

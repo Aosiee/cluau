@@ -1,5 +1,10 @@
 # cluau
 
+[![Linux](https://github.com/Aosiee/cluau/actions/workflows/linux.yml/badge.svg?branch=main)](https://github.com/Aosiee/cluau/actions/workflows/linux.yml)
+[![macOS](https://github.com/Aosiee/cluau/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/Aosiee/cluau/actions/workflows/macos.yml)
+[![Windows](https://github.com/Aosiee/cluau/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Aosiee/cluau/actions/workflows/windows.yml)
+[![Release](https://img.shields.io/github/v/release/Aosiee/cluau)](https://github.com/Aosiee/cluau/releases/latest)
+
 **C-syntax-flavoured Luau.** cluau is a Luau dialect: braces, C operators,
 `let` / `const` and classes, translated to standard Luau before Luau's type
 checker and compiler run. Luau's types, semantics, VM and libraries are
@@ -29,6 +34,14 @@ class Player {
 - `cluau_check` (the strict-typing rules: strict mode, no `any` without a
   line exemption, required annotations) runs over Luau's analysis and builds
   against the host's Luau.
+
+## Releases
+
+Each version is a tag (`vX.Y.Z`), and each tag is a
+[release](https://github.com/Aosiee/cluau/releases) with the `cluau` tool
+built for Linux (x86-64), macOS (arm64) and Windows (x86-64), its tests run
+on each, and a `SHA256SUMS` file. A host that embeds the translator pins a
+tag and builds from source.
 
 ## Building
 
