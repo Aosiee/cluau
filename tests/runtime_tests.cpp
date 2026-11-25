@@ -17,6 +17,7 @@
 #include <fstream>
 #include <mutex>
 #include <random>
+#include <set>
 #include <thread>
 
 namespace {
@@ -447,6 +448,80 @@ TEST("lsp: definitions, references, renaming, the outline and formatting")
 	CHECK_EQ(format[0]["newText"].String(), std::string("if (x) {\n  y()\n}\n"));
 }
 
+TEST("lsp: a member's references and renames reach every file of the workspace")
+{
+	Project project;
+	std::ofstream(project.Dir / "other.cluau", std::ios::binary) << "const shapes = require(\"./shapes\")\n"
+																	"print(shapes.Point():Length())\n";
+	const std::string other = LspServer::UriFromPath((project.Dir / "other.cluau").generic_u8string());
+	Session s;
+	s.Request("initialize", Json::Object().Set("rootUri", LspServer::UriFromPath(project.Dir.generic_u8string())));
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, kMain));
+
+	// p:Length() in main.cluau: the method's declaration, and its uses in
+	// main.cluau and in other.cluau (which is not open).
+	Json refs = At(project.Main, 9, 10);
+	refs.Set("context", Json::Object().Set("includeDeclaration", true));
+	const Json uses = s.Request("textDocument/references", refs)["result"];
+	std::set<std::string> found;
+	for (const Json& use : uses.Items())
+		found.insert(use["uri"].String() + ":" + std::to_string(use["range"]["start"]["line"].Int()) + ":" +
+			std::to_string(use["range"]["start"]["character"].Int()));
+	CHECK_EQ(uses.Size(), size_t(3));
+	CHECK(found.count(project.Shapes + ":6:10"));
+	CHECK(found.count(project.Main + ":9:8"));
+	CHECK(found.count(other + ":1:21"));
+	CHECK_EQ(uses[0]["uri"].String(), project.Shapes); // the declaration first
+
+	// A field, from a use inside its class: the declaration and both uses on the line.
+	Json field = At(project.Shapes, 7, 24);
+	field.Set("context", Json::Object().Set("includeDeclaration", true));
+	const Json fieldUses = s.Request("textDocument/references", field)["result"];
+	CHECK_EQ(fieldUses.Size(), size_t(3));
+	CHECK_EQ(fieldUses[0]["range"]["start"]["line"].Int(), 2);
+
+	Json rename = At(project.Main, 9, 10);
+	rename.Set("newName", "Size");
+	const Json changes = s.Request("textDocument/rename", rename)["result"]["changes"];
+	CHECK_EQ(changes.Size(), size_t(3));
+	CHECK_EQ(changes[other].Size(), size_t(1));
+	// A standard module's member is not the workspace's to rename.
+	Json stdRename = At(project.Main, 5, 25);
+	stdRename.Set("newName", "load");
+	CHECK(s.Request("textDocument/rename", stdRename).Has("error"));
+}
+
+TEST("lsp: workspace symbols, and inlay hints for the types of names declared without one")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object().Set("workspaceFolders",
+								Json::Array().Push(Json::Object().Set("uri", LspServer::UriFromPath(project.Dir.generic_u8string())).Set("name", "lsp"))));
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, kMain));
+
+	const Json length = s.Request("workspace/symbol", Json::Object().Set("query", "len"))["result"];
+	bool method = false;
+	for (const Json& symbol : length.Items())
+		method = method || (symbol["name"].String() == "Length" && symbol["containerName"].String() == "Point" &&
+							   symbol["location"]["uri"].String() == project.Shapes);
+	CHECK(method);
+	const Json count = s.Request("workspace/symbol", Json::Object().Set("query", "cnt"))["result"];
+	CHECK_EQ(count.Size(), size_t(1));
+	CHECK_EQ(count[0]["name"].String(), std::string("count"));
+
+	const Json hints = s.Request("textDocument/inlayHint",
+		Json::Object()
+			.Set("textDocument", Json::Object().Set("uri", project.Main))
+			.Set("range", Json::Object()
+							  .Set("start", Json::Object().Set("line", 0).Set("character", 0))
+							  .Set("end", Json::Object().Set("line", 12).Set("character", 0))))["result"];
+	std::map<std::string, std::string> labels;
+	for (const Json& hint : hints.Items())
+		labels[std::to_string(hint["position"]["line"].Int()) + ":" + std::to_string(hint["position"]["character"].Int())] = hint["label"].String();
+	CHECK_EQ(labels["8:7"], std::string(": Point"));
+	CHECK_EQ(labels["10:9"], std::string(": number"));
+}
+
 TEST("lsp: columns are UTF-16 code units, and messages are framed on the wire")
 {
 	Project project;
@@ -725,6 +800,95 @@ TEST("debug: a step enters a module's top level, and steps through a coroutine")
 	CHECK_EQ(d.Locals()["doubled"]["value"].String(), std::string("10"));
 	d.Request("continue", Json::Object().Set("threadId", 1));
 	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: a module that fails can be required again, and a cycle is still one")
+{
+	Scripts scripts("let first = \"\"\n"
+					"try {\n"
+					"\trequire(\"./bad\")\n"
+					"} catch (error) {\n"
+					"\tfirst = tostring(error)\n"
+					"}\n"
+					"let second = \"\"\n"
+					"try {\n"
+					"\trequire(\"./bad\")\n"
+					"} catch (error) {\n"
+					"\tsecond = tostring(error)\n"
+					"}\n"
+					"let cycle = \"\"\n"
+					"try {\n"
+					"\trequire(\"./loop\")\n"
+					"} catch (error) {\n"
+					"\tcycle = tostring(error)\n"
+					"}\n"
+					"print(first)\n"); // 19
+	std::ofstream(scripts.Dir / "bad.cluau", std::ios::binary) << "error(\"bad module\")\n";
+	std::ofstream(scripts.Dir / "loop.cluau", std::ios::binary) << "require(\"./loop\")\n";
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(19)) } });
+	d.Stopped();
+	std::map<std::string, Json> locals = d.Locals();
+	CHECK(locals["first"]["value"].String().find("bad module") != std::string::npos);
+	CHECK(locals["second"]["value"].String().find("bad module") != std::string::npos);
+	CHECK(locals["cycle"]["value"].String().find("require cycle") != std::string::npos);
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: a step inside a function called from C (a sort comparator)")
+{
+	Scripts scripts("let xs = { 3, 1, 2 }\n"               // 1
+					"table.sort(xs, function(a, b) {\n"     // 2
+					"\tlet less = a < b\n"                  // 3
+					"\treturn less\n"                       // 4
+					"})\n"                                  // 5
+					"let first = xs[1]\n");                 // 6
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(3)) } });
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 3);
+	d.Request("setBreakpoints", Json::Object().Set("source", Json::Object().Set("path", scripts.Main.u8string())).Set("breakpoints", Json::Array()));
+	d.Request("next", Json::Object().Set("threadId", 1));
+	std::string reason;
+	CHECK_EQ(d.Stopped(&reason)[0]["line"].Int(), 4);
+	CHECK_EQ(reason, std::string("step"));
+	CHECK(d.Locals().count("less"));
+	d.Request("stepOut", Json::Object().Set("threadId", 1));
+	const Json frames = d.Stopped();
+	CHECK_EQ(frames[0]["line"].Int(), 6);
+	CHECK_EQ(frames[0]["name"].String(), std::string("(top level)"));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: a test file's cases run under the debugger, filtered as cluau test -k filters them")
+{
+	Scripts scripts("");
+	const std::filesystem::path file = scripts.Dir / "math_test.cluau";
+	std::ofstream(file, std::ios::binary) << "const test = require(\"@std/test\")\n" // 1
+											 "test.case(\"adds\", function() {\n"    // 2
+											 "\tlet sum = 1 + 2\n"                    // 3
+											 "\ttest.equal(sum, 3)\n"                 // 4
+											 "})\n"                                   // 5
+											 "test.case(\"fails\", function() {\n"   // 6
+											 "\ttest.equal(1, 2)\n"                   // 7
+											 "})\n";                                  // 8
+	{
+		Debug d;
+		d.Start(file, { { file, Json::Array().Push(Line(4)) } }, Json::Object().Set("test", true));
+		Json frames = d.Stopped();
+		CHECK_EQ(frames[0]["line"].Int(), 4);
+		CHECK_EQ(d.Locals()["sum"]["value"].String(), std::string("3"));
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 1);
+		std::lock_guard<std::mutex> lock(d.Mutex);
+		CHECK(!d.Console.empty() && d.Console.back() == "1 passed, 1 failed\n");
+	}
+	{
+		Debug d;
+		d.Start(file, {}, Json::Object().Set("test", true).Set("filter", "add"));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	}
 }
 
 TEST("debug: conditions, hit counts and log messages")

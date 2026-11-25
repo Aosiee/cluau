@@ -49,7 +49,7 @@ async function start() {
 		const install = "How to install";
 		const choice = await vscode.window.showErrorMessage(
 			`The cluau language server did not start (${program} lsp): ${error.message}. ` +
-				"It needs cluau 0.16.0 or later on PATH, or the cluau.path setting.",
+				"It needs cluau 0.17.0 or later on PATH, or the cluau.path setting.",
 			install
 		);
 		if (choice === install) vscode.env.openExternal(vscode.Uri.parse("https://github.com/Aosiee/cluau#installing"));
@@ -98,6 +98,8 @@ const debugConfigurations = {
 			return undefined;
 		}
 		if (!config.cwd) config.cwd = path.dirname(config.program);
+		// A test file's cases, as `cluau test` runs them.
+		if (config.test === undefined && config.program.endsWith("_test.cluau")) config.test = true;
 		return config;
 	},
 };

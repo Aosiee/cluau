@@ -51,6 +51,17 @@ exports.run = async function () {
 	const target = definition[0].uri || definition[0].targetUri;
 	assert.strictEqual(path.basename(target.fsPath), "shapes.cluau");
 
+	// p:Length()'s references reach the class in shapes.cluau; the method
+	// is among the workspace's symbols; p's type shows beside it.
+	const references = await vscode.commands.executeCommand("vscode.executeReferenceProvider", uri, new vscode.Position(2, 9));
+	assert.ok(references.some((r) => path.basename(r.uri.fsPath) === "shapes.cluau"), "a reference in shapes.cluau");
+	assert.ok(references.some((r) => path.basename(r.uri.fsPath) === "main.cluau"), "a reference in main.cluau");
+	const symbols = await vscode.commands.executeCommand("vscode.executeWorkspaceSymbolProvider", "Len");
+	assert.ok(symbols.some((s) => s.name === "Length" && s.containerName === "Point"));
+	const hints = await vscode.commands.executeCommand("vscode.executeInlayHintProvider", uri, new vscode.Range(0, 0, 3, 0));
+	const label = (h) => (typeof h.label === "string" ? h.label : h.label.map((part) => part.value).join(""));
+	assert.ok(hints.some((h) => h.position.line === 1 && label(h) === ": Point"), "p's type beside it");
+
 	// The debugger: a breakpoint in the module pauses there; the frame's
 	// variables and an expression read the instance.
 	const shapes = vscode.Uri.file(path.join(dir, "shapes.cluau"));
@@ -78,5 +89,5 @@ exports.run = async function () {
 	assert.strictEqual(exited.body.exitCode, 0);
 	assert.ok(messages.some((m) => m.type === "event" && m.event === "output" && /0\tnil/.test(m.body.output)), "the script's output is in the debug console");
 
-	console.log("editor: diagnostics, hover, completion, definitions and the debugger work");
+	console.log("editor: diagnostics, hover, completion, definitions, references, symbols, inlay hints and the debugger work");
 };

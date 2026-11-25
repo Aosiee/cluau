@@ -229,6 +229,15 @@ namespace cluau::runtime::detail {
 					 "documentSymbolProvider", "documentFormattingProvider" })
 				capabilities.Set(provider, true);
 			capabilities.Set("renameProvider", true);
+			capabilities.Set("workspaceSymbolProvider", true);
+			capabilities.Set("inlayHintProvider", true);
+			// Where references, renames and symbols look beyond the open files.
+			std::vector<std::string> folders;
+			for (const Json& folder : params["workspaceFolders"].Items())
+				folders.push_back(PathFromUri(folder["uri"].String()));
+			if (folders.empty() && params["rootUri"].IsString())
+				folders.push_back(PathFromUri(params["rootUri"].String()));
+			m_Service.SetWorkspace(std::move(folders));
 			result = Json::Object()
 						 .Set("capabilities", std::move(capabilities))
 						 .Set("serverInfo", Json::Object().Set("name", "cluau").Set("version", cluau::Version()));
@@ -325,21 +334,25 @@ namespace cluau::runtime::detail {
 		}
 		else if (method == "textDocument/references" || method == "textDocument/documentHighlight")
 		{
-			const bool declaration = method == "textDocument/documentHighlight" || params["context"]["includeDeclaration"].Bool(true);
+			const bool highlight = method == "textDocument/documentHighlight";
+			const bool declaration = highlight || params["context"]["includeDeclaration"].Bool(true);
 			result = Json::Array();
-			const std::vector<Range> uses = m_Service.References(path, line, col);
+			const std::vector<Location> uses = m_Service.References(path, line, col);
 			for (size_t i = declaration ? 0 : 1; i < uses.size(); i++)
 			{
-				if (method == "textDocument/documentHighlight")
-					result.Push(Json::Object().Set("range", RangeOf(path, uses[i])));
+				// A highlight is the file's own uses.
+				if (highlight && uses[i].Path != path)
+					continue;
+				if (highlight)
+					result.Push(Json::Object().Set("range", RangeOf(path, uses[i].At)));
 				else
-					result.Push(Json::Object().Set("uri", UriFromPath(path)).Set("range", RangeOf(path, uses[i])));
+					result.Push(Json::Object().Set("uri", UriFromPath(uses[i].Path)).Set("range", RangeOf(uses[i].Path, uses[i].At)));
 			}
 		}
 		else if (method == "textDocument/rename")
 		{
 			std::string why;
-			const std::vector<TextEdit> edits = m_Service.Rename(path, line, col, params["newName"].String(), why);
+			const std::map<std::string, std::vector<TextEdit>> edits = m_Service.Rename(path, line, col, params["newName"].String(), why);
 			if (edits.empty())
 			{
 				error = why;
@@ -347,10 +360,15 @@ namespace cluau::runtime::detail {
 			}
 			else
 			{
-				Json list = Json::Array();
-				for (const TextEdit& edit : edits)
-					list.Push(Json::Object().Set("range", RangeOf(path, edit.At)).Set("newText", edit.NewText));
-				result = Json::Object().Set("changes", Json::Object().Set(UriFromPath(path), std::move(list)));
+				Json changes = Json::Object();
+				for (const auto& [file, list] : edits)
+				{
+					Json items = Json::Array();
+					for (const TextEdit& edit : list)
+						items.Push(Json::Object().Set("range", RangeOf(file, edit.At)).Set("newText", edit.NewText));
+					changes.Set(UriFromPath(file), std::move(items));
+				}
+				result = Json::Object().Set("changes", std::move(changes));
 			}
 		}
 		else if (method == "textDocument/documentSymbol")
@@ -369,6 +387,26 @@ namespace cluau::runtime::detail {
 			};
 			for (const DocumentSymbol& symbol : m_Service.DocumentSymbols(path))
 				result.Push(symbolOf(symbol));
+		}
+		else if (method == "workspace/symbol")
+		{
+			result = Json::Array();
+			for (const WorkspaceSymbol& symbol : m_Service.WorkspaceSymbols(params["query"].String()))
+			{
+				Json entry = Json::Object().Set("name", symbol.Name).Set("kind", SymbolKindOf(symbol.Kind));
+				if (!symbol.Container.empty())
+					entry.Set("containerName", symbol.Container);
+				entry.Set("location", Json::Object().Set("uri", UriFromPath(symbol.At.Path)).Set("range", RangeOf(symbol.At.Path, symbol.At.At)));
+				result.Push(std::move(entry));
+			}
+		}
+		else if (method == "textDocument/inlayHint")
+		{
+			result = Json::Array();
+			const int from = params["range"]["start"]["line"].Int();
+			const int to = params["range"]["end"]["line"].Int(from);
+			for (const InlayHint& hint : m_Service.InlayHints(path, from, to))
+				result.Push(Json::Object().Set("position", Position(path, hint.At)).Set("label", hint.Label).Set("kind", 1));
 		}
 		else if (method == "textDocument/formatting")
 		{

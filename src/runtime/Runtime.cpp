@@ -509,16 +509,39 @@ __cluau_meta = {
 			return 1;
 		}
 
+		// Under the debugger's require: a frame of it further up the stack
+		// is running the module's chunk (its local `key` names the module).
+		bool LoadingOnStack(lua_State* L, const std::string& key)
+		{
+			lua_Debug ar;
+			lua_checkstack(L, 2);
+			for (int level = 1; lua_getinfo(L, level, "s", &ar); level++)
+			{
+				if (!ar.source || std::strcmp(ar.source, "=require") != 0)
+					continue;
+				for (int n = 1;; n++)
+				{
+					const char* local = lua_getlocal(L, level, n);
+					if (!local)
+						break;
+					const bool same = std::strcmp(local, "key") == 0 && lua_isstring(L, -1) && key == lua_tostring(L, -1);
+					lua_pop(L, 1);
+					if (same)
+						return true;
+				}
+			}
+			return false;
+		}
+
 		// A module's chunk, to run: by CallModule, or (under a debugger, so
 		// that stepping can enter it) by the require written in Luau, which
 		// gets nil, the chunk and its key, runs the chunk and gives the
-		// value to RequireFinish. (There, a module whose top level fails
-		// stays marked as loading: requiring it again reports a cycle.)
+		// value to RequireFinish. A cycle there is a frame of that require
+		// further up the stack loading the same module.
 		int RunModule(lua_State* L, Runtime::Impl& rt, const std::string& key, bool deferred)
 		{
 			if (!deferred)
 				return CallModule(L, rt, key);
-			rt.Loading.insert(key);
 			lua_pushnil(L);
 			lua_insert(L, -2);
 			lua_pushlstring(L, key.data(), key.size());
@@ -560,7 +583,7 @@ __cluau_meta = {
 				if (!lua_isnil(L, -1))
 					return 1;
 				lua_pop(L, 2);
-				if (rt.Loading.count(name))
+				if (rt.Loading.count(name) || (deferred && LoadingOnStack(L, name)))
 					luaL_error(L, "require cycle: '%s' is still loading (it requires itself through the modules it requires)", name.c_str());
 				if (host->second.Open)
 					lua_pushcfunction(L, host->second.Open, name.c_str());
@@ -613,7 +636,7 @@ __cluau_meta = {
 			if (!lua_isnil(L, -1))
 				return 1;
 			lua_pop(L, 2);
-			if (rt.Loading.count(key))
+			if (rt.Loading.count(key) || (deferred && LoadingOnStack(L, key)))
 				luaL_error(L, "require cycle: '%s' is still loading (it requires itself through the modules it requires)", rt.Display(found).c_str());
 
 			std::string text;
@@ -637,7 +660,6 @@ __cluau_meta = {
 		{
 			Runtime::Impl& rt = Runtime::Impl::Get(L);
 			const std::string key = luaL_checkstring(L, 1);
-			rt.Loading.erase(key);
 			lua_settop(L, 2);
 			if (lua_isnil(L, 2))
 			{
@@ -1233,7 +1255,7 @@ end
 			return;
 		}
 		Luau::CompileOptions copts;
-		copts.debugLevel = 1;
+		copts.debugLevel = 2; // its locals' names (LoadingOnStack)
 		const std::string bytecode = Luau::compile(kDeferredRequire, copts);
 		if (luau_load(L, "=require", bytecode.data(), bytecode.size(), 0) != 0)
 		{

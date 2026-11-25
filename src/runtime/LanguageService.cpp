@@ -624,6 +624,51 @@ namespace cluau::runtime::detail {
 		return found;
 	}
 
+	std::optional<Location> LanguageService::Mapped(const std::string& moduleName, const Luau::Location& at, const std::string& symbol) const
+	{
+		const std::optional<std::string> text = m_Analysis.TextOf(moduleName);
+		if (!text)
+			return std::nullopt;
+		const Range r = Out(moduleName, at);
+		if (IdentifierAt(*text, r.Begin.Line, r.Begin.Col, symbol))
+			return Location{ moduleName, { r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } } };
+		// A class member: where the class declares it (its generated line
+		// does not hold the name).
+		if (const TranslateResult* t = m_Analysis.Translation(moduleName))
+			for (const ClassInfo& c : t->Classes)
+			{
+				if (c.Name == symbol)
+					return Location{ moduleName, c.At };
+				for (const ClassMethod& m : c.Methods)
+					if (m.Name == symbol)
+						return Location{ moduleName, m.At };
+				for (const ClassField& f : c.Fields)
+					if (f.Name == symbol)
+						return Location{ moduleName, f.At };
+			}
+		return std::nullopt;
+	}
+
+	// Needs the module checked for autocomplete (Prepare): the expression's type.
+	std::optional<Location> LanguageService::MemberDeclaration(const std::string& name, const Luau::AstExprIndexName* index)
+	{
+		Luau::ModulePtr module = m_Analysis.Frontend().moduleResolverForAutocomplete.getModule(name);
+		if (!module)
+			return std::nullopt;
+		const std::string member = NameOf(index->index);
+		if (const Luau::TypeId* type = module->astTypes.find(index->expr))
+			if (Member m = FindMember(*type, member); m.Prop && !m.Module.empty())
+			{
+				if (m.Prop->location)
+					if (std::optional<Location> found = Mapped(m.Module, *m.Prop->location, member))
+						return found;
+				if (m.Prop->typeLocation)
+					if (std::optional<Location> found = Mapped(m.Module, *m.Prop->typeLocation, member))
+						return found;
+			}
+		return std::nullopt;
+	}
+
 	std::optional<Location> LanguageService::Find(const std::string& path, int line, int col)
 	{
 		const std::string name = Name(path);
@@ -635,31 +680,7 @@ namespace cluau::runtime::detail {
 		if (!source || !module)
 			return std::nullopt;
 		const Luau::Position pos = In(name, line, col);
-
-		// A checked location in a module, back in its text, when the text
-		// holds the name there (a class's generated line does not).
-		auto mapped = [&](const std::string& moduleName, const Luau::Location& at, const std::string& symbol) -> std::optional<Location> {
-			const std::optional<std::string> text = m_Analysis.TextOf(moduleName);
-			if (!text)
-				return std::nullopt;
-			const Range r = Out(moduleName, at);
-			if (IdentifierAt(*text, r.Begin.Line, r.Begin.Col, symbol))
-				return Location{ moduleName, { r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } } };
-			// A class member: where the class declares it.
-			if (const TranslateResult* t = m_Analysis.Translation(moduleName))
-				for (const ClassInfo& c : t->Classes)
-				{
-					if (c.Name == symbol)
-						return Location{ moduleName, c.At };
-					for (const ClassMethod& m : c.Methods)
-						if (m.Name == symbol)
-							return Location{ moduleName, m.At };
-					for (const ClassField& f : c.Fields)
-						if (f.Name == symbol)
-							return Location{ moduleName, f.At };
-				}
-			return std::nullopt;
-		};
+		auto mapped = [&](const std::string& moduleName, const Luau::Location& at, const std::string& symbol) { return Mapped(moduleName, at, symbol); };
 
 		const std::vector<Luau::AstNode*> ancestry = Luau::findAstAncestryOfPosition(*source, pos);
 		for (auto it = ancestry.rbegin(); it != ancestry.rend(); ++it)
@@ -697,18 +718,7 @@ namespace cluau::runtime::detail {
 			{
 				if (!index->indexLocation.containsClosed(pos))
 					continue;
-				const std::string member = NameOf(index->index);
-				if (const Luau::TypeId* type = module->astTypes.find(index->expr))
-					if (Member m = FindMember(*type, member); m.Prop && !m.Module.empty())
-					{
-						if (m.Prop->location)
-							if (std::optional<Location> found = mapped(m.Module, *m.Prop->location, member))
-								return found;
-						if (m.Prop->typeLocation)
-							if (std::optional<Location> found = mapped(m.Module, *m.Prop->typeLocation, member))
-								return found;
-					}
-				return std::nullopt;
+				return MemberDeclaration(name, index);
 			}
 			if (Luau::AstExprConstantString* string = node->as<Luau::AstExprConstantString>())
 			{
@@ -728,9 +738,50 @@ namespace cluau::runtime::detail {
 		return std::nullopt;
 	}
 
-	std::vector<Range> LanguageService::References(const std::string& path, int line, int col)
+	void LanguageService::SetWorkspace(std::vector<std::string> folders) { m_Workspace = std::move(folders); }
+
+	std::vector<std::string> LanguageService::SearchFiles() const
 	{
-		std::vector<Range> out;
+		std::vector<std::string> out;
+		std::set<std::string> seen;
+		auto add = [&](const std::string& path) {
+			if (seen.insert(Name(path)).second)
+				out.push_back(path);
+		};
+		for (const auto& [name, path] : m_Open)
+			add(path);
+		for (const std::string& folder : m_Workspace)
+		{
+			std::error_code ec;
+			fs::recursive_directory_iterator it(fs::u8path(folder), fs::directory_options::skip_permission_denied, ec), end;
+			for (; !ec && it != end && out.size() < 5000; it.increment(ec))
+			{
+				const fs::path& p = it->path();
+				const std::string leaf = PathText(p.filename());
+				if (it->is_directory(ec))
+				{
+					// Packages, dependencies and build trees are not the workspace's own.
+					if (leaf.empty() || leaf[0] == '.' || leaf == "node_modules" || leaf == "cluau_modules" || leaf == "_deps")
+						it.disable_recursion_pending();
+					continue;
+				}
+				const std::string ext = PathText(p.extension());
+				if (ext == ".cluau" || ext == ".luau")
+					add(PathText(p));
+			}
+		}
+		return out;
+	}
+
+	std::vector<Location> LanguageService::References(const std::string& path, int line, int col)
+	{
+		std::string declaredIn;
+		return ReferencesOf(path, line, col, declaredIn);
+	}
+
+	std::vector<Location> LanguageService::ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn)
+	{
+		std::vector<Location> out;
 		const std::string name = Name(path);
 		if (!Prepare(name))
 			return out;
@@ -739,7 +790,17 @@ namespace cluau::runtime::detail {
 		if (!source || !source->root || !text)
 			return out;
 		const Luau::Position pos = In(name, line, col);
+		std::set<std::pair<std::string, std::pair<int, int>>> seen;
+		// Only where the text holds the name (not a translation's own words).
+		auto add = [&](const std::string& module, const std::string& file, const Range& r, const std::string& symbol) {
+			const std::optional<std::string> moduleText = m_Analysis.TextOf(module);
+			if (moduleText && IdentifierAt(*moduleText, r.Begin.Line, r.Begin.Col, symbol) && seen.insert({ module, { r.Begin.Line, r.Begin.Col } }).second)
+				out.push_back({ file, { r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } } });
+		};
+
 		Luau::AstLocal* target = nullptr;
+		Luau::AstExprGlobal* global = nullptr;
+		Luau::AstExprIndexName* member = nullptr;
 		for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, pos))
 		{
 			auto declared = [&](Luau::AstLocal* local) {
@@ -748,6 +809,10 @@ namespace cluau::runtime::detail {
 			};
 			if (Luau::AstExprLocal* local = node->as<Luau::AstExprLocal>())
 				target = local->local;
+			else if (Luau::AstExprGlobal* g = node->as<Luau::AstExprGlobal>())
+				global = g;
+			else if (Luau::AstExprIndexName* index = node->as<Luau::AstExprIndexName>(); index && index->indexLocation.containsClosed(pos))
+				member = index;
 			else if (Luau::AstStatLocal* decl = node->as<Luau::AstStatLocal>())
 				for (Luau::AstLocal* local : decl->vars)
 					declared(local);
@@ -762,41 +827,133 @@ namespace cluau::runtime::detail {
 				for (Luau::AstLocal* local : loop->vars)
 					declared(local);
 		}
-		if (!target)
+
+		// A class member's declaration in a class body.
+		std::optional<Location> declaration;
+		std::string symbol;
+		if (const TranslateResult* t = m_Analysis.Translation(name))
+			for (const ClassInfo& c : t->Classes)
+			{
+				auto at = [&](const std::string& n, const Range& r) {
+					if (!declaration && r.Begin.Line == line && col >= r.Begin.Col && col <= r.End.Col)
+					{
+						declaration = Location{ name, r };
+						symbol = n;
+					}
+				};
+				for (const ClassMethod& m : c.Methods)
+					at(m.Name, m.At);
+				for (const ClassField& f : c.Fields)
+					at(f.Name, f.At);
+			}
+
+		if (!declaration && member)
+		{
+			declaration = MemberDeclaration(name, member);
+			symbol = NameOf(member->index);
+		}
+		if (!declaration && target)
+		{
+			symbol = NameOf(target->name);
+			LocalUses uses;
+			uses.Target = target;
+			source->root->visit(&uses);
+			add(name, path, Out(name, target->location), symbol);
+			for (const Luau::Location& at : uses.Found)
+				add(name, path, Out(name, at), symbol);
 			return out;
-		const std::string symbol = NameOf(target->name);
-		LocalUses uses;
-		uses.Target = target;
-		source->root->visit(&uses);
-		std::set<std::pair<int, int>> seen;
-		auto add = [&](const Luau::Location& at) {
-			const Range r = Out(name, at);
-			// Only where the text holds the name (not a translation's own words).
-			if (IdentifierAt(*text, r.Begin.Line, r.Begin.Col, symbol) && seen.insert({ r.Begin.Line, r.Begin.Col }).second)
-				out.push_back({ r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } });
+		}
+		if (!declaration && global)
+		{
+			// A script's top-level function: a global of its file.
+			symbol = NameOf(global->name);
+			struct Globals : Luau::AstVisitor
+			{
+				std::string Name;
+				std::vector<Luau::Location> Found;
+				bool visit(Luau::AstExprGlobal* g) override
+				{
+					if (NameOf(g->name) == Name)
+						Found.push_back(g->location);
+					return true;
+				}
+			} globals;
+			globals.Name = symbol;
+			source->root->visit(&globals);
+			for (const Luau::Location& at : globals.Found)
+				add(name, path, Out(name, at), symbol);
+			return out;
+		}
+		if (!declaration)
+			return out;
+
+		// A member: its declaration, then every use in the workspace's files
+		// that resolves to it.
+		const Location decl = *declaration;
+		declaredIn = decl.Path;
+		if (!decl.Path.empty() && decl.Path[0] != '@')
+			add(decl.Path, PathOf(decl.Path), decl.At, symbol);
+		struct Members : Luau::AstVisitor
+		{
+			std::string Name;
+			std::vector<Luau::AstExprIndexName*> Found;
+			bool visit(Luau::AstExprIndexName* index) override
+			{
+				if (NameOf(index->index) == Name)
+					Found.push_back(index);
+				return true;
+			}
 		};
-		add(target->location);
-		for (const Luau::Location& at : uses.Found)
-			add(at);
+		for (const std::string& file : SearchFiles())
+		{
+			const std::string module = Name(file);
+			const std::optional<std::string> fileText = m_Analysis.TextOf(module);
+			if (!fileText || fileText->find(symbol) == std::string::npos)
+				continue;
+			// A file nothing has required yet is checked as a script.
+			const std::vector<std::string>& known = m_Analysis.UserModules();
+			if (!m_Open.count(module) && std::find(known.begin(), known.end(), module) == known.end())
+				m_Analysis.AddRoot(fs::u8path(file));
+			if (!Prepare(module))
+				continue;
+			const Luau::SourceModule* other = m_Analysis.Frontend().getSourceModule(module);
+			if (!other || !other->root)
+				continue;
+			Members members;
+			members.Name = symbol;
+			other->root->visit(&members);
+			for (Luau::AstExprIndexName* index : members.Found)
+			{
+				const std::optional<Location> resolved = MemberDeclaration(module, index);
+				if (resolved && resolved->Path == decl.Path && resolved->At.Begin == decl.At.Begin)
+					add(module, PathOf(module) == module ? file : PathOf(module), Out(module, index->indexLocation), symbol);
+			}
+		}
 		return out;
 	}
 
-	std::vector<TextEdit> LanguageService::Rename(const std::string& path, int line, int col, const std::string& newName, std::string& error)
+	std::map<std::string, std::vector<TextEdit>> LanguageService::Rename(const std::string& path, int line, int col, const std::string& newName, std::string& error)
 	{
-		std::vector<TextEdit> edits;
+		std::map<std::string, std::vector<TextEdit>> edits;
 		if (!IsIdentifier(newName) || IsKeyword(newName))
 		{
 			error = "'" + newName + "' is not a name a variable can have";
 			return edits;
 		}
-		const std::vector<Range> uses = References(path, line, col);
-		if (uses.empty())
+		std::string declaredIn;
+		const std::vector<Location> uses = ReferencesOf(path, line, col, declaredIn);
+		if (!declaredIn.empty() && declaredIn[0] == '@')
 		{
-			error = "only a local variable, function or parameter can be renamed here";
+			error = "'" + declaredIn + "' declares this name: it cannot be renamed here";
 			return edits;
 		}
-		for (const Range& r : uses)
-			edits.push_back({ r, newName });
+		if (uses.empty())
+		{
+			error = "only a variable, a function, a parameter or a member of a class or module can be renamed here";
+			return edits;
+		}
+		for (const Location& use : uses)
+			edits[use.Path].push_back({ use.At, newName });
 		return edits;
 	}
 
@@ -860,6 +1017,115 @@ namespace cluau::runtime::detail {
 				}
 		}
 		std::sort(out.begin(), out.end(), [](const DocumentSymbol& a, const DocumentSymbol& b) { return a.At.Begin < b.At.Begin; });
+		return out;
+	}
+
+	namespace {
+
+		// The query's letters appear in the name in order (any case).
+		bool Matches(const std::string& name, const std::string& query)
+		{
+			size_t at = 0;
+			for (char c : name)
+				if (at < query.size() && std::tolower((unsigned char)c) == std::tolower((unsigned char)query[at]))
+					at++;
+			return at == query.size();
+		}
+
+	} // namespace
+
+	std::vector<WorkspaceSymbol> LanguageService::WorkspaceSymbols(const std::string& query)
+	{
+		std::vector<WorkspaceSymbol> out;
+		for (const std::string& file : SearchFiles())
+		{
+			const std::string module = Name(file);
+			const std::vector<std::string>& known = m_Analysis.UserModules();
+			if (!m_Open.count(module) && std::find(known.begin(), known.end(), module) == known.end())
+				m_Analysis.AddRoot(fs::u8path(file));
+			for (const DocumentSymbol& symbol : DocumentSymbols(file))
+			{
+				if (Matches(symbol.Name, query))
+					out.push_back({ symbol.Name, symbol.Kind, {}, { file, symbol.At } });
+				for (const DocumentSymbol& child : symbol.Children)
+					if (Matches(child.Name, query))
+						out.push_back({ child.Name, child.Kind, symbol.Name, { file, child.At } });
+			}
+			if (out.size() >= 1000)
+				break;
+		}
+		return out;
+	}
+
+	std::vector<InlayHint> LanguageService::InlayHints(const std::string& path, int fromLine, int toLine)
+	{
+		std::vector<InlayHint> out;
+		const std::string name = Name(path);
+		if (!IsCluauPath(name) || !Prepare(name))
+			return out;
+		Luau::ModulePtr module = m_Analysis.Frontend().moduleResolverForAutocomplete.getModule(name);
+		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(name);
+		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		if (!module || !source || !source->root || !text)
+			return out;
+
+		struct Declarations : Luau::AstVisitor
+		{
+			// A name, and where its scope can be looked up.
+			std::vector<std::pair<Luau::AstLocal*, Luau::Position>> Found;
+			bool visit(Luau::AstStatLocal* decl) override
+			{
+				for (size_t i = 0; i < decl->vars.size; i++)
+				{
+					Luau::AstLocal* var = decl->vars.data[i];
+					// What the line says already: an annotation, a function,
+					// or a literal's own type.
+					Luau::AstExpr* value = i < decl->values.size ? decl->values.data[i] : nullptr;
+					if (var->annotation || !value || value->is<Luau::AstExprFunction>() || value->is<Luau::AstExprConstantNumber>() ||
+						value->is<Luau::AstExprConstantString>() || value->is<Luau::AstExprConstantBool>() || value->is<Luau::AstExprConstantNil>() ||
+						value->is<Luau::AstExprInterpString>())
+						continue;
+					Found.push_back({ var, decl->location.end });
+				}
+				return true;
+			}
+			bool visit(Luau::AstStatForIn* loop) override
+			{
+				for (Luau::AstLocal* var : loop->vars)
+					if (!var->annotation)
+						Found.push_back({ var, loop->body->location.begin });
+				return true;
+			}
+		} declarations;
+		source->root->visit(&declarations);
+
+		for (const auto& [var, scopeAt] : declarations.Found)
+		{
+			const std::string symbol = NameOf(var->name);
+			if (symbol.empty() || symbol == "_" || symbol.rfind("__", 0) == 0)
+				continue;
+			const Range at = Out(name, var->location);
+			if (at.Begin.Line < fromLine || at.Begin.Line > toLine || !IdentifierAt(*text, at.Begin.Line, at.Begin.Col, symbol))
+				continue;
+			Luau::ScopePtr scope = Luau::findScopeAtPosition(*module, scopeAt);
+			std::optional<Luau::TypeId> type;
+			for (Luau::ScopePtr s = scope; s && !type; s = s->parent)
+				if (auto binding = s->bindings.find(Luau::Symbol(var)); binding != s->bindings.end())
+					type = binding->second.typeId;
+			if (!type)
+				continue;
+			std::string label;
+			if (std::optional<std::string> cls = m_Analysis.ClassNameOf(*type))
+				label = *cls;
+			else
+				label = TypeString(*type);
+			if (label.empty() || label.find("error-type") != std::string::npos || label == "any" || label == "nil")
+				continue;
+			if (label.size() > 48)
+				label = label.substr(0, 45) + "...";
+			out.push_back({ { at.Begin.Line, at.Begin.Col + (int)symbol.size() }, ": " + label });
+		}
+		std::sort(out.begin(), out.end(), [](const InlayHint& a, const InlayHint& b) { return a.At < b.At; });
 		return out;
 	}
 

@@ -2,7 +2,7 @@
 	"name": "cluau",
 	"displayName": "cluau",
 	"description": "cluau, C-syntax-flavoured Luau: highlighting, the checker's errors, completion, hover and navigation as you type, and the debugger.",
-	"version": "0.16.0",
+	"version": "0.17.0",
 	"publisher": "aosiee",
 	"license": "SEE LICENSE IN LICENSE",
 	"repository": {
@@ -101,7 +101,7 @@
 				"cluau.path": {
 					"type": "string",
 					"default": "cluau",
-					"markdownDescription": "The `cluau` program: a path, or a name found on `PATH`. The language server needs 0.15.0 or later, the debugger 0.16.0 or later."
+					"markdownDescription": "The `cluau` program: a path, or a name found on `PATH` (0.17.0 or later)."
 				},
 				"cluau.modules": {
 					"type": "object",
@@ -168,6 +168,16 @@
 								"type": "boolean",
 								"default": false,
 								"description": "Run without file, network or process access (cluau --sandbox)."
+							},
+							"test": {
+								"type": "boolean",
+								"default": false,
+								"description": "Run the program's @std/test cases, as cluau test does (the default for a *_test.cluau file)."
+							},
+							"filter": {
+								"type": "string",
+								"default": "",
+								"description": "With test: only the cases whose names hold this text (cluau test -k)."
 							}
 						}
 					}

@@ -16,6 +16,7 @@
 namespace Luau {
 	struct Position;
 	struct Location;
+	class AstExprIndexName;
 }
 
 namespace cluau::runtime::detail {
@@ -65,6 +66,20 @@ namespace cluau::runtime::detail {
 
 	enum class SymbolKind { Class, Field, Method, Function, Variable, Enum };
 
+	struct WorkspaceSymbol
+	{
+		std::string Name;
+		SymbolKind Kind = SymbolKind::Variable;
+		std::string Container; // the class a member belongs to
+		Location At;
+	};
+
+	struct InlayHint
+	{
+		Position At;       // where it shows (after a name)
+		std::string Label; // ": number"
+	};
+
 	struct DocumentSymbol
 	{
 		std::string Name;
@@ -97,12 +112,25 @@ namespace cluau::runtime::detail {
 		std::optional<HoverInfo> Hover(const std::string& path, int line, int col);
 		std::optional<SignatureInfo> Signature(const std::string& path, int line, int col);
 		std::optional<Location> Definition(const std::string& path, int line, int col);
-		// A local's uses in its file (its declaration first).
-		std::vector<Range> References(const std::string& path, int line, int col);
-		// The edits renaming the local at the position; `error` says why
-		// there are none.
-		std::vector<TextEdit> Rename(const std::string& path, int line, int col, const std::string& newName, std::string& error);
+		// The editor's workspace folders: where references, renames and
+		// symbols look beyond the files that are open.
+		void SetWorkspace(std::vector<std::string> folders);
+
+		// The uses of the name at the position, its declaration first: a
+		// local's (or a script's top-level function's) in its file; a class
+		// member's or a module's exported key's in every file of the
+		// workspace that uses it.
+		std::vector<Location> References(const std::string& path, int line, int col);
+		// The edits renaming the name at the position, by file; `error`
+		// says why there are none.
+		std::map<std::string, std::vector<TextEdit>> Rename(const std::string& path, int line, int col, const std::string& newName, std::string& error);
 		std::vector<DocumentSymbol> DocumentSymbols(const std::string& path);
+		// The classes, members, functions and variables of the workspace's
+		// files whose names hold the query's letters in order (any case).
+		std::vector<WorkspaceSymbol> WorkspaceSymbols(const std::string& query);
+		// The types of the names `let`, `const` and `for` declare without
+		// one, on lines `fromLine` to `toLine`.
+		std::vector<InlayHint> InlayHints(const std::string& path, int fromLine, int toLine);
 		// The edit that formats the file as `cluau fmt` would (none when it
 		// is formatted already, or cannot be read).
 		std::vector<TextEdit> Format(const std::string& path, const std::string& indent);
@@ -114,12 +142,22 @@ namespace cluau::runtime::detail {
 		std::string Name(const std::string& path) const;
 		std::string PathOf(const std::string& name) const;
 		std::optional<Location> Find(const std::string& path, int line, int col);
+		// A checked location in a module, back in its text where the text
+		// holds `symbol` there (or where a class declares the member).
+		std::optional<Location> Mapped(const std::string& module, const Luau::Location& at, const std::string& symbol) const;
+		// Where the member `index` names is declared.
+		std::optional<Location> MemberDeclaration(const std::string& module, const Luau::AstExprIndexName* index);
+		// References; `declaredIn` is the module declaring a member ("" for a local).
+		std::vector<Location> ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn);
+		// The workspace's script files, and the open ones.
+		std::vector<std::string> SearchFiles() const;
 		Luau::Position In(const std::string& name, int line, int col) const;
 		Range Out(const std::string& name, const Luau::Location& at) const;
 		bool Prepare(const std::string& name);
 
 		Analysis m_Analysis;
 		std::map<std::string, std::string> m_Open; // module name -> the path the editor gave
+		std::vector<std::string> m_Workspace;
 	};
 
 } // namespace cluau::runtime::detail

@@ -14,18 +14,21 @@ files:
 - hover (a name's type and the comment above its declaration) and signature
   help in calls;
 - go to definition (locals, functions, class members across modules, and
-  `require` paths), references and renaming of local names, and the outline
-  of classes, functions and variables;
+  `require` paths), references and renaming (a class member's or a module's
+  exported name's across the workspace), the outline of classes, functions
+  and variables, and the workspace's symbols;
+- the types of names declared without one, shown beside them;
 - formatting (`cluau fmt`);
 - the debugger (`cluau debug`): breakpoints with conditions, hit counts and
   log messages, pausing on errors, stepping, the paused frames' variables,
-  and expressions evaluated in them; F5 debugs the current file;
+  and expressions evaluated in them; F5 debugs the current file (a
+  `*_test.cluau` file's test cases);
 - **cluau: Run File**, which runs the file in a terminal, and **cluau:
   Debug File**.
 
 ## Requirements
 
-The `cluau` program, 0.16.0 or later, on `PATH`; the extension starts
+The `cluau` program, 0.17.0 or later, on `PATH`; the extension starts
 `cluau lsp` and `cluau debug`. To install it:
 
 ```sh
@@ -51,7 +54,8 @@ directory, its `cluau_modules`, then `CLUAU_PATH`.
 
 F5 on a `.cluau` file debugs it without a `launch.json`. A configuration
 of type `cluau` takes `program`, `args`, `cwd` (the script's directory when
-not given), `stopOnEntry` and `sandbox`:
+not given), `stopOnEntry`, `sandbox`, and `test` and `filter` (run the
+file's `@std/test` cases, those whose names hold the filter):
 
 ```json
 {

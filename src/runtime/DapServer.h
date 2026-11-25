@@ -119,6 +119,8 @@ namespace cluau::runtime::detail {
 		bool m_StopOnEntry = false;
 		bool m_NoDebug = false;
 		bool m_Sandbox = false;
+		bool m_Test = false;   // the program's @std/test cases, as `cluau test` runs them
+		std::string m_Filter;  // and only those whose names hold this (-k)
 
 		// Breakpoints by file as the editor names it, and the debugger's view.
 		std::map<std::string, std::vector<Breakpoint>> m_Breakpoints;

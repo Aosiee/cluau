@@ -16,8 +16,10 @@
 //
 // Luau enters single-step mode only as a thread enters the VM, so a step
 // from a breakpoint breaks the thread out of the VM (the runtime resumes
-// it at once). A breakpoint inside a call made from C (a sort comparator,
-// a metamethod) cannot break out: a step there continues instead.
+// it at once). Inside a call made from C (a sort comparator, a metamethod)
+// the thread cannot break out: there a step arms a breakpoint on every
+// line of the function and of the Lua function below the C call, and
+// stops at the first of them reached.
 //
 // Expressions (conditions, log messages, watches, the console) are cluau
 // (or Luau, in a .luau file), compiled as `return (<expression>)` and run
@@ -177,6 +179,10 @@ namespace cluau::runtime::detail {
 		void OnProtectedError(lua_State* L);
 
 		void Arm(const std::string& file, int line);
+		// A step where the thread cannot leave the VM: by breakpoints.
+		void StartLineStep(lua_State* L, int line);
+		void EndLineStep();
+		bool LineStepStops(lua_State* L, int line);
 		// `fromBreak`: at a BREAK (a step breaks the thread out of the VM
 		// and skips that BREAK once on resuming); `stepping`: the thread
 		// runs in single-step mode.
@@ -222,6 +228,16 @@ namespace cluau::runtime::detail {
 		// A thread broken out at a BREAK runs it again on resuming: that hit is skipped.
 		lua_State* m_SkipBreakThread = nullptr;
 		int m_SkipBreakLine = 0;
+
+		struct LineStep
+		{
+			bool Active = false;
+			lua_State* Thread = nullptr;
+			StepKind Kind = StepKind::Over;
+			int Function = 0, Caller = 0; // registry refs (0 for none)
+			int Depth = 0, CallerDepth = 0, Line = 0;
+			std::vector<std::pair<int, int>> Armed; // function ref, line
+		} m_LineStep;
 	};
 
 } // namespace cluau::runtime::detail

@@ -238,9 +238,12 @@ open `.cluau` file, what `cluau check` reports as you type (for the file
 and the modules it requires), completion with the types of names, members
 and the standard modules, hover (a name's type and the comment above its
 declaration), signature help, go to definition (locals, functions, class
-members in other modules, `require` paths), references and renaming of
-local names, the outline of classes, functions and variables, and
-formatting (`cluau fmt`). It finds modules as `cluau` does, and takes the
+members in other modules, `require` paths), references and renaming
+(a local's in its file; a class member's or a module's exported name's in
+every file of the workspace that uses it), the outline of classes,
+functions and variables, the workspace's symbols, the types of names
+declared without one shown beside them (inlay hints), and formatting
+(`cluau fmt`). It finds modules as `cluau` does, and takes the
 same `--module <name>=<file>` options as `cluau check` for a host's
 modules.
 
@@ -289,6 +292,8 @@ configuration takes:
 | `cwd` | the directory it runs in (the script's own when not given) |
 | `stopOnEntry` | pause at its first line |
 | `sandbox` | run it in [the sandbox](#the-sandbox) |
+| `test` | run its `@std/test` cases, as `cluau test` does (the default for a `*_test.cluau` file) |
+| `filter` | with `test`, only the cases whose names hold this text (`cluau test -k`) |
 
 What it does:
 
@@ -312,9 +317,9 @@ What it does:
   console. Its standard input is empty.
 
 Under the debugger the script runs interpreted (as `--no-native`), at the
-same speed. A step inside a function called from Luau's own C code (a
-`table.sort` comparator, a `__tostring` or `__index` function) continues
-instead, with a note in the console.
+same speed. A test file's cases run as `cluau test` runs them, with the
+summary in the console; a failing assertion is an error its case catches,
+so *All Errors* pauses at it.
 
 In Neovim, with nvim-dap:
 

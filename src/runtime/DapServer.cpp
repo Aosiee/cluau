@@ -245,6 +245,8 @@ namespace cluau::runtime::detail {
 		m_StopOnEntry = args["stopOnEntry"].Bool();
 		m_NoDebug = args["noDebug"].Bool();
 		m_Sandbox = args["sandbox"].Bool();
+		m_Test = args["test"].Bool();
+		m_Filter = args["filter"].String();
 		m_Launched = true;
 		Respond(request, true);
 	}
@@ -303,7 +305,24 @@ namespace cluau::runtime::detail {
 		const fs::path rel = fs::u8path(m_Program).lexically_relative(fs::current_path(ec));
 		if (!ec && !rel.empty() && *rel.begin() != "..")
 			name = Utf8(rel);
-		const int code = m_Runtime->RunFile(name);
+		int code = 0;
+		if (m_Test)
+		{
+			Runtime::TestCounts counts;
+			const bool ran = m_Runtime->RunTest(name, m_Filter, counts);
+			std::fflush(stdout);
+			std::string summary = std::to_string(counts.Passed) + " passed";
+			if (counts.Failed)
+				summary += ", " + std::to_string(counts.Failed) + " failed";
+			if (counts.Skipped)
+				summary += ", " + std::to_string(counts.Skipped) + " skipped";
+			if (!ran)
+				summary += "; the file did not finish";
+			Output("console", summary + "\n");
+			code = !ran || counts.Failed || counts.Passed + counts.Skipped == 0 ? 1 : 0;
+		}
+		else
+			code = m_Runtime->RunFile(name);
 
 		SetExitHook(nullptr);
 		g_Running = nullptr;
