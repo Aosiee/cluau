@@ -1,0 +1,9 @@
+run 1
+run 2
+run 3
+slept
+read	first line, second line
+heard	line 1, line 2, line 3, code 0
+side by side	true
+ticked while the script slept	3
+exit: 0

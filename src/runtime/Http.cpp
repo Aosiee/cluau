@@ -6,6 +6,7 @@
 // the first of the usual bundles a Linux distribution keeps.
 
 #include "Std.h"
+#include "Jobs.h"
 
 #include "cluau/cluau.h"
 #include "lua.h"
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -302,15 +304,30 @@ namespace cluau::runtime::detail {
 			return false;
 		}
 
-		// Runs a request; pushes the response table. `file` receives the body
-		// (a download), else the response holds it.
-		void Perform(lua_State* L, const char* fn, const Request& request, FILE* file)
+		// A finished transfer: what the script's thread turns into the
+		// response table, or the error.
+		struct Outcome
 		{
-			InitCurl();
+			CURLcode Code = CURLE_OK;
+			long Status = 0;
+			std::string Url;
+			std::string ErrorText;
+			struct Transfer Transfer;
+			std::string Failure; // set when the request could not even start
+		};
+
+		// Runs a request (on a job's thread: no Lua state). `file` receives
+		// the body (a download), else the outcome holds it.
+		std::shared_ptr<Outcome> Run(const Request& request, FILE* file)
+		{
+			auto outcome = std::make_shared<Outcome>();
 			CURL* curl = curl_easy_init();
 			if (!curl)
-				luaL_error(L, "%s: cannot start a transfer", fn);
-			Transfer transfer;
+			{
+				outcome->Failure = "cannot start a transfer";
+				return outcome;
+			}
+			Transfer& transfer = outcome->Transfer;
 			transfer.File = file;
 			char errorText[CURL_ERROR_SIZE] = {};
 			curl_slist* headers = nullptr;
@@ -374,20 +391,30 @@ namespace cluau::runtime::detail {
 				}
 			}
 
-			const CURLcode code = curl_easy_perform(curl);
-			long status = 0;
-			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+			outcome->Code = curl_easy_perform(curl);
+			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &outcome->Status);
 			char* finalUrl = nullptr;
 			curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &finalUrl);
-			const std::string url = finalUrl ? finalUrl : request.Url;
+			outcome->Url = finalUrl ? finalUrl : request.Url;
+			outcome->ErrorText = errorText;
 			curl_slist_free_all(headers);
 			curl_easy_cleanup(curl);
+			transfer.File = nullptr;
+			return outcome;
+		}
 
+		// The outcome as the response table, or the error raised.
+		int Push(lua_State* L, const char* fn, const Request& request, const Outcome& outcome)
+		{
+			if (!outcome.Failure.empty())
+				luaL_error(L, "%s: %s", fn, outcome.Failure.c_str());
+			const CURLcode code = outcome.Code;
 			if (code == CURLE_ABORTED_BY_CALLBACK)
 				RaiseIfInterrupted(L);
 			if (code != CURLE_OK)
 			{
-				std::string why = errorText[0] ? errorText : curl_easy_strerror(code);
+				const Certificates& system = SystemCertificates();
+				std::string why = !outcome.ErrorText.empty() ? outcome.ErrorText : curl_easy_strerror(code);
 				while (!why.empty() && (why.back() == '\n' || why.back() == '.'))
 					why.pop_back();
 				if (code == CURLE_OPERATION_TIMEDOUT)
@@ -396,19 +423,20 @@ namespace cluau::runtime::detail {
 					why += system.Where.empty() && request.CaFile.empty()
 						? " (no trusted certificates were found on this system: set SSL_CERT_FILE to a CA bundle)"
 						: " (trusted certificates: " + (request.CaFile.empty() ? system.Where : request.CaFile) + ")";
-				else if (transfer.WriteFailed)
+				else if (outcome.Transfer.WriteFailed)
 					why = "cannot write the download";
 				luaL_error(L, "%s: %s %s: %s", fn, request.Method.c_str(), request.Url.c_str(), why.c_str());
 			}
 
+			const Transfer& transfer = outcome.Transfer;
 			lua_createtable(L, 0, 5);
-			lua_pushinteger(L, (int)status);
+			lua_pushinteger(L, (int)outcome.Status);
 			lua_setfield(L, -2, "status");
-			lua_pushboolean(L, status >= 200 && status < 300);
+			lua_pushboolean(L, outcome.Status >= 200 && outcome.Status < 300);
 			lua_setfield(L, -2, "ok");
 			lua_pushlstring(L, transfer.Body.data(), transfer.Body.size());
 			lua_setfield(L, -2, "body");
-			lua_pushstring(L, url.c_str());
+			lua_pushstring(L, outcome.Url.c_str());
 			lua_setfield(L, -2, "url");
 			lua_createtable(L, 0, (int)transfer.Headers.size());
 			for (const auto& [name, value] : transfer.Headers)
@@ -417,6 +445,19 @@ namespace cluau::runtime::detail {
 				lua_setfield(L, -2, name.c_str());
 			}
 			lua_setfield(L, -2, "headers");
+			return 1;
+		}
+
+		// A request that waits on its own in a task (Jobs.h).
+		int Perform(lua_State* L, const char* fn, Request request)
+		{
+			// Set up once on the script's thread, before any job uses them.
+			InitCurl();
+			SystemCertificates();
+			return Await(L, [fn, request = std::move(request)]() -> JobResult {
+				std::shared_ptr<Outcome> outcome = Run(request, nullptr);
+				return [fn, request, outcome](lua_State* L) { return Push(L, fn, request, *outcome); };
+			});
 		}
 
 		// http.request(options): options.url and .method (GET by default).
@@ -428,8 +469,7 @@ namespace cluau::runtime::detail {
 			if (request.Url.empty())
 				luaL_error(L, "http.request: options.url is the address");
 			ReadOptions(L, 1, "http.request", request);
-			Perform(L, "http.request", request, nullptr);
-			return 1;
+			return Perform(L, "http.request", std::move(request));
 		}
 
 		int HttpGet(lua_State* L)
@@ -437,8 +477,7 @@ namespace cluau::runtime::detail {
 			Request request;
 			request.Url = luaL_checkstring(L, 1);
 			ReadOptions(L, 2, "http.get", request);
-			Perform(L, "http.get", request, nullptr);
-			return 1;
+			return Perform(L, "http.get", std::move(request));
 		}
 
 		// http.post(url, body?, options?): `body` is text (options.json for a value as JSON).
@@ -456,8 +495,7 @@ namespace cluau::runtime::detail {
 			ReadOptions(L, 3, "http.post", request);
 			if (request.Method != "POST")
 				luaL_error(L, "http.post: the method is POST (http.request takes any)");
-			Perform(L, "http.post", request, nullptr);
-			return 1;
+			return Perform(L, "http.post", std::move(request));
 		}
 
 		// http.download(url, path, options?): the body into a file (it is
@@ -466,48 +504,47 @@ namespace cluau::runtime::detail {
 		{
 			Request request;
 			request.Url = luaL_checkstring(L, 1);
-			const fs::path path = fs::u8path(luaL_checkstring(L, 2));
+			const std::string shown = luaL_checkstring(L, 2);
+			const fs::path path = fs::u8path(shown);
 			ReadOptions(L, 3, "http.download", request);
-			fs::path partial = path;
-			partial += ".download";
+			InitCurl();
+			SystemCertificates();
+			return Await(L, [request = std::move(request), path, shown]() -> JobResult {
+				fs::path partial = path;
+				partial += ".download";
 #ifdef _WIN32
-			FILE* file = _wfopen(partial.c_str(), L"wb");
+				FILE* file = _wfopen(partial.c_str(), L"wb");
 #else
-			FILE* file = std::fopen(partial.c_str(), "wb");
+				FILE* file = std::fopen(partial.c_str(), "wb");
 #endif
-			if (!file)
-				luaL_error(L, "http.download: cannot write '%s'", luaL_checkstring(L, 2));
-			struct Closer
-			{
-				FILE*& File;
-				fs::path Partial;
-				~Closer()
-				{
-					if (File)
-						std::fclose(File);
-					std::error_code ec;
-					fs::remove(Partial, ec);
-				}
-			} closer{ file, partial };
-			Perform(L, "http.download", request, file);
-			std::fclose(file);
-			file = nullptr;
-			lua_getfield(L, -1, "ok");
-			const bool ok = lua_toboolean(L, -1);
-			lua_pop(L, 1);
-			if (ok)
-			{
+				if (!file)
+					return [shown](lua_State* L) -> int {
+						luaL_error(L, "http.download: cannot write '%s'", shown.c_str());
+						return 0;
+					};
+				std::shared_ptr<Outcome> outcome = Run(request, file);
+				std::fclose(file);
+				std::string renameError;
 				std::error_code ec;
-				fs::rename(partial, path, ec);
-				if (ec)
+				const bool ok = outcome->Failure.empty() && outcome->Code == CURLE_OK && outcome->Status >= 200 && outcome->Status < 300;
+				if (ok)
 				{
-					fs::remove(path, ec);
 					fs::rename(partial, path, ec);
+					if (ec)
+					{
+						fs::remove(path, ec);
+						fs::rename(partial, path, ec);
+					}
+					if (ec)
+						renameError = ec.message();
 				}
-				if (ec)
-					luaL_error(L, "http.download: cannot write '%s': %s", luaL_checkstring(L, 2), ec.message().c_str());
-			}
-			return 1;
+				fs::remove(partial, ec);
+				return [request, outcome, shown, renameError](lua_State* L) -> int {
+					if (!renameError.empty())
+						luaL_error(L, "http.download: cannot write '%s': %s", shown.c_str(), renameError.c_str());
+					return Push(L, "http.download", request, *outcome);
+				};
+			});
 		}
 
 		const luaL_Reg kHttp[] = {
@@ -521,7 +558,7 @@ namespace cluau::runtime::detail {
 		lua_newtable(L);
 		for (const luaL_Reg* f = kHttp; f->name; f++)
 		{
-			lua_pushcfunction(L, f->func, f->name);
+			lua_pushcclosurek(L, f->func, f->name, 0, AwaitContinue);
 			lua_setfield(L, -2, f->name);
 		}
 	}

@@ -12,9 +12,14 @@
 // still waiting run to their end before the script exits. An error in a
 // task is raised where the tasks are being run (the task.wait or task.join
 // running them, or the script's end), so none goes unseen.
+//
+// The standard library's blocking calls (http, process.run and exec, a
+// child's reads and wait, reading standard input, process.sleep) wait on
+// their own in a task: the call runs on a thread of its own, the task
+// waits for it, and the other tasks run meanwhile (@std/_jobs).
 
 const time = require("@std/time")
-const process = require("@std/process")
+const jobs = require("@std/_jobs")
 
 // A task whose function returns R... (what task.join gives back).
 export type Task<R...> = {
@@ -34,10 +39,16 @@ type State = {
 	waiters: { State },
 	wake: number,
 	order: number,
+	// The job a blocking call waits on (0 for none), and what the task is
+	// resumed with (the job's id, for the call to take its results).
+	job: number,
+	resumeWith: number?,
 }
 
-// The tasks waiting to run again (or to start), each with when it is due.
+// The tasks waiting to run again (or to start), each with when it is due,
+// and those waiting on a blocking call's job.
 const waiting: { State } = {}
+const onJobs: { State } = {}
 const states: { [Task<any>]: State } = {}
 const byThread: { [thread]: State } = {}
 const counter = { next = 0 }
@@ -65,7 +76,9 @@ const Finish = function(state: State) {
 const Resume = function(state: State) {
 	let results: { any }
 	if (state.started) {
-		results = table.pack(coroutine.resume(state.thread))
+		const with = state.resumeWith
+		state.resumeWith = nil
+		results = table.pack(coroutine.resume(state.thread, with))
 	} else {
 		state.started = true
 		results = table.pack(coroutine.resume(state.thread, table.unpack(state.args)))
@@ -80,6 +93,35 @@ const Resume = function(state: State) {
 		table.remove(results, 1)
 		state.results = results
 		Finish(state)
+	} else if (results[2] == jobs.marker) {
+		state.job = results[3]
+		table.insert(onJobs, state)
+	}
+}
+
+// The tasks whose job is done come due now.
+const CollectJobs = function() {
+	let i = 1
+	while (i <= #onJobs) {
+		const state = onJobs[i]
+		if (jobs.done(state.job)) {
+			table.remove(onJobs, i)
+			state.resumeWith = state.job
+			state.job = 0
+			Due(state, time.monotonic())
+		} else {
+			i += 1
+		}
+	}
+}
+
+// Sleeps `seconds` at most (none: until a job finishes), waking early when
+// a job finishes.
+const Idle = function(seconds: number?) {
+	if (jobs.pending() > 0) {
+		jobs.wait(seconds)
+	} else if (seconds != nil && seconds > 0) {
+		jobs.wait(seconds)
 	}
 }
 
@@ -102,23 +144,35 @@ const NextDue = function(): State? {
 // `stop` says to (it is asked between tasks) or `deadline` passes.
 const RunUntil = function(stop: () -> boolean, deadline: number?) {
 	while (!stop()) {
+		CollectJobs()
 		const state = NextDue()
 		const now = time.monotonic()
 		if (state == nil) {
+			// Nothing due: the jobs still running, or the deadline.
+			if (jobs.pending() > 0 && (deadline == nil || deadline > now)) {
+				Idle(if (deadline != nil) deadline - now else nil)
+				continue
+			}
 			if (deadline != nil && deadline > now) {
-				process.sleep(deadline - now)
+				Idle(deadline - now)
 			}
 			return
 		}
 		if (deadline != nil && state.wake > deadline) {
-			Due(state, state.wake)
+			table.insert(waiting, state) // back, in its place in line
 			if (deadline > now) {
-				process.sleep(deadline - now)
+				Idle(deadline - now)
+				if (jobs.pending() > 0 || #onJobs > 0) {
+					continue
+				}
 			}
 			return
 		}
 		if (state.wake > now) {
-			process.sleep(state.wake - now)
+			// Until it is due, unless a job finishes first.
+			table.insert(waiting, state)
+			Idle(state.wake - now)
+			continue
 		}
 		if (!state.task.done) {
 			Resume(state)
@@ -137,6 +191,8 @@ const Make = function(fn: (...any) -> ...any, args: { any }): State {
 		waiters = {},
 		wake = 0,
 		order = 0,
+		job = 0,
+		resumeWith = nil,
 	}
 	states[task] = state
 	byThread[state.thread] = state
@@ -221,6 +277,13 @@ const cancel = function<R...>(task: Task<R...>) {
 			break
 		}
 	}
+	for (i, each in onJobs) {
+		if (each == state) {
+			table.remove(onJobs, i)
+			jobs.forget(each.job)
+			break
+		}
+	}
 	Finish(state)
 	if (Current() == state) {
 		coroutine.yield() // never resumed
@@ -236,9 +299,16 @@ const running = function(): Task<...unknown>? {
 // The runtime's, at the end of the script: the waiting tasks run to the end.
 const _run = function() {
 	RunUntil(function(): boolean {
-		return #waiting == 0
+		return #waiting == 0 && #onJobs == 0
 	})
 }
+
+// A blocking call in the script's own code: the tasks run until its job is done.
+jobs.register(byThread, function(id: number) {
+	RunUntil(function(): boolean {
+		return jobs.done(id)
+	})
+})
 
 return {
 	spawn = spawn,

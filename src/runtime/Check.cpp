@@ -150,6 +150,17 @@ return m :: {
 	array: (<T>(value: T) -> T) & (() -> { unknown }),
 }
 )LUAU" },
+				{ "_jobs", R"LUAU(
+local m: any = nil
+return m :: {
+	marker: unknown,
+	done: (id: number) -> boolean,
+	pending: () -> number,
+	wait: (seconds: number?) -> (),
+	forget: (id: number) -> (),
+	register: (tasks: { [thread]: unknown }, runUntilJob: (id: number) -> ()) -> (),
+}
+)LUAU" },
 				{ "regex", R"LUAU(
 export type Match = {
 	text: string,

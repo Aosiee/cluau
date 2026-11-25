@@ -19,4 +19,5 @@ error:	false	http.request: options.url is the address
 error:	false	http.get: options.timeout is a number of seconds
 error:	false	http.post: options.body and options.json are each a body: give one
 error:	false	http.get: GET file:///etc/passwd
+tasks:	hello	true
 exit: 0

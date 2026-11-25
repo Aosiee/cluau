@@ -14,12 +14,14 @@
 
 #include <algorithm>
 #include <map>
+#include <mutex>
 #include <thread>
 
 #else
 
 #include <cerrno>
 #include <csignal>
+#include <mutex>
 #include <cstdlib>
 #include <fcntl.h>
 #include <poll.h>
@@ -178,8 +180,13 @@ namespace cluau::runtime::detail {
 			HANDLE Err = nullptr; // its standard error, captured on its own
 		};
 
+		// One launch at a time: the pipes are inheritable while a child is
+		// made, and another child made then would hold their ends too.
+		std::mutex g_Launching;
+
 		bool Launch(const SpawnRequest& request, bool pipeInput, Started& started, std::string& why)
 		{
+			std::lock_guard<std::mutex> launching(g_Launching);
 			std::wstring line;
 			if (request.Shell)
 			{
@@ -406,8 +413,34 @@ namespace cluau::runtime::detail {
 			int Err = -1; // its standard error, captured on its own
 		};
 
+		extern "C" char** environ;
+
+		// One launch at a time: a child made while another's pipes are being
+		// set up would hold their ends (and delay the other's end of output).
+		std::mutex g_Launching;
+
 		bool Launch(const SpawnRequest& request, bool pipeInput, bool ownGroup, Started& started, std::string& why)
 		{
+			std::lock_guard<std::mutex> launching(g_Launching);
+			// The child's environment, made here: after fork the child only
+			// switches to it (other threads may hold the allocator's lock).
+			std::vector<std::string> envText;
+			std::vector<char*> envp;
+			if (!request.Env.empty())
+			{
+				for (char** e = environ; *e; e++)
+				{
+					const char* eq = std::strchr(*e, '=');
+					const std::string name = eq ? std::string(*e, (size_t)(eq - *e)) : std::string(*e);
+					if (std::none_of(request.Env.begin(), request.Env.end(), [&](const auto& kv) { return kv.first == name; }))
+						envText.push_back(*e);
+				}
+				for (const auto& [name, value] : request.Env)
+					envText.push_back(name + "=" + value);
+				for (std::string& e : envText)
+					envp.push_back(e.data());
+				envp.push_back(nullptr);
+			}
 			std::vector<std::string> args = request.Shell ? std::vector<std::string>{ "/bin/sh", "-c", request.Args[0] } : request.Args;
 			std::vector<char*> argv;
 			for (std::string& a : args)
@@ -458,8 +491,8 @@ namespace cluau::runtime::detail {
 					failure = errno;
 					tag = 'd';
 				}
-				for (const auto& [name, value] : request.Env)
-					setenv(name.c_str(), value.c_str(), 1);
+				if (!envp.empty())
+					environ = envp.data();
 				if (!failure)
 				{
 					execvp(argv[0], argv.data());

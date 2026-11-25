@@ -5,6 +5,7 @@
 // everywhere.
 
 #include "Std.h"
+#include "Jobs.h"
 #include "Spawn.h"
 
 #include "lua.h"
@@ -12,6 +13,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <cmath>
 #include <cctype>
 #include <cstdio>
@@ -89,11 +93,17 @@ namespace cluau::runtime::detail {
 			return "permission denied or unreadable";
 		}
 
+		bool Awaits(lua_CFunction f);
+
+		// The functions that may wait on a job (Await) get its continuation.
 		void SetFunctions(lua_State* L, const luaL_Reg* functions)
 		{
 			for (; functions->name; functions++)
 			{
-				lua_pushcfunction(L, functions->func, functions->name);
+				if (Awaits(functions->func))
+					lua_pushcclosurek(L, functions->func, functions->name, 0, AwaitContinue);
+				else
+					lua_pushcfunction(L, functions->func, functions->name);
 				lua_setfield(L, -2, functions->name);
 			}
 		}
@@ -971,14 +981,21 @@ namespace cluau::runtime::detail {
 			return request;
 		}
 
-		void StartOrFail(lua_State* L, const char* fn, const SpawnRequest& request, SpawnResult& result)
+		// Runs the command (on a job's thread); the result pushes `push`'s
+		// values, or raises that it could not start.
+		JobWork RunCommand(const char* fn, SpawnRequest request, std::function<int(lua_State*, const SpawnResult&)> push)
 		{
-			std::string why;
-			if (!Spawn(request, result, why))
-			{
+			return [fn, request = std::move(request), push = std::move(push)]() -> JobResult {
+				auto result = std::make_shared<SpawnResult>();
+				std::string why;
+				const bool started = Spawn(request, *result, why);
 				const std::string what = request.Shell ? std::string("the shell") : "'" + request.Args[0] + "'";
-				luaL_error(L, "%s: cannot start %s: %s", fn, what.c_str(), why.c_str());
-			}
+				return [fn, started, why, what, result, push](lua_State* L) -> int {
+					if (!started)
+						luaL_error(L, "%s: cannot start %s: %s", fn, what.c_str(), why.c_str());
+					return push(L, *result);
+				};
+			};
 		}
 
 		// process.run(command, options?): { code, output, error } - the
@@ -988,83 +1005,78 @@ namespace cluau::runtime::detail {
 		{
 			SpawnRequest request = Command(L, "process.run", true);
 			request.CaptureOutput = true;
-			SpawnResult result;
-			StartOrFail(L, "process.run", request, result);
-			lua_createtable(L, 0, 3);
-			lua_pushinteger(L, result.Code);
-			lua_setfield(L, -2, "code");
-			lua_pushlstring(L, result.Output.data(), result.Output.size());
-			lua_setfield(L, -2, "output");
-			lua_pushlstring(L, result.Error.data(), result.Error.size());
-			lua_setfield(L, -2, "error");
-			lua_pushboolean(L, result.TimedOut);
-			lua_setfield(L, -2, "timedOut");
-			return 1;
+			return Await(L, RunCommand("process.run", std::move(request), [](lua_State* L, const SpawnResult& result) {
+				lua_createtable(L, 0, 3);
+				lua_pushinteger(L, result.Code);
+				lua_setfield(L, -2, "code");
+				lua_pushlstring(L, result.Output.data(), result.Output.size());
+				lua_setfield(L, -2, "output");
+				lua_pushlstring(L, result.Error.data(), result.Error.size());
+				lua_setfield(L, -2, "error");
+				lua_pushboolean(L, result.TimedOut);
+				lua_setfield(L, -2, "timedOut");
+				return 1;
+			}));
 		}
 
 		// process.exec(command, options?): the exit code, the command's
 		// output going where the script's goes.
 		int ProcessExec(lua_State* L)
 		{
-			const SpawnRequest request = Command(L, "process.exec", false);
-			SpawnResult result;
-			StartOrFail(L, "process.exec", request, result);
-			lua_pushinteger(L, result.Code);
-			lua_pushboolean(L, result.TimedOut);
-			return 2;
+			SpawnRequest request = Command(L, "process.exec", false);
+			return Await(L, RunCommand("process.exec", std::move(request), [](lua_State* L, const SpawnResult& result) {
+				lua_pushinteger(L, result.Code);
+				lua_pushboolean(L, result.TimedOut);
+				return 2;
+			}));
 		}
 
 		// ---- process.spawn -------------------------------------------------
 
 		constexpr const char* kChildMeta = "cluau.Child";
 
+		// A child is shared with the jobs reading it or waiting for it (a
+		// task's read outlives nothing it needs).
 		struct ChildBox
 		{
-			Child* Process = nullptr;
+			std::shared_ptr<Child>* Process = nullptr;
 		};
 
-		Child& CheckChild(lua_State* L)
+		std::shared_ptr<Child> SharedChild(lua_State* L, int index)
 		{
-			ChildBox* box = static_cast<ChildBox*>(luaL_checkudata(L, 1, kChildMeta));
+			ChildBox* box = static_cast<ChildBox*>(luaL_checkudata(L, index, kChildMeta));
 			return *box->Process;
 		}
 
-		int ChildRead(lua_State* L)
+		Child& CheckChild(lua_State* L) { return *SharedChild(L, 1); }
+
+		// A read (a chunk, or a line) on a job's thread: the text, or nil at the end.
+		int AwaitRead(lua_State* L, std::shared_ptr<Child> child, bool line)
 		{
-			std::string chunk;
-			if (!CheckChild(L).Read(chunk))
-				lua_pushnil(L);
-			else
-				lua_pushlstring(L, chunk.data(), chunk.size());
-			return 1;
+			return Await(L, [child, line]() -> JobResult {
+				auto text = std::make_shared<std::string>();
+				const bool got = line ? child->ReadLine(*text) : child->Read(*text);
+				return [text, got](lua_State* L) {
+					if (!got)
+						lua_pushnil(L);
+					else
+						lua_pushlstring(L, text->data(), text->size());
+					return 1;
+				};
+			});
 		}
 
-		int ChildReadLine(lua_State* L)
-		{
-			std::string line;
-			if (!CheckChild(L).ReadLine(line))
-				lua_pushnil(L);
-			else
-				lua_pushlstring(L, line.data(), line.size());
-			return 1;
-		}
+		int ChildRead(lua_State* L) { return AwaitRead(L, SharedChild(L, 1), false); }
 
-		int ChildLinesNext(lua_State* L)
-		{
-			ChildBox* box = static_cast<ChildBox*>(lua_touserdata(L, lua_upvalueindex(1)));
-			std::string line;
-			if (!box->Process->ReadLine(line))
-				lua_pushnil(L);
-			else
-				lua_pushlstring(L, line.data(), line.size());
-			return 1;
-		}
+		int ChildReadLine(lua_State* L) { return AwaitRead(L, SharedChild(L, 1), true); }
+
+		int ChildLinesNext(lua_State* L) { return AwaitRead(L, SharedChild(L, lua_upvalueindex(1)), true); }
 
 		int ChildLines(lua_State* L)
 		{
 			CheckChild(L);
 			lua_pushvalue(L, 1);
-			lua_pushcclosure(L, ChildLinesNext, "lines", 1);
+			lua_pushcclosurek(L, ChildLinesNext, "lines", 1, AwaitContinue);
 			return 1;
 		}
 
@@ -1091,8 +1103,14 @@ namespace cluau::runtime::detail {
 
 		int ChildWait(lua_State* L)
 		{
-			lua_pushinteger(L, CheckChild(L).Wait());
-			return 1;
+			std::shared_ptr<Child> child = SharedChild(L, 1);
+			return Await(L, [child]() -> JobResult {
+				const int code = child->Wait();
+				return [code](lua_State* L) {
+					lua_pushinteger(L, code);
+					return 1;
+				};
+			});
 		}
 
 		int ChildKill(lua_State* L)
@@ -1153,7 +1171,7 @@ namespace cluau::runtime::detail {
 			ChildBox* box = static_cast<ChildBox*>(lua_newuserdatadtor(L, sizeof(ChildBox), [](lua_State*, void* p) {
 				delete static_cast<ChildBox*>(p)->Process;
 			}));
-			box->Process = child.release();
+			box->Process = new std::shared_ptr<Child>(std::move(child));
 			luaL_getmetatable(L, kChildMeta);
 			lua_setmetatable(L, -2);
 			return 1;
@@ -1162,9 +1180,12 @@ namespace cluau::runtime::detail {
 		int ProcessSleep(lua_State* L)
 		{
 			const double seconds = luaL_checknumber(L, 1);
-			if (seconds > 0)
+			if (seconds <= 0)
+				return 0;
+			return Await(L, [seconds]() -> JobResult {
 				std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
-			return 0;
+				return [](lua_State*) { return 0; };
+			});
 		}
 
 		const luaL_Reg kProcess[] = {
@@ -1233,38 +1254,45 @@ namespace cluau::runtime::detail {
 			return WriteTo(L, stderr);
 		}
 
-		bool GetLine(lua_State* L, std::string& line)
-		{
-			if (!std::getline(std::cin, line))
-			{
-				RaiseIfInterrupted(L);
-				return false;
-			}
-			if (!line.empty() && line.back() == '\r')
-				line.pop_back();
-			return true;
-		}
+		// Standard input is read on a job's thread, one read at a time.
+		std::mutex g_Reading;
 
 		int IoReadLine(lua_State* L)
 		{
 			std::fflush(stdout);
-			std::string line;
-			if (!GetLine(L, line))
-				lua_pushnil(L);
-			else
-				lua_pushlstring(L, line.data(), line.size());
-			return 1;
+			return Await(L, []() -> JobResult {
+				std::lock_guard<std::mutex> reading(g_Reading);
+				auto line = std::make_shared<std::string>();
+				const bool got = (bool)std::getline(std::cin, *line);
+				if (got && !line->empty() && line->back() == '\r')
+					line->pop_back();
+				return [line, got](lua_State* L) {
+					if (!got)
+					{
+						RaiseIfInterrupted(L);
+						lua_pushnil(L);
+					}
+					else
+						lua_pushlstring(L, line->data(), line->size());
+					return 1;
+				};
+			});
 		}
 
 		int IoReadAll(lua_State* L)
 		{
 			std::fflush(stdout);
-			std::stringstream buffer;
-			buffer << std::cin.rdbuf();
-			RaiseIfInterrupted(L);
-			const std::string text = buffer.str();
-			lua_pushlstring(L, text.data(), text.size());
-			return 1;
+			return Await(L, []() -> JobResult {
+				std::lock_guard<std::mutex> reading(g_Reading);
+				std::stringstream buffer;
+				buffer << std::cin.rdbuf();
+				auto text = std::make_shared<std::string>(buffer.str());
+				return [text](lua_State* L) {
+					RaiseIfInterrupted(L);
+					lua_pushlstring(L, text->data(), text->size());
+					return 1;
+				};
+			});
 		}
 
 		int IoFlush(lua_State*)
@@ -2086,6 +2114,14 @@ namespace cluau::runtime::detail {
 			{ "encode", JsonEncodeFn }, { "decode", JsonDecodeFn }, { "object", JsonObjectFn }, { "array", JsonArrayFn }, { nullptr, nullptr },
 		};
 
+		bool Awaits(lua_CFunction f)
+		{
+			for (lua_CFunction awaiting : { ProcessRun, ProcessExec, ProcessSleep, ChildRead, ChildReadLine, ChildWait, IoReadLine, IoReadAll })
+				if (f == awaiting)
+					return true;
+			return false;
+		}
+
 	} // namespace
 
 	bool SandboxLeavesOut(const std::string& name) { return name == "fs" || name == "http" || name == "_packages"; }
@@ -2157,9 +2193,12 @@ namespace cluau::runtime::detail {
 		lua_setfield(L, -2, "regex");
 #endif
 
+		OpenJobs(L);
+		lua_setfield(L, -2, "_jobs");
+
 		lua_setfield(L, LUA_REGISTRYINDEX, kStdRegistry);
 
-		lua_pushcfunction(L, Input, "input");
+		lua_pushcclosurek(L, Input, "input", 0, AwaitContinue);
 		lua_setglobal(L, "input");
 	}
 

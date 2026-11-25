@@ -1,0 +1,62 @@
+// The standard library's blocking calls in tasks: programs run, sleeps,
+// a child's output and standard input each wait on their own, and the
+// other tasks run meanwhile.
+const task = require("@std/task")
+const process = require("@std/process")
+const io = require("@std/io")
+const time = require("@std/time")
+
+const started = time.monotonic()
+const runs: { task.Task<string> } = {}
+for (i = 1, 3) {
+	table.insert(runs, task.spawn(function(): string {
+		const result = process.run({ process.executable, "-e", `require("@std/process").sleep(0.3) print("run {i}")` })
+		const output = string.gsub(result.output, "%s+$", "")
+		return output
+	}))
+}
+const sleeper = task.spawn(function(): string {
+	process.sleep(0.3)
+	return "slept"
+})
+const reader = task.spawn(function(): { string } {
+	const lines: { string } = {}
+	while (true) {
+		const line = io.readLine()
+		if (line == nil) {
+			break
+		}
+		table.insert(lines, line)
+	}
+	return lines
+})
+const child = process.spawn({ process.executable, "-e", "for (i = 1, 3) { print(`line {i}`) }" })
+const listener = task.spawn(function(): { string } {
+	const heard: { string } = {}
+	for (line in child:lines()) {
+		const clean = string.gsub(line, "\r$", "")
+		table.insert(heard, clean)
+	}
+	table.insert(heard, `code {child:wait()}`)
+	return heard
+})
+
+for (_, run in runs) {
+	print(task.join(run))
+}
+print(task.join(sleeper))
+print("read", table.concat(task.join(reader), ", "))
+print("heard", table.concat(task.join(listener), ", "))
+// Three programs and a sleep of 0.3 seconds each, side by side.
+print("side by side", time.monotonic() - started < 1.0)
+
+// The script's own blocking call lets the tasks run too.
+const ticks: { number } = {}
+task.spawn(function() {
+	for (i = 1, 3) {
+		task.wait(0.02)
+		table.insert(ticks, i)
+	}
+})
+process.sleep(0.3)
+print("ticked while the script slept", #ticks)

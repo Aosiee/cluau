@@ -2,7 +2,7 @@
 	"name": "cluau",
 	"displayName": "cluau",
 	"description": "cluau, C-syntax-flavoured Luau: highlighting, the checker's errors, completion, hover and navigation as you type, and the debugger.",
-	"version": "0.19.0",
+	"version": "0.20.0",
 	"publisher": "aosiee",
 	"license": "SEE LICENSE IN LICENSE",
 	"repository": {

@@ -984,8 +984,9 @@ A pattern that backtracks too long on a text (nested repetition such as
 ### `@std/task`
 
 Tasks that run side by side on the script's one thread, for waiting on
-several things at once: each task is a function run as a coroutine, which
-runs until it waits, and the others run meanwhile.
+several things at once (downloads, programs, timers): each task is a
+function run as a coroutine, which runs until it waits, and the others run
+meanwhile.
 
 | function | is |
 |---|---|
@@ -1003,15 +1004,16 @@ whose function returns `(string, number)` gives `(string, number)`.
 ```
 const task = require("@std/task")
 
-const workers: { task.Task<string> } = {}
-for (i = 1, 3) {
-	table.insert(workers, task.spawn(function(): string {
-		task.wait(0.1 * (4 - i)) // the last one started finishes first
-		return `worker {i}`
+const http = require("@std/http")
+
+const pages: { task.Task<number> } = {}
+for (_, url in { "https://example.com", "https://example.org", "https://example.net" }) {
+	table.insert(pages, task.spawn(function(): number {
+		return #http.get(url).body // the three downloads run side by side
 	}))
 }
-for (_, worker in workers) {
-	print(task.join(worker)) // worker 1, worker 2, worker 3: 0.3 seconds in all
+for (_, page in pages) {
+	print(task.join(page))
 }
 ```
 
@@ -1023,9 +1025,17 @@ for (_, worker in workers) {
 - An error in a task is raised where the tasks are being run (a
   `task.wait` or `task.join` in the script's code, or the script's end),
   with the task's own stack in the report.
-- Tasks take turns: a task runs until it waits, so a long computation
-  without a `task.wait` holds the others up, and a blocking call (a
-  `process.run`, an `http.get`) blocks them all while it runs.
+- The standard library's blocking calls wait on their own: `@std/http`'s
+  requests and downloads, `process.run` and `process.exec`, a child's
+  `read`, `readLine`, `lines` and `wait`, `io.readLine`, `io.readAll` and
+  `input`, and `process.sleep`. In a task, the call runs on a thread of its
+  own while the task waits, and the other tasks run meanwhile; in the
+  script's own code, the tasks run until the call is done. So three
+  downloads in three tasks take as long as the slowest, not the three
+  together.
+- Tasks still take turns over the script's own code: a long computation
+  without a `task.wait` holds the others up, as do the calls that finish at
+  once (files, JSON, paths).
 
 ## Embedding the runtime
 

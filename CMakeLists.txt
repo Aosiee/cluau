@@ -141,7 +141,7 @@ if(CLUAU_BUILD_RUNTIME)
         COMMENT "Embedding the standard modules written in cluau")
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
         src/runtime/Check.cpp src/runtime/Json.cpp src/runtime/LanguageService.cpp src/runtime/LspServer.cpp
-        src/runtime/Debugger.cpp src/runtime/DapServer.cpp src/runtime/Profile.cpp
+        src/runtime/Debugger.cpp src/runtime/DapServer.cpp src/runtime/Profile.cpp src/runtime/Jobs.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
