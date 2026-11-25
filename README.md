@@ -38,9 +38,9 @@ without running it, `cluau test` runs its test files, `cluau fmt` formats
 it, and `cluau add` brings in packages from Git repositories. Scripts run
 as native code on x64 and arm64, and `cluau --sandbox` runs one without
 file, network or process access. `cluau lsp` is a language server for
-editors, and the VS Code extension
-([`editors/vscode`](editors/vscode/README.md)) brings it and highlighting
-to VS Code.
+editors, `cluau debug` a debugger for them, and the VS Code extension
+([`editors/vscode`](editors/vscode/README.md)) brings both, and
+highlighting, to VS Code.
 
 ```
 #!/usr/bin/env cluau

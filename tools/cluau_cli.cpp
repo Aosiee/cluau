@@ -73,6 +73,8 @@ namespace {
 		"                                           type-check scripts (and the modules they require) without running them\n"
 		"       cluau lsp [--module <@alias/name>=<file>]...\n"
 		"                                           the language server, for editors (on standard input and output)\n"
+		"       cluau debug                         the debugger, for editors (the Debug Adapter Protocol, on standard\n"
+		"                                           input and output)\n"
 		"       cluau translate [--manifest|--script] <file.cluau>\n"
 		"       cluau convert [--verify] <file.luau>\n"
 		"       cluau fmt [--check] [--indent <text>] [path...]   format .cluau files (every one under a directory; no path: .)\n"
@@ -334,6 +336,19 @@ namespace {
 		return cluau::runtime::ServeLanguageServer(options);
 	}
 
+	// cluau debug: the debug adapter, on standard input and output. The
+	// editor's launch request names the script.
+	int Debug(int argc, char** argv)
+	{
+		for (int i = 2; i < argc; i++)
+			if (std::string(argv[i]) != "--stdio")
+				return Usage();
+		cluau::runtime::Options options;
+		options.SearchPath = SearchPath();
+		options.Sandbox = g_Sandbox;
+		return cluau::runtime::ServeDebugAdapter(options);
+	}
+
 	int Check(int argc, char** argv)
 	{
 		std::vector<std::string> files;
@@ -517,6 +532,8 @@ int main(int argc, char** argv)
 		return Check(argc, argv);
 	if (first == "lsp")
 		return Lsp(argc, argv);
+	if (first == "debug")
+		return Debug(argc, argv);
 	if (first == "test")
 		return Test(argc, argv);
 	if (first == "init" || first == "add" || first == "remove" || first == "install" || first == "update" || first == "list")

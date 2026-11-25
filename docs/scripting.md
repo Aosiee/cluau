@@ -41,6 +41,7 @@ print(repr(counter.Counts))
 | `cluau test [-k text] [path...]` | runs the test cases in `*_test.cluau` files (see [Testing](#testing)) |
 | `cluau fmt [--check] [path...]` | formats `.cluau` files (see [Formatting](#formatting)) |
 | `cluau lsp` | the language server, for editors (see [Editors](#editors)) |
+| `cluau debug` | the debugger, for editors (see [Debugging](#debugging)) |
 | `cluau --sandbox script.cluau` | a script without file, network or process access (see [The sandbox](#the-sandbox)) |
 
 The arguments after the script are `process.args`. A script's first line
@@ -245,8 +246,9 @@ modules.
 
 The VS Code extension (in `editors/vscode`; on the VS Code Marketplace and
 Open VSX as *cluau*, and as a `.vsix` with each release) starts it, and
-adds highlighting and a *Run File* command. It needs `cluau` on `PATH` (or
-the `cluau.path` setting).
+adds highlighting, the debugger (see [Debugging](#debugging)) and *Run
+File* and *Debug File* commands. It needs `cluau` on `PATH` (or the
+`cluau.path` setting).
 
 Another editor runs `cluau lsp` on standard input and output for the
 `cluau` file type. In Neovim (0.11 or later):
@@ -270,6 +272,75 @@ scope = "source.cluau"
 file-types = ["cluau"]
 comment-token = "//"
 language-servers = ["cluau"]
+```
+
+## Debugging
+
+`cluau debug` is a debugger for editors: it speaks the Debug Adapter
+Protocol on standard input and output, and the editor's launch
+configuration names the script. In VS Code, with the extension, F5 (or
+*cluau: Debug File*) debugs the current file; a `launch.json`
+configuration takes:
+
+| attribute | is |
+|---|---|
+| `program` | the script (required) |
+| `args` | its arguments (`process.args`) |
+| `cwd` | the directory it runs in (the script's own when not given) |
+| `stopOnEntry` | pause at its first line |
+| `sandbox` | run it in [the sandbox](#the-sandbox) |
+
+What it does:
+
+- Breakpoints, in the script and the modules it requires. A condition is
+  a cluau expression (`count > 10 && name != "x"`); a hit count pauses from
+  that hit on (`5`), or at `== 5`, `> 5`, `< 5`, `<= 5`, or every fifth hit
+  (`% 5`); a log message prints instead of pausing, with each
+  `{expression}` replaced by its value. A breakpoint on a line without code
+  moves to the next line that has some.
+- Pausing on an error that ends the script (on by default), or on every
+  error, including those a `try` catches (*All Errors*).
+- Stepping over, into and out of calls, including into a module's top
+  level from its `require` and through coroutines; pausing a running
+  script.
+- The paused stack: each frame's locals and upvalues, with tables and class
+  instances opened field by field (an instance shows its class), and
+  expressions (the watch list, hovers, the debug console) evaluated in the
+  selected frame. They read the script's variables; an assignment there
+  changes nothing in the script.
+- The script's output, and that of the programs it runs, in the debug
+  console. Its standard input is empty.
+
+Under the debugger the script runs interpreted (as `--no-native`), at the
+same speed. A step inside a function called from Luau's own C code (a
+`table.sort` comparator, a `__tostring` or `__index` function) continues
+instead, with a note in the console.
+
+In Neovim, with nvim-dap:
+
+```lua
+local dap = require("dap")
+dap.adapters.cluau = { type = "executable", command = "cluau", args = { "debug" } }
+dap.configurations.cluau = {
+	{ type = "cluau", request = "launch", name = "Debug the current file", program = "${file}", cwd = "${fileDirname}" },
+}
+```
+
+In Helix, in the `cluau` language of `languages.toml` (see
+[Editors](#editors)):
+
+```toml
+[language.debugger]
+name = "cluau"
+transport = "stdio"
+command = "cluau"
+args = ["debug"]
+
+[[language.debugger.templates]]
+name = "launch"
+request = "launch"
+completion = [{ name = "script", completion = "filename", default = "." }]
+args = { program = "{0}" }
 ```
 
 ## The interactive prompt

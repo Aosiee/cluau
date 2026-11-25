@@ -791,11 +791,15 @@ namespace cluau::runtime::detail {
 
 		// ---- @std/process ---------------------------------------------------
 
+		void (*g_ExitHook)(int) = nullptr;
+
 		int ProcessExit(lua_State* L)
 		{
 			const int code = (int)luaL_optinteger(L, 1, 0);
 			std::fflush(stdout);
 			std::fflush(stderr);
+			if (g_ExitHook)
+				g_ExitHook(code);
 			std::exit(code);
 		}
 
@@ -2172,5 +2176,7 @@ namespace cluau::runtime::detail {
 		return "@std/fs, @std/path, @std/process, @std/io, @std/json, @std/time, @std/args, @std/csv";
 #endif
 	}
+
+	void SetExitHook(void (*hook)(int code)) { g_ExitHook = hook; }
 
 } // namespace cluau::runtime::detail

@@ -1,6 +1,7 @@
 #include "test.h"
 
 #include "cluau/runtime.h"
+#include "DapServer.h"
 #include "Json.h"
 #include "LspServer.h"
 
@@ -8,10 +9,15 @@
 #include "lualib.h"
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <random>
+#include <thread>
 
 namespace {
 
@@ -472,4 +478,364 @@ TEST("lsp: columns are UTF-16 code units, and messages are framed on the wire")
 	CHECK(written.find("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}") != std::string::npos);
 	std::fclose(in);
 	std::fclose(out);
+}
+
+// ---- The debugger ------------------------------------------------------------
+
+namespace {
+
+	using cluau::runtime::detail::DapServer;
+
+	// The debug adapter on a thread of its own, as an editor drives it.
+	struct Debug
+	{
+		std::mutex Mutex;
+		std::condition_variable Arrived;
+		std::deque<Json> Messages;
+		std::vector<std::string> Console; // the debugger's own output
+		std::unique_ptr<DapServer> Server;
+		std::thread Runner;
+		std::filesystem::path Cwd = std::filesystem::current_path();
+		int Seq = 0;
+
+		Debug()
+		{
+			DapServer::Io io;
+			io.Send = [this](const std::string& text) {
+				std::optional<Json> m = Json::Parse(text);
+				std::lock_guard<std::mutex> lock(Mutex);
+				if (m && (*m)["event"].String() == "output" && (*m)["body"]["category"].String() == "console")
+					Console.push_back((*m)["body"]["output"].String());
+				else if (m)
+					Messages.push_back(std::move(*m));
+				Arrived.notify_all();
+			};
+			Server = std::make_unique<DapServer>(std::move(io));
+			Runner = std::thread([this] { Server->Run(); });
+		}
+
+		~Debug()
+		{
+			Send("disconnect", Json::Object());
+			Server->EndOfInput();
+			Runner.join();
+			std::error_code ec;
+			std::filesystem::current_path(Cwd, ec);
+		}
+
+		int Send(const std::string& command, Json arguments)
+		{
+			Server->Receive(Json::Object()
+								.Set("seq", ++Seq)
+								.Set("type", "request")
+								.Set("command", command)
+								.Set("arguments", std::move(arguments))
+								.Dump());
+			return Seq;
+		}
+
+		// The first message (in order) that `match` takes; null after 10 seconds.
+		template <typename F>
+		Json Next(F match, const std::string& what)
+		{
+			std::unique_lock<std::mutex> lock(Mutex);
+			for (;;)
+			{
+				for (auto it = Messages.begin(); it != Messages.end(); ++it)
+					if (match(*it))
+					{
+						Json m = *it;
+						Messages.erase(it);
+						return m;
+					}
+				if (Arrived.wait_for(lock, std::chrono::seconds(10)) == std::cv_status::timeout)
+				{
+					cluau_test::Fail(__FILE__, __LINE__, "no " + what);
+					return {};
+				}
+			}
+		}
+
+		Json Request(const std::string& command, Json arguments = Json::Object())
+		{
+			const int seq = Send(command, std::move(arguments));
+			return Next([&](const Json& m) { return m["type"].String() == "response" && m["request_seq"].Int() == seq; }, command + "'s response");
+		}
+
+		Json Event(const std::string& name)
+		{
+			return Next([&](const Json& m) { return m["type"].String() == "event" && m["event"].String() == name; }, "'" + name + "' event");
+		}
+
+		// initialize, launch, the breakpoints, configurationDone.
+		void Start(const std::filesystem::path& program, const std::vector<std::pair<std::filesystem::path, Json>>& breakpoints, Json launch = Json::Object(),
+			Json filters = Json::Array().Push("uncaught"))
+		{
+			Request("initialize", Json::Object().Set("adapterID", "cluau"));
+			launch.Set("program", program.u8string()).Set("cwd", program.parent_path().u8string());
+			CHECK(Request("launch", std::move(launch))["success"].Bool());
+			for (const auto& [file, list] : breakpoints)
+				Request("setBreakpoints", Json::Object().Set("source", Json::Object().Set("path", file.u8string())).Set("breakpoints", list));
+			Request("setExceptionBreakpoints", Json::Object().Set("filters", std::move(filters)));
+			Request("configurationDone");
+		}
+
+		// The next pause: its reason, and the stack's top frame.
+		Json Stopped(std::string* reason = nullptr)
+		{
+			const Json stopped = Event("stopped");
+			if (reason)
+				*reason = stopped["body"]["reason"].String();
+			return Request("stackTrace", Json::Object().Set("threadId", 1))["body"]["stackFrames"];
+		}
+
+		// A frame's locals (or a table's fields), by name.
+		std::map<std::string, Json> Variables(int reference)
+		{
+			std::map<std::string, Json> out;
+			const Json response = Request("variables", Json::Object().Set("variablesReference", reference));
+			for (const Json& v : response["body"]["variables"].Items())
+				out[v["name"].String()] = v;
+			return out;
+		}
+
+		std::map<std::string, Json> Locals(int frame = 1)
+		{
+			const Json scopes = Request("scopes", Json::Object().Set("frameId", frame))["body"]["scopes"];
+			return Variables(scopes[0]["variablesReference"].Int());
+		}
+	};
+
+	Json Line(int line) { return Json::Object().Set("line", line); }
+
+	// A script and a module in a directory of their own.
+	struct Scripts
+	{
+		std::filesystem::path Dir, Main, Geo;
+
+		explicit Scripts(const std::string& main)
+		{
+			std::filesystem::create_directories(TempDir() / "dap");
+			Dir = std::filesystem::canonical(TempDir() / "dap");
+			Main = Dir / "main.cluau";
+			Geo = Dir / "geo.cluau";
+			std::ofstream(Geo, std::ios::binary) << "class Point {\n"           // 1
+													"\tx: number = 0\n"          // 2
+													"\ty: number = 0\n"          // 3
+													"\tfunction Init(x: number, y: number) {\n"
+													"\t\tself.x = x\n"           // 5
+													"\t\tself.y = y\n"           // 6
+													"\t}\n"                      // 7
+													"\tfunction Length(): number {\n"
+													"\t\tlet squared = self.x * self.x + self.y * self.y\n" // 9
+													"\t\treturn math.sqrt(squared)\n" // 10
+													"\t}\n"
+													"}\n"
+													"return { Point = Point }\n";
+			std::ofstream(Main, std::ios::binary) << main;
+		}
+	};
+
+} // namespace
+
+TEST("debug: a breakpoint pauses with the frame's locals, its stack and expressions in it")
+{
+	Scripts scripts("const geo = require(\"./geo\")\n" // 1
+					"let p = geo.Point(3, 4)\n"          // 2
+					"let len = p:Length()\n"             // 3
+					"print(len)\n");                     // 4
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Geo, Json::Array().Push(Line(10)) } });
+	const Json frames = d.Stopped();
+	CHECK_EQ(frames.Size(), size_t(2));
+	CHECK_EQ(frames[0]["name"].String(), std::string("Length"));
+	CHECK_EQ(frames[0]["line"].Int(), 10);
+	CHECK_EQ(frames[0]["source"]["path"].String(), scripts.Geo.u8string());
+	CHECK_EQ(frames[1]["name"].String(), std::string("(top level)"));
+	CHECK_EQ(frames[1]["line"].Int(), 3);
+
+	std::map<std::string, Json> locals = d.Locals();
+	CHECK_EQ(locals["squared"]["value"].String(), std::string("25"));
+	CHECK_EQ(locals["self"]["type"].String(), std::string("Point"));
+	std::map<std::string, Json> fields = d.Variables(locals["self"]["variablesReference"].Int());
+	CHECK_EQ(fields["x"]["value"].String(), std::string("3"));
+	CHECK_EQ(fields["y"]["value"].String(), std::string("4"));
+	const std::string p = d.Locals(2)["p"]["value"].String(); // the fields in the table's order
+	CHECK(p.rfind("Point {", 0) == 0 && p.find("x = 3") != std::string::npos && p.find("y = 4") != std::string::npos);
+
+	// cluau's operators, in the frame's scope.
+	const Json value = d.Request("evaluate", Json::Object().Set("expression", "squared != 25 || self.x + self.y == 7").Set("frameId", 1));
+	CHECK_EQ(value["body"]["result"].String(), std::string("true"));
+	const Json broken = d.Request("evaluate", Json::Object().Set("expression", "squared +").Set("frameId", 1));
+	CHECK(!broken["success"].Bool());
+
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: stepping over, into and out")
+{
+	Scripts scripts("const geo = require(\"./geo\")\n" // 1
+					"let p = geo.Point(3, 4)\n"          // 2
+					"let len = p:Length()\n"             // 3
+					"let twice = len * 2\n");            // 4
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(2)) } });
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 2);
+	d.Request("next", Json::Object().Set("threadId", 1));
+	std::string reason;
+	CHECK_EQ(d.Stopped(&reason)[0]["line"].Int(), 3);
+	CHECK_EQ(reason, std::string("step"));
+	d.Request("stepIn", Json::Object().Set("threadId", 1));
+	Json frames = d.Stopped();
+	CHECK_EQ(frames[0]["name"].String(), std::string("Length"));
+	CHECK_EQ(frames[0]["line"].Int(), 9);
+	d.Request("next", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 10);
+	d.Request("stepOut", Json::Object().Set("threadId", 1));
+	frames = d.Stopped();
+	CHECK_EQ(frames[0]["source"]["path"].String(), scripts.Main.u8string());
+	CHECK(frames[0]["line"].Int() >= 3);
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: a step enters a module's top level, and steps through a coroutine")
+{
+	Scripts scripts("const geo = require(\"./geo\")\n"                 // 1
+					"let co = coroutine.create(function(n: number) {\n" // 2
+					"\tlet doubled = n * 2\n"                           // 3
+					"\tcoroutine.yield(doubled)\n"                      // 4
+					"\treturn doubled + 1\n"                            // 5
+					"})\n"                                              // 6
+					"let _, first = coroutine.resume(co, 5)\n"          // 7
+					"let _, second = coroutine.resume(co)\n"            // 8
+					"let sum = first + second\n");                      // 9
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(1)).Push(Line(3)) } });
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 1);
+	d.Request("stepIn", Json::Object().Set("threadId", 1));
+	Json frames = d.Stopped();
+	CHECK_EQ(frames[0]["source"]["path"].String(), scripts.Geo.u8string());
+	CHECK_EQ(frames[0]["name"].String(), std::string("(top level)"));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 3);
+	d.Request("next", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 4);
+	CHECK_EQ(d.Locals()["doubled"]["value"].String(), std::string("10"));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: conditions, hit counts and log messages")
+{
+	Scripts scripts("let total = 0\n"        // 1
+					"for (i = 1, 10) {\n"     // 2
+					"\ttotal += i\n"          // 3
+					"}\n");                   // 4
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array()
+												 .Push(Json::Object().Set("line", 3).Set("logMessage", "i={i}"))
+												 .Push(Json::Object().Set("line", 3).Set("condition", "i > 4 && i != 6").Set("hitCondition", "2")) } });
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 3);
+	CHECK_EQ(d.Locals()["i"]["value"].String(), std::string("7")); // the second hit with i > 4 and not 6
+	d.Request("setBreakpoints", Json::Object()
+									.Set("source", Json::Object().Set("path", scripts.Main.u8string()))
+									.Set("breakpoints", Json::Array().Push(Json::Object().Set("line", 3).Set("condition", "nope +"))));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	std::lock_guard<std::mutex> lock(d.Mutex);
+	CHECK(d.Console.size() >= 7);
+	if (d.Console.size() >= 7)
+	{
+		CHECK_EQ(d.Console[0], std::string("i=1\n"));
+		CHECK_EQ(d.Console[6], std::string("i=7\n"));
+	}
+}
+
+TEST("debug: a breakpoint that does not compile is not verified; one on a blank line moves to the code")
+{
+	Scripts scripts("let a = 1\n" // 1
+					"\n"          // 2
+					"let b = 2\n" // 3
+					"print(a + b)\n");
+	Debug d;
+	d.Request("initialize", Json::Object());
+	const Json set = d.Request("setBreakpoints", Json::Object()
+												  .Set("source", Json::Object().Set("path", scripts.Main.u8string()))
+												  .Set("breakpoints", Json::Array().Push(Line(2))));
+	CHECK_EQ(set["body"]["breakpoints"][0]["line"].Int(), 2);
+	d.Request("launch", Json::Object().Set("program", scripts.Main.u8string()));
+	d.Request("configurationDone");
+	const Json moved = d.Event("breakpoint");
+	CHECK_EQ(moved["body"]["breakpoint"]["line"].Int(), 3);
+	CHECK_EQ(moved["body"]["breakpoint"]["id"].Int(), set["body"]["breakpoints"][0]["id"].Int());
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 3);
+
+	const Json bad = d.Request("setBreakpoints", Json::Object()
+												  .Set("source", Json::Object().Set("path", scripts.Main.u8string()))
+												  .Set("breakpoints", Json::Array().Push(Json::Object().Set("line", 4).Set("condition", "a +"))));
+	CHECK(!bad["body"]["breakpoints"][0]["verified"].Bool());
+	CHECK(bad["body"]["breakpoints"][0]["message"].String().find("condition") != std::string::npos);
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: errors pause where they are raised, caught ones when asked")
+{
+	Scripts scripts("function check(n: number) {\n" // 1
+					"\tif (n > 1) {\n"             // 2
+					"\t\tthrow `too big: {n}`\n"   // 3
+					"\t}\n"                        // 4
+					"}\n"                           // 5
+					"try {\n"                       // 6
+					"\tcheck(2)\n"                 // 7
+					"} catch (error) {\n"           // 8
+					"}\n"                           // 9
+					"check(3)\n");                  // 10
+	{
+		Debug d;
+		d.Start(scripts.Main, {}, Json::Object(), Json::Array().Push("all"));
+		std::string reason;
+		Json frames = d.Stopped(&reason);
+		CHECK_EQ(reason, std::string("exception"));
+		CHECK_EQ(frames[0]["line"].Int(), 3);
+		CHECK_EQ(d.Locals()["n"]["value"].String(), std::string("2"));
+		CHECK_EQ(d.Request("exceptionInfo", Json::Object().Set("threadId", 1))["body"]["breakMode"].String(), std::string("always"));
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		frames = d.Stopped(&reason);
+		CHECK_EQ(d.Locals()["n"]["value"].String(), std::string("3"));
+		CHECK_EQ(d.Request("exceptionInfo", Json::Object().Set("threadId", 1))["body"]["breakMode"].String(), std::string("unhandled"));
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 1);
+	}
+	{
+		Debug d;
+		d.Start(scripts.Main, {});
+		d.Stopped();
+		CHECK_EQ(d.Locals()["n"]["value"].String(), std::string("3")); // the caught one passed
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 1);
+	}
+}
+
+TEST("debug: stopping on entry, pausing a running script, and ending it")
+{
+	Scripts scripts("let spins = 0\n"     // 1
+					"while (true) {\n"    // 2
+					"\tspins += 1\n"      // 3
+					"}\n");               // 4
+	Debug d;
+	d.Start(scripts.Main, {}, Json::Object().Set("stopOnEntry", true));
+	std::string reason;
+	CHECK_EQ(d.Stopped(&reason)[0]["line"].Int(), 1);
+	CHECK_EQ(reason, std::string("entry"));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	d.Request("pause", Json::Object().Set("threadId", 1));
+	d.Stopped(&reason);
+	CHECK_EQ(reason, std::string("pause"));
+	CHECK(d.Locals()["spins"]["value"].String() != "0");
+	d.Request("terminate");
+	d.Event("terminated");
 }

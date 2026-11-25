@@ -159,4 +159,16 @@ namespace cluau::runtime {
 	// options are the checker's. Returns the exit status.
 	int ServeLanguageServer(const CheckOptions& options = {});
 
+	// ---- the debugger (`cluau debug`) -------------------------------------
+
+	// Speaks the Debug Adapter Protocol on standard input and output: the
+	// editor launches a script, sets breakpoints (with conditions, hit
+	// counts and log messages), and steps through it, reading the paused
+	// frames' variables and evaluating expressions in them. The script's
+	// output comes to the editor as output events; its standard input is
+	// empty. `options` is where each launch starts (the search path); the
+	// launch gives the script, its arguments and its directory. Returns the
+	// exit status.
+	int ServeDebugAdapter(const Options& options = {});
+
 } // namespace cluau::runtime

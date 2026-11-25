@@ -2,6 +2,7 @@
 // for .cluau / .luau files, the REPL and `repr`.
 
 #include "cluau/runtime.h"
+#include "Debugger.h"
 #include "Resolve.h"
 #include "Std.h"
 
@@ -211,6 +212,9 @@ __cluau_meta = {
 			std::string Source; // written in cluau, when Open is null
 		};
 		std::map<std::string, HostModule> HostModules;
+		// A debugger (`cluau debug`): told of each chunk loaded and of an
+		// error that ends the script; null otherwise.
+		detail::DebugHooks* Debug = nullptr;
 
 		// The sandbox's files: a module required in it must be under the
 		// main script's directory, a search directory, or a cluau_modules
@@ -378,12 +382,16 @@ __cluau_meta = {
 
 			Luau::CompileOptions copts;
 			// Level 1: level 2's inlining measured no faster on scripts, and
-			// it takes inlined calls' frames out of tracebacks.
-			copts.optimizationLevel = 1;
-			copts.debugLevel = 1;
+			// it takes inlined calls' frames out of tracebacks. A debugger
+			// gets unoptimised code (each line's own instructions) and the
+			// locals' names.
+			copts.optimizationLevel = Debug ? 0 : 1;
+			copts.debugLevel = Debug ? 2 : 1;
 			const std::string bytecode = Luau::compile(result.Luau, copts);
 			const std::string chunkname = "@" + name;
 			const bool loadFailed = luau_load(L, chunkname.c_str(), bytecode.data(), bytecode.size(), 0) != 0;
+			if (!loadFailed && Debug)
+				Debug->OnLoaded(L, name, FileOf(name));
 			// Native code costs about 5 microseconds a line to generate: the
 			// bundled modules that only parse arguments, run tests or manage
 			// packages stay interpreted; @std/csv's parsing gains from it.
@@ -405,6 +413,17 @@ __cluau_meta = {
 			return LoadStatus::Ok;
 		}
 
+		// The file a chunk was loaded from, as an absolute path ("" for one
+		// with no file: a standard or host module, `-e`, the prompt).
+		std::string FileOf(const std::string& name) const
+		{
+			if (name.empty() || name[0] == '@' || name[0] == '=' || name == "-e" || name == "stdin")
+				return {};
+			std::error_code ec;
+			const fs::path path = (StartDir / fs::u8path(name)).lexically_normal();
+			return fs::is_regular_file(path, ec) ? ToUtf8(path) : std::string();
+		}
+
 		// Runs the chunk on top of L's stack in a thread (so an error keeps
 		// its stack for the backtrace). On success the thread is left on
 		// L's stack with the results on its own; returns it, or nullptr
@@ -417,8 +436,13 @@ __cluau_meta = {
 			lua_xmove(L, T, 1);
 			g_Interrupt = 0;
 			g_Interrupted = false;
-			lua_callbacks(L)->interrupt = Interrupt;
-			const int status = lua_resume(T, nullptr, 0);
+			// A debugger keeps the interrupt callback, and a thread it breaks
+			// out of the VM (to step) is resumed where it stopped.
+			if (!Debug)
+				lua_callbacks(L)->interrupt = Interrupt;
+			int status = lua_resume(T, nullptr, 0);
+			while (Debug && status == LUA_BREAK)
+				status = Debug->ResumeBroken(T);
 			if (status == LUA_OK)
 				return T;
 			std::string message;
@@ -428,6 +452,8 @@ __cluau_meta = {
 				message = lua_tostring(T, -1);
 			else
 				message = std::string("(an error value of type ") + luaL_typename(T, -1) + ")";
+			if (Debug)
+				Debug->OnUncaught(T, message);
 			std::fflush(stdout);
 			std::string trace = lua_debugtrace(T);
 			while (!trace.empty() && trace.back() == '\n')
@@ -483,7 +509,23 @@ __cluau_meta = {
 			return 1;
 		}
 
-		int Require(lua_State* L)
+		// A module's chunk, to run: by CallModule, or (under a debugger, so
+		// that stepping can enter it) by the require written in Luau, which
+		// gets nil, the chunk and its key, runs the chunk and gives the
+		// value to RequireFinish. (There, a module whose top level fails
+		// stays marked as loading: requiring it again reports a cycle.)
+		int RunModule(lua_State* L, Runtime::Impl& rt, const std::string& key, bool deferred)
+		{
+			if (!deferred)
+				return CallModule(L, rt, key);
+			rt.Loading.insert(key);
+			lua_pushnil(L);
+			lua_insert(L, -2);
+			lua_pushlstring(L, key.data(), key.size());
+			return 3;
+		}
+
+		int RequireWith(lua_State* L, bool deferred)
 		{
 			Runtime::Impl& rt = Runtime::Impl::Get(L);
 			const std::string name = luaL_checkstring(L, 1);
@@ -531,7 +573,7 @@ __cluau_meta = {
 						lua_error(L);
 					}
 				}
-				return CallModule(L, rt, name);
+				return RunModule(L, rt, name, deferred);
 			}
 			if (StartsWith(name, "@"))
 				luaL_error(L, "unknown alias in '%s' (the standard modules are @std/<name>)", name.c_str());
@@ -542,7 +584,7 @@ __cluau_meta = {
 			lua_Debug ar;
 			for (int level = 1; lua_getinfo(L, level, "s", &ar); level++)
 			{
-				if (!ar.source || std::strcmp(ar.source, "=[C]") == 0)
+				if (!ar.source || std::strcmp(ar.source, "=[C]") == 0 || std::strcmp(ar.source, "=require") == 0)
 					continue;
 				if (ar.source[0] == '@')
 					from = (rt.StartDir / fs::u8path(ar.source + 1)).parent_path();
@@ -583,8 +625,42 @@ __cluau_meta = {
 				lua_pushlstring(L, error.data(), error.size());
 				lua_error(L);
 			}
-			return CallModule(L, rt, key);
+			return RunModule(L, rt, key, deferred);
 		}
+
+		int Require(lua_State* L) { return RequireWith(L, false); }
+		int RequireDeferred(lua_State* L) { return RequireWith(L, true); }
+
+		// The deferred require's second half: the module ran; its value (true
+		// for none) is kept under its key and returned.
+		int RequireFinish(lua_State* L)
+		{
+			Runtime::Impl& rt = Runtime::Impl::Get(L);
+			const std::string key = luaL_checkstring(L, 1);
+			rt.Loading.erase(key);
+			lua_settop(L, 2);
+			if (lua_isnil(L, 2))
+			{
+				lua_pop(L, 1);
+				lua_pushboolean(L, 1);
+			}
+			lua_getfield(L, LUA_REGISTRYINDEX, kModulesRegistry);
+			lua_pushvalue(L, 2);
+			lua_setfield(L, -2, key.c_str());
+			lua_pop(L, 1);
+			return 1;
+		}
+
+		constexpr const char* kDeferredRequire = R"LUAU(
+local load, finish = ...
+return function(name)
+	local value, chunk, key = load(name)
+	if chunk == nil then
+		return value
+	end
+	return finish(key, chunk())
+end
+)LUAU";
 
 		// ---- repr ---------------------------------------------------------
 
@@ -1144,6 +1220,68 @@ __cluau_meta = {
 		if (interactive)
 			std::printf("\n");
 		return 0;
+	}
+
+	void detail::SetDebugHooks(lua_State* L, DebugHooks* hooks)
+	{
+		Runtime::Impl& rt = Runtime::Impl::Get(L);
+		rt.Debug = hooks;
+		if (!hooks)
+		{
+			lua_pushcfunction(L, Require, "require");
+			lua_setglobal(L, "require");
+			return;
+		}
+		Luau::CompileOptions copts;
+		copts.debugLevel = 1;
+		const std::string bytecode = Luau::compile(kDeferredRequire, copts);
+		if (luau_load(L, "=require", bytecode.data(), bytecode.size(), 0) != 0)
+		{
+			lua_pop(L, 1);
+			return;
+		}
+		lua_pushcfunction(L, RequireDeferred, "require");
+		lua_pushcfunction(L, RequireFinish, "require");
+		lua_call(L, 2, 1);
+		lua_setglobal(L, "require");
+	}
+
+	std::string detail::CompileExpression(const std::string& expression, bool luau, std::string& error)
+	{
+		std::string source = "return (" + expression + ")";
+		if (!luau)
+		{
+			TranslateOptions options;
+			options.Script = true;
+			options.Profile = &ScriptProfile();
+			const TranslateResult result = Translate(source, options);
+			for (const Diagnostic& d : result.Diagnostics)
+				if (!d.Warning)
+				{
+					error = d.Message;
+					return {};
+				}
+			source = result.Luau;
+		}
+		Luau::CompileOptions copts;
+		copts.debugLevel = 1;
+		std::string bytecode = Luau::compile(source, copts);
+		if (bytecode.empty() || bytecode[0] == 0)
+		{
+			error = bytecode.size() > 1 ? bytecode.substr(1) : "the expression does not compile";
+			// Luau's message starts with the chunk's position (":1: ").
+			if (error.size() > 4 && error.compare(0, 4, ":1: ") == 0)
+				error = error.substr(4);
+			return {};
+		}
+		return bytecode;
+	}
+
+	std::string detail::ChunkSource(lua_State* L, const std::string& name)
+	{
+		const Runtime::Impl& rt = Runtime::Impl::Get(L);
+		auto it = rt.Sources.find(name);
+		return it == rt.Sources.end() ? std::string() : it->second;
 	}
 
 } // namespace cluau::runtime

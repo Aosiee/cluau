@@ -1,5 +1,6 @@
 // The cluau extension: the language server (`cluau lsp`) for .cluau files,
-// and a command that runs the file in a terminal.
+// the debugger (`cluau debug`), and a command that runs the file in a
+// terminal.
 
 "use strict";
 const path = require("path");
@@ -48,7 +49,7 @@ async function start() {
 		const install = "How to install";
 		const choice = await vscode.window.showErrorMessage(
 			`The cluau language server did not start (${program} lsp): ${error.message}. ` +
-				"It needs cluau 0.15.0 or later on PATH, or the cluau.path setting.",
+				"It needs cluau 0.16.0 or later on PATH, or the cluau.path setting.",
 			install
 		);
 		if (choice === install) vscode.env.openExternal(vscode.Uri.parse("https://github.com/Aosiee/cluau#installing"));
@@ -77,10 +78,56 @@ async function runFile() {
 	terminal.sendText(`${quote(program)} ${target}`);
 }
 
+// F5 with no launch.json, or a configuration without a program: the
+// current file, in its own directory.
+const debugConfigurations = {
+	resolveDebugConfiguration(folder, config) {
+		if (!config.type && !config.request && !config.name) {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor || editor.document.languageId !== "cluau") return config;
+			config.type = "cluau";
+			config.request = "launch";
+			config.name = "Debug the current file";
+			config.program = "${file}";
+		}
+		return config;
+	},
+	resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
+		if (!config.program) {
+			vscode.window.showErrorMessage('The cluau launch configuration names no "program" (the script to debug).');
+			return undefined;
+		}
+		if (!config.cwd) config.cwd = path.dirname(config.program);
+		return config;
+	},
+};
+
+const debugAdapters = {
+	createDebugAdapterDescriptor() {
+		return new vscode.DebugAdapterExecutable(settings().program, ["debug"]);
+	},
+};
+
+async function debugFile() {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor || editor.document.languageId !== "cluau") return;
+	if (editor.document.isDirty) await editor.document.save();
+	const file = editor.document.uri.fsPath;
+	await vscode.debug.startDebugging(vscode.workspace.getWorkspaceFolder(editor.document.uri), {
+		type: "cluau",
+		request: "launch",
+		name: `Debug ${path.basename(file)}`,
+		program: file,
+	});
+}
+
 async function activate(context) {
 	output = vscode.window.createOutputChannel("cluau");
 	context.subscriptions.push(output);
 	context.subscriptions.push(vscode.commands.registerCommand("cluau.run", runFile));
+	context.subscriptions.push(vscode.commands.registerCommand("cluau.debug", debugFile));
+	context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider("cluau", debugConfigurations));
+	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory("cluau", debugAdapters));
 	context.subscriptions.push(
 		vscode.commands.registerCommand("cluau.restartServer", async () => {
 			await stop();

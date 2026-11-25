@@ -49,4 +49,8 @@ namespace cluau::runtime::detail {
 	// stopped it, raises the `interrupted` error (and does not return).
 	void RaiseIfInterrupted(lua_State* L);
 
+	// Called with the exit status when a script calls `process.exit`,
+	// before the process ends (the debugger reports the end); null for none.
+	void SetExitHook(void (*hook)(int code));
+
 } // namespace cluau::runtime::detail
