@@ -4,7 +4,9 @@
 # those packages on each platform, and all of it published as a GitHub
 # release whose notes are the tag's message. A tag pushed from here on
 # releases by itself; an existing tag (one made before this workflow) is
-# released by running the workflow by hand with its name.
+# released by running the workflow by hand with its name. A run by hand with
+# `publish` off builds and tests everything (from `ref`, a branch, when
+# given) and publishes nothing: a release's dry run.
 name: Release
 
 on:
@@ -15,12 +17,21 @@ on:
       tag:
         description: 'The tag to release (vX.Y.Z)'
         required: true
+      ref:
+        description: 'What to build, when not the tag (a branch, for a dry run)'
+        required: false
+        default: ''
+      publish:
+        description: 'Publish the release (off: build and test only)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  REF: ${{ inputs.ref || inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -30,8 +41,10 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { name: linux-x86_64, os: ubuntu-26.04, exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
+          - { name: linux-x86_64, os: ubuntu-26.04, exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"', packages: true }
+          - { name: linux-arm64, os: ubuntu-26.04-arm, exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"', packages: true }
           - { name: macos-arm64, os: macos-latest, exe: cluau, flags: '' }
+          - { name: macos-x86_64, os: macos-15-intel, exe: cluau, flags: '' }
           - { name: windows-x86_64, os: windows-latest, exe: Release/cluau.exe, flags: '' }
     defaults:
       run:
@@ -39,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       # The tag names the version the translator reports (Version()).
       - name: Check the tag against the version
@@ -71,10 +84,26 @@ jobs:
             tar -czf "$dir.tar.gz" "$dir"
           fi
 
+      # The .deb and the .rpm, each installed and run before it is kept (the
+      # .rpm in a Fedora container).
+      - name: Linux packages
+        if: matrix.packages
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q rpm > /dev/null
+          sh installer/packages.sh "$TAG" "cluau-$TAG-${{ matrix.name }}" .
+          sudo dpkg -i cluau_*.deb
+          (cd / && cluau --version && cluau -e 'print(require("@std/regex").compile("\\d+"):match("v42").text)')
+          sudo dpkg -r cluau
+          test ! -e /usr/bin/cluau
+          docker run --rm -v "$PWD:/packages" fedora:latest sh -c 'rpm -i /packages/cluau-*.rpm && cluau --version && cluau -e "print(1 + 1)"'
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: cluau-*.*z*
+          path: |
+            cluau-*.*z*
+            cluau_*.deb
+            cluau-*.rpm
 
   # The VS Code extension: its grammar's tests, then the extension in VS Code
   # (on a virtual display) against this release's Linux build, then packaged.
@@ -89,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       - uses: actions/setup-node@v4
         with:
@@ -140,11 +169,11 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-26.04, macos-latest, windows-latest]
+        os: [ubuntu-26.04, ubuntu-26.04-arm, macos-latest, macos-15-intel, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -181,11 +210,12 @@ jobs:
 
   release:
     needs: [build, installers, vscode]
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -210,7 +240,7 @@ jobs:
             echo "irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex"
             echo '```'
             echo
-            echo "Downloads: the \`cluau\` command line (run and check scripts, the REPL, the language server, translate, convert) for each platform, with the licence, the README, the syntax guide and the scripting guide; the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`, also on the VS Code Marketplace and Open VSX). To embed the translator, build from source (no dependencies)."
+            echo "Downloads: the \`cluau\` command line (run, check, test and profile scripts, the REPL, the language server, the debugger, translate, convert) for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), with the licence, the README, the syntax guide and the scripting guide; Debian and RPM packages for Linux (\`.deb\`, \`.rpm\`); the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`, also on the VS Code Marketplace and Open VSX). To embed the translator, build from source (no dependencies)."
           } > notes.md
           cp installer/install.sh installer/install.ps1 dist/
           (cd dist && sha256sum * > SHA256SUMS)
@@ -242,7 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.REF }}
 
       - uses: actions/setup-node@v4
         with:

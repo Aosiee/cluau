@@ -103,7 +103,19 @@ directory. Neither needs administrator rights.
 
 Run an installer again to update. The installers are
 [`installer/install.sh`](installer/install.sh) and
-[`installer/install.ps1`](installer/install.ps1).
+[`installer/install.ps1`](installer/install.ps1). There are release builds
+for Linux (x86_64 and arm64), macOS (Apple silicon and Intel) and Windows
+(x86_64, which Windows on Arm runs too). `CLUAU_REPOSITORY` points either
+installer at another copy of the repository's releases (a Forgejo or Gitea
+server's: `https://forge.example.org/owner/cluau`).
+
+Each release also has Debian and RPM packages for Linux, which install
+`/usr/bin/cluau` for every user:
+
+```
+sudo apt install ./cluau_0.22.0_amd64.deb     # Debian, Ubuntu (arm64: _arm64.deb)
+sudo dnf install ./cluau-0.22.0-1.x86_64.rpm  # Fedora, RHEL (arm64: .aarch64.rpm)
+```
 
 ## Releases
 

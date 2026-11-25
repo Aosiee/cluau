@@ -14,13 +14,19 @@
 # files alone.
 #
 # The environment can stand in for the options: CLUAU_VERSION,
-# CLUAU_PREFIX. CLUAU_DOWNLOAD_URL replaces the release's download address
-# (a URL or a local directory holding the release's files), for mirrors and
-# for testing a release before it is published.
+# CLUAU_PREFIX. CLUAU_REPOSITORY is the repository the releases come from
+# (its web address: https://github.com/Aosiee/cluau unless it names
+# another, such as a Forgejo or Gitea server's), whose API gives the latest
+# release. CLUAU_DOWNLOAD_URL replaces a release's download address (a URL
+# or a local directory holding the release's files), for mirrors and for
+# testing a release before it is published.
 
 set -eu
 
-repo="Aosiee/cluau"
+repository="${CLUAU_REPOSITORY:-https://github.com/Aosiee/cluau}"
+repository="${repository%/}"
+repo="${repository#*://*/}" # owner/name
+server="${repository%/"$repo"}" # https://host
 version="${CLUAU_VERSION:-latest}"
 prefix="${CLUAU_PREFIX:-$HOME/.local}"
 download_url="${CLUAU_DOWNLOAD_URL:-}"
@@ -138,9 +144,11 @@ os="$(uname -s)"
 arch="$(uname -m)"
 case "$os-$arch" in
 Linux-x86_64 | Linux-amd64) platform="linux-x86_64" ;;
+Linux-aarch64 | Linux-arm64) platform="linux-arm64" ;;
 Darwin-arm64 | Darwin-aarch64) platform="macos-arm64" ;;
+Darwin-x86_64) platform="macos-x86_64" ;;
 *)
-	fail "there is no release build for $os $arch yet: build cluau from source (https://github.com/$repo#building)"
+	fail "there is no release build for $os $arch yet: build cluau from source ($repository#building)"
 	;;
 esac
 
@@ -164,15 +172,20 @@ get() {
 
 if [ "$version" = "latest" ]; then
 	[ -z "$download_url" ] || fail "CLUAU_DOWNLOAD_URL needs a version (--version vX.Y.Z)"
-	version="$(fetch_text "https://api.github.com/repos/$repo/releases/latest" |
+	# GitHub's API, or a Forgejo or Gitea server's (both answer tag_name).
+	case "$server" in
+	https://github.com) api="https://api.github.com/repos/$repo/releases/latest" ;;
+	*) api="$server/api/v1/repos/$repo/releases/latest" ;;
+	esac
+	version="$(fetch_text "$api" |
 		sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-	[ -n "$version" ] || fail "cannot find the latest release (GitHub's API did not answer)"
+	[ -n "$version" ] || fail "cannot find the latest release ($api did not answer)"
 fi
 case "$version" in
 v*) ;;
 *) version="v$version" ;;
 esac
-base="${download_url:-https://github.com/$repo/releases/download/$version}"
+base="${download_url:-$repository/releases/download/$version}"
 archive="cluau-$version-$platform.tar.gz"
 
 if command -v sha256sum >/dev/null 2>&1; then
