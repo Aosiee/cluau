@@ -46,7 +46,8 @@ if(CLUAU_BUILD_RUNTIME)
     # The strict rules, over Luau's analysis.
     add_library(cluau_check STATIC src/check/Check.cpp)
     target_link_libraries(cluau_check PUBLIC cluau_translator Luau.Analysis)
-    add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Check.cpp)
+    add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
+        src/runtime/Check.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis)
     if(TARGET isocline) # Luau's line editor: the REPL's history and editing
@@ -91,7 +92,7 @@ if(CLUAU_BUILD_RUNTIME)
                 COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
             if(NOT name MATCHES "^repl_")
-                add_test(NAME check:${name}
+                add_test(NAME check:scripts/${name}
                     COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script} -DMODE=check
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
             endif()

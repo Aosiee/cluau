@@ -1,0 +1,17 @@
+0	a b|it's|$HOME|*
+
+0	2
+
+3	"to stdout\n"	"to stderr\n"
+3	"to stderr\nto stdout\n"	""
+lib
+
+hello
+
+from exec
+0
+through the shell
+
+false	true
+false	true
+exit: 0

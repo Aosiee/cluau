@@ -5,6 +5,7 @@
 // everywhere.
 
 #include "Std.h"
+#include "Spawn.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -24,13 +25,13 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#define CLUAU_POPEN _popen
-#define CLUAU_PCLOSE _pclose
-#else
-#include <sys/wait.h>
-#define CLUAU_POPEN popen
-#define CLUAU_PCLOSE pclose
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -389,53 +390,126 @@ namespace cluau::runtime::detail {
 			return 0;
 		}
 
-		int ExitCode(int status)
+		// The command: a string (a command line for the system shell) or a
+		// list ({ "git", "status" }: the program and its arguments, passed
+		// as they are, no shell). Options: input (standard input text), cwd,
+		// env ({ NAME = "value" } on top of the script's environment), and
+		// for run, stderr = "inherit" | "capture" | "merge".
+		SpawnRequest Command(lua_State* L, const char* fn, bool run)
 		{
-#ifdef _WIN32
-			return status;
-#else
-			if (status == -1)
-				return -1;
-			if (WIFEXITED(status))
-				return WEXITSTATUS(status);
-			if (WIFSIGNALED(status))
-				return 128 + WTERMSIG(status);
-			return status;
-#endif
+			SpawnRequest request;
+			if (lua_type(L, 1) == LUA_TSTRING)
+			{
+				request.Shell = true;
+				request.Args.push_back(lua_tostring(L, 1));
+			}
+			else if (lua_type(L, 1) == LUA_TTABLE)
+			{
+				const int n = lua_objlen(L, 1);
+				for (int i = 1; i <= n; i++)
+				{
+					lua_rawgeti(L, 1, i);
+					if (!lua_isstring(L, -1))
+						luaL_error(L, "%s: argument %d of the command is a %s, not a string", fn, i, luaL_typename(L, -1));
+					request.Args.push_back(lua_tostring(L, -1));
+					lua_pop(L, 1);
+				}
+				if (request.Args.empty())
+					luaL_error(L, "%s: the command list is empty (it starts with the program)", fn);
+			}
+			else
+				luaL_error(L, "%s: the command is a string (a shell command line) or a list ({ program, args... })", fn);
+			if (lua_isnoneornil(L, 2))
+				return request;
+			luaL_checktype(L, 2, LUA_TTABLE);
+			lua_getfield(L, 2, "input");
+			if (!lua_isnil(L, -1))
+			{
+				size_t len = 0;
+				const char* text = lua_tolstring(L, -1, &len);
+				if (!text)
+					luaL_error(L, "%s: options.input is a string", fn);
+				request.Input = std::string(text, len);
+			}
+			lua_pop(L, 1);
+			lua_getfield(L, 2, "cwd");
+			if (!lua_isnil(L, -1))
+			{
+				if (!lua_isstring(L, -1))
+					luaL_error(L, "%s: options.cwd is a string", fn);
+				request.Cwd = lua_tostring(L, -1);
+			}
+			lua_pop(L, 1);
+			lua_getfield(L, 2, "env");
+			if (lua_istable(L, -1))
+			{
+				lua_pushnil(L);
+				while (lua_next(L, -2))
+				{
+					if (lua_type(L, -2) != LUA_TSTRING || !lua_isstring(L, -1))
+						luaL_error(L, "%s: options.env maps names to strings", fn);
+					request.Env.emplace_back(lua_tostring(L, -2), lua_tostring(L, -1));
+					lua_pop(L, 1);
+				}
+				std::sort(request.Env.begin(), request.Env.end());
+			}
+			else if (!lua_isnil(L, -1))
+				luaL_error(L, "%s: options.env is a table ({ NAME = \"value\" })", fn);
+			lua_pop(L, 1);
+			lua_getfield(L, 2, "stderr");
+			if (!lua_isnil(L, -1))
+			{
+				const char* mode = lua_tostring(L, -1);
+				if (!run)
+					luaL_error(L, "%s: options.stderr is process.run's (exec's output goes where the script's goes)", fn);
+				if (mode && std::strcmp(mode, "capture") == 0)
+					request.Error = Stream::Capture;
+				else if (mode && std::strcmp(mode, "merge") == 0)
+					request.Error = Stream::Merge;
+				else if (!mode || std::strcmp(mode, "inherit") != 0)
+					luaL_error(L, "%s: options.stderr is \"inherit\", \"capture\" or \"merge\"", fn);
+			}
+			lua_pop(L, 1);
+			return request;
 		}
 
-		// process.run(command): { code, output } - the command's standard
-		// output captured (its standard error passes through).
+		void StartOrFail(lua_State* L, const char* fn, const SpawnRequest& request, SpawnResult& result)
+		{
+			std::string why;
+			if (!Spawn(request, result, why))
+			{
+				const std::string what = request.Shell ? std::string("the shell") : "'" + request.Args[0] + "'";
+				luaL_error(L, "%s: cannot start %s: %s", fn, what.c_str(), why.c_str());
+			}
+		}
+
+		// process.run(command, options?): { code, output, error } - the
+		// command's standard output captured (and its standard error, with
+		// stderr = "capture").
 		int ProcessRun(lua_State* L)
 		{
-			const char* command = luaL_checkstring(L, 1);
-			std::fflush(stdout);
-			std::fflush(stderr);
-			FILE* pipe = CLUAU_POPEN(command, "r");
-			if (!pipe)
-				luaL_error(L, "process.run: cannot start '%s'", command);
-			std::string output;
-			char buffer[4096];
-			size_t got = 0;
-			while ((got = std::fread(buffer, 1, sizeof(buffer), pipe)) > 0)
-				output.append(buffer, got);
-			const int code = ExitCode(CLUAU_PCLOSE(pipe));
-			lua_createtable(L, 0, 2);
-			lua_pushinteger(L, code);
+			SpawnRequest request = Command(L, "process.run", true);
+			request.CaptureOutput = true;
+			SpawnResult result;
+			StartOrFail(L, "process.run", request, result);
+			lua_createtable(L, 0, 3);
+			lua_pushinteger(L, result.Code);
 			lua_setfield(L, -2, "code");
-			lua_pushlstring(L, output.data(), output.size());
+			lua_pushlstring(L, result.Output.data(), result.Output.size());
 			lua_setfield(L, -2, "output");
+			lua_pushlstring(L, result.Error.data(), result.Error.size());
+			lua_setfield(L, -2, "error");
 			return 1;
 		}
 
-		// process.exec(command): the exit code, the command's output going
-		// where the script's goes.
+		// process.exec(command, options?): the exit code, the command's
+		// output going where the script's goes.
 		int ProcessExec(lua_State* L)
 		{
-			const char* command = luaL_checkstring(L, 1);
-			std::fflush(stdout);
-			std::fflush(stderr);
-			lua_pushinteger(L, ExitCode(std::system(command)));
+			const SpawnRequest request = Command(L, "process.exec", false);
+			SpawnResult result;
+			StartOrFail(L, "process.exec", request, result);
+			lua_pushinteger(L, result.Code);
 			return 1;
 		}
 
@@ -452,6 +526,30 @@ namespace cluau::runtime::detail {
 			{ "chdir", ProcessChdir }, { "run", ProcessRun }, { "exec", ProcessExec }, { "sleep", ProcessSleep },
 			{ nullptr, nullptr },
 		};
+
+		// The running program's path (process.executable).
+		std::string Executable()
+		{
+#if defined(_WIN32)
+			std::wstring buffer(32768, L'\0');
+			const DWORD n = GetModuleFileNameW(nullptr, buffer.data(), (DWORD)buffer.size());
+			buffer.resize(n);
+			return S(fs::path(buffer));
+#elif defined(__APPLE__)
+			uint32_t size = 0;
+			_NSGetExecutablePath(nullptr, &size);
+			std::string buffer(size, '\0');
+			if (_NSGetExecutablePath(buffer.data(), &size) != 0)
+				return {};
+			buffer.resize(std::strlen(buffer.c_str()));
+			std::error_code ec;
+			return S(fs::weakly_canonical(fs::u8path(buffer), ec));
+#else
+			std::error_code ec;
+			const fs::path self = fs::read_symlink("/proc/self/exe", ec);
+			return ec ? std::string() : S(self);
+#endif
+		}
 
 		const char* Platform()
 		{
@@ -1016,6 +1114,8 @@ namespace cluau::runtime::detail {
 		lua_setfield(L, -2, "args");
 		lua_pushstring(L, Platform());
 		lua_setfield(L, -2, "platform");
+		lua_pushstring(L, Executable().c_str());
+		lua_setfield(L, -2, "executable");
 		lua_pushstring(L, "");
 		lua_setfield(L, -2, "script");
 		lua_setfield(L, -2, "process");

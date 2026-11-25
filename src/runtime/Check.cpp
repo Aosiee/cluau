@@ -72,17 +72,26 @@ return m :: {
 }
 )LUAU" },
 				{ "process", R"LUAU(
+export type RunOptions = {
+	input: string?,
+	cwd: string?,
+	env: { [string]: string }?,
+	stderr: ("inherit" | "capture" | "merge")?,
+}
+export type ExecOptions = { input: string?, cwd: string?, env: { [string]: string }? }
+export type RunResult = { code: number, output: string, error: string }
 local m: any = nil
 return m :: {
 	args: { string },
 	script: string,
+	executable: string,
 	platform: string,
 	env: (name: string) -> string?,
 	setEnv: (name: string, value: string?) -> (),
 	cwd: () -> string,
 	chdir: (dir: string) -> (),
-	run: (command: string) -> { code: number, output: string },
-	exec: (command: string) -> number,
+	run: (command: string | { string }, options: RunOptions?) -> RunResult,
+	exec: (command: string | { string }, options: ExecOptions?) -> number,
 	sleep: (seconds: number) -> (),
 	exit: (code: number?) -> never,
 }

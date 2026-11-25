@@ -1,0 +1,73 @@
+// Subclasses: `extends`, inherited fields, methods, statics and metamethods,
+// overrides, super calls, and a base class from another module.
+const Square = require("./lib/shapes/square")
+
+class Animal {
+	Name: string = "?"
+	Legs: number = 4
+	static Kingdom = "animalia"
+
+	function Init(name: string) {
+		self.Name = name
+	}
+
+	function Speak(): string {
+		return "..."
+	}
+
+	function Describe(): string {
+		return `{self.Name} says {self:Speak()}`
+	}
+
+	function __tostring(): string {
+		return `<{self.Name}>`
+	}
+}
+
+class Dog extends Animal {
+	Tricks: {string} = {}
+
+	function Speak(): string {
+		return "woof"
+	}
+
+	function Learn(trick: string) {
+		table.insert(self.Tricks, trick)
+	}
+}
+
+class Bird extends Animal {
+	Legs: number = 2
+
+	function Init(name: string, canFly: boolean) {
+		super:Init(name)
+		self.Name = if (canFly) name else `{name} (grounded)`
+	}
+
+	function Speak(): string {
+		return "tweet, not " .. super:Speak()
+	}
+}
+
+const rex = Dog("Rex")
+rex:Learn("sit")
+print(rex:Describe(), rex.Legs, #rex.Tricks, tostring(rex))
+const pip = Bird("Pip", false)
+print(pip:Describe(), pip.Legs, Bird.Kingdom, Dog.Kingdom)
+// Each instance's inherited default table is its own.
+print(#Dog("Fido").Tricks)
+
+// A function that takes the base accepts a subclass.
+function Introduce(animal: Animal): string {
+	return animal.Name
+}
+print(Introduce(rex), Introduce(pip))
+
+// A base class from another module.
+class BigSquare extends Square {
+	function Init(side: number) {
+		super:Init(side * 10)
+	}
+}
+const big = BigSquare(2)
+print(big.Side, big.Area, repr(big))

@@ -1,0 +1,35 @@
+// Subclass errors cluau check reports.
+class Animal {
+	Name: string = "?"
+
+	function Init(name: string) {
+		self.Name = name
+	}
+
+	function Speak(): string {
+		return "..."
+	}
+}
+
+class Bird extends Animal {
+	Wings: number = 2
+
+	function Init(name: string, wings: number) {
+		super:Init(name)
+		self.Wings = wings
+	}
+}
+
+class Dog extends Animal {
+}
+
+const pip = Bird("Pip", 2)
+const named: string = pip.Name     // inherited fields and methods type-check
+const said: string = pip:Speak()
+print(named, said)
+
+const rex = Dog(42)                 // Dog inherits Animal's constructor
+const wings: string = pip.Wings     // the subclass's own field keeps its type
+pip:Fly()                           // neither class has Fly
+const animal: Animal = pip          // a subclass is its base
+const bird: Bird = Animal("Generic") // a base is not a subclass

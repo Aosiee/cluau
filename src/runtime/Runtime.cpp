@@ -44,18 +44,54 @@ namespace cluau::runtime {
 
 		// The metatable every script class's table has (the script profile's
 		// class line): calling a class constructs an instance, whose
-		// metatable is the class table.
+		// metatable is the class table; a class's missing members are its
+		// base's (`__base`, from `extends`).
 		constexpr const char* kPrelude = R"LUAU(
+local kClassKeys = { __index = true, __name = true, __base = true, Fields = true }
+
 __cluau_meta = {
+	__index = function(class, key)
+		local base = rawget(class, "__base")
+		if base then
+			return base[key]
+		end
+		return nil
+	end,
 	__call = function(class, ...)
 		if rawget(class, "__index") == nil then
+			-- The first instance finishes the class: instances look their
+			-- methods up in it, and Luau finds metamethods without __index,
+			-- so the inherited ones are copied in.
 			rawset(class, "__index", class)
+			local base = rawget(class, "__base")
+			while base do
+				-- `next`: a class is callable, and Luau iterates a callable
+				-- table by calling it.
+				for key, value in next, base do
+					if type(key) == "string" and string.sub(key, 1, 2) == "__" and not kClassKeys[key] and rawget(class, key) == nil then
+						rawset(class, key, value)
+					end
+				end
+				base = rawget(base, "__base")
+			end
 		end
 		local object = setmetatable({}, class)
-		for field, make in class.Fields do
-			object[field] = make()
+		-- The fields, a base's first (a subclass's default wins).
+		local chain = {}
+		local c = class
+		while c do
+			table.insert(chain, 1, c)
+			c = rawget(c, "__base")
 		end
-		local init = rawget(class, "Init")
+		for _, each in chain do
+			local fields = rawget(each, "Fields")
+			if fields then
+				for field, make in fields do
+					object[field] = make()
+				end
+			end
+		end
+		local init = class.Init
 		if init then
 			init(object, ...)
 		end

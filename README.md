@@ -59,13 +59,48 @@ for (_, file in fs.walk(process.args[1] or ".")) {
   line exemption, required annotations) runs over Luau's analysis and builds
   against the host's Luau.
 
+## Installing
+
+On Linux or macOS:
+
+```
+curl -fsSL https://github.com/Aosiee/cluau/releases/latest/download/install.sh | sh
+```
+
+On Windows (PowerShell):
+
+```
+irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
+```
+
+Each installer downloads the latest release, checks it against the
+release's `SHA256SUMS`, installs `cluau` for the current user and puts it on
+`PATH`, so `cluau` and `#!/usr/bin/env cluau` scripts work from any
+directory. Neither needs administrator rights.
+
+- Linux and macOS: `~/.local/bin/cluau`, with a `PATH` line added to the
+  shell's startup file when that directory is not on `PATH` yet. Options
+  (after `sh -s --`): `--version vX.Y.Z`, `--prefix DIR` (for example
+  `--prefix /usr/local`, run with `sudo`), `--no-modify-path`,
+  `--uninstall`.
+- Windows: `%LOCALAPPDATA%\Programs\cluau\bin\cluau.exe`, added to the
+  user's `PATH`. Run the script itself (`.\install.ps1`, downloaded from the
+  release) for its options: `-Version vX.Y.Z`, `-InstallDir`,
+  `-NoModifyPath`, `-AssociateFiles` (open `.cluau` files with cluau),
+  `-Uninstall`.
+
+Run an installer again to update. The installers are
+[`installer/install.sh`](installer/install.sh) and
+[`installer/install.ps1`](installer/install.ps1).
+
 ## Releases
 
 Each version is a tag (`vX.Y.Z`), and each tag is a
 [release](https://github.com/Aosiee/cluau/releases) with the `cluau` tool
-(scripts, the REPL, check, translate, convert) built for Linux (x86-64), macOS (arm64) and Windows (x86-64), its tests run
-on each, and a `SHA256SUMS` file. A host that embeds the translator pins a
-tag and builds from source.
+(scripts, the REPL, check, translate, convert) built for Linux (x86-64),
+macOS (arm64) and Windows (x86-64), its tests run on each, both installers
+tried against the release's own packages on each, and a `SHA256SUMS` file.
+A host that embeds the translator pins a tag and builds from source.
 
 ## Building
 

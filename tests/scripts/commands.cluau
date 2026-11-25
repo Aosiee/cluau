@@ -1,0 +1,45 @@
+// process.run and process.exec, with cluau itself as the program (it is on
+// every platform the tests run on).
+const process = require("@std/process")
+const path = require("@std/path")
+
+const cluau = process.executable
+
+// Output without carriage returns (Windows writes them).
+function Clean(text: string): string {
+	return (string.gsub(text, "\r", ""))
+}
+
+// An argument list reaches the program as it is: no shell, no expansion.
+let r = process.run({ cluau, "-e", "print(table.concat(require('@std/process').args, '|'))", "a b", "it's", "$HOME", "*" })
+print(r.code, Clean(r.output))
+
+// Standard input, the exit code, and standard error captured or merged.
+r = process.run({ cluau, "-" }, { input = "print(1 + 1)" })
+print(r.code, Clean(r.output))
+const noisy = "require('@std/io').writeError('to stderr\\n'); print('to stdout'); require('@std/process').exit(3)"
+r = process.run({ cluau, "-e", noisy }, { stderr = "capture" })
+print(r.code, repr(Clean(r.output)), repr(Clean(r.error)))
+r = process.run({ cluau, "-e", noisy }, { stderr = "merge" })
+print(r.code, repr(Clean(r.output)), repr(r.error))
+
+// The working directory and the environment.
+r = process.run({ cluau, "-e", "print(require('@std/path').basename(require('@std/process').cwd()))" }, { cwd = "lib" })
+print(Clean(r.output))
+r = process.run({ cluau, "-e", "print(require('@std/process').env('CLUAU_TEST_GREETING'))" }, { env = { CLUAU_TEST_GREETING = "hello" } })
+print(Clean(r.output))
+
+// exec: the output goes where the script's goes; the result is the code.
+const io = require("@std/io")
+io.flush()
+print(process.exec({ cluau, "-e", "print('from exec')" }))
+
+// A shell command line still works as a string.
+print(Clean(process.run("echo through the shell").output))
+
+// A program that cannot start is an error naming it (the reason is the
+// system's own words).
+const missing, missingError = pcall(process.run, { "cluau-no-such-program" })
+print(missing, string.find(tostring(missingError), "cannot start 'cluau-no-such-program'", 1, true) != nil)
+const badDir, badDirError = pcall(process.run, { cluau }, { cwd = path.join("no", "such", "dir") })
+print(badDir, string.find(tostring(badDirError), "process.run: cannot start", 1, true) != nil)

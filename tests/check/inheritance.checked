@@ -1,0 +1,11 @@
+inheritance.cluau:31:17: Type 'number' could not be converted into 'string'
+inheritance.cluau:32:1: Type 'number' could not be converted into 'string'
+inheritance.cluau:33:1: Type 't2 where t1 = { @metatable {| __index: {| Init: (t1, string) -> (), Speak: (t1) -> string |} |}, {| Name: string |} } ; t2 = t1 & { @metatable {| __index: {| Init: (t2, string, number) -> () |} |}, {| Wings: number |} }' does not have key 'Fly'
+inheritance.cluau:35:1: Type 'Animal' could not be converted into 't2 where t1 = { @metatable {| __index: {| Init: (t1, string) -> (), Speak: (t1) -> string |} |}, {| Name: string |} } ; t2 = t1 & { @metatable {| __index: {| Init: (t2, string, number) -> () |} |}, {| Wings: number |} }'
+caused by:
+  Not all intersection parts are compatible.
+Type 'Animal' could not be converted into 't2 where t1 = { @metatable {| __index: {| Init: (t1, string) -> (), Speak: (t1) -> string |} |}, {| Name: string |} } ; t2 = { @metatable {| __index: {| Init: (t1 & t2, string, number) -> () |} |}, {| Wings: number |} }'
+caused by:
+  Table type '{| Name: string |}' not compatible with type '{| Wings: number |}' because the former is missing field 'Wings'
+cluau check: 4 error(s), 0 warning(s)
+exit: 1

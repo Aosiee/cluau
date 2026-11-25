@@ -547,6 +547,8 @@ namespace cluau {
 					Const(i);
 				else if (w == "class")
 					Class(i);
+				else if (w == "super" && InClass())
+					Super(i);
 				else if (w == "then" || w == "end" || w == "elseif" || w == "repeat" || w == "until")
 					Error(t, "cluau uses braces for blocks: '" + std::string(w) + "' is Luau syntax (see docs/syntax.md)");
 			}
@@ -794,6 +796,46 @@ namespace cluau {
 
 			// ---- classes -------------------------------------------------
 
+			bool InClass() const
+			{
+				for (const Open& open : m_Stack)
+					if (open.Kind == Frame::Class)
+						return true;
+				return false;
+			}
+
+			// In a subclass's methods: `super:Method(args)` calls the base's
+			// method on self (`Base.Method(self, args)`), `super.Name` is the base's
+			// member.
+			void Super(size_t i)
+			{
+				const Token& t = m_Toks[i];
+				if (m_ClassBase.empty())
+				{
+					Error(t, "super needs a base class: class " + m_ClassName + " extends Base { }");
+					return;
+				}
+				const size_t next = Sig(i + 1);
+				if (m_Toks[next].Is(":"))
+				{
+					const size_t name = Sig(next + 1);
+					const size_t open = Sig(name + 1);
+					if (m_Toks[name].Kind == TokenKind::Name && m_Toks[open].Is("("))
+					{
+						m_Repl[i] = m_ClassBase;
+						m_Repl[next] = ".";
+						m_Repl[open] = m_Toks[Sig(open + 1)].Is(")") ? "(self" : "(self, ";
+						return;
+					}
+				}
+				else if (m_Toks[next].Is("."))
+				{
+					m_Repl[i] = m_ClassBase;
+					return;
+				}
+				Error(t, "super is super:Method(...) (the base class's method, on self) or super.Name");
+			}
+
 			struct FieldSpan
 			{
 				size_t Begin = 0;
@@ -825,7 +867,40 @@ namespace cluau {
 					Error(t, "a class needs a name: class Name { }");
 					return;
 				}
-				const size_t brace = Sig(nameTok + 1);
+				size_t brace = Sig(nameTok + 1);
+				// `extends Base` (a name or a dotted path: `shapes.Square`).
+				std::string base;
+				Range baseAt;
+				const size_t extendsTok = m_Toks[brace].Is("extends") ? brace : npos;
+				if (extendsTok != npos)
+				{
+					size_t k = Sig(extendsTok + 1);
+					if (m_Toks[k].Kind == TokenKind::Name)
+					{
+						baseAt.Begin = { m_Toks[k].Line, m_Toks[k].Col };
+						base = std::string(m_Toks[k].Text);
+						size_t last = k;
+						k = Sig(k + 1);
+						while (m_Toks[k].Is(".") && m_Toks[Sig(k + 1)].Kind == TokenKind::Name)
+						{
+							last = Sig(k + 1);
+							base += "." + std::string(m_Toks[last].Text);
+							k = Sig(last + 1);
+						}
+						baseAt.End = { m_Toks[last].EndLine, m_Toks[last].EndCol };
+					}
+					else
+						Error(m_Toks[extendsTok], "extends names the base class: class Name extends Base { }");
+					if (!m_Profile->Inheritance)
+						Error(m_Toks[extendsTok], "this host's classes do not extend other classes");
+					for (size_t j = extendsTok; j < k; j++)
+						if (!m_Toks[j].IsComment())
+						{
+							m_Repl[j] = "";
+							m_Skip[j] = 1;
+						}
+					brace = k;
+				}
 				if (!m_Toks[brace].Is("{"))
 				{
 					Error(m_Toks[nameTok], "a class body is a { } block");
@@ -833,10 +908,13 @@ namespace cluau {
 				}
 				const size_t end = MatchClose(brace);
 				m_ClassName = std::string(m_Toks[nameTok].Text);
+				m_ClassBase = base;
 
 				ClassInfo info;
 				info.Name = m_ClassName;
 				info.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
+				info.Base = base;
+				info.BaseAt = baseAt;
 				info.BodyBeginLine = m_Toks[brace].Line;
 				info.BodyEndLine = m_Toks[end].Line;
 				ScanClass(brace, end, info);
@@ -854,8 +932,20 @@ namespace cluau {
 					for (const ClassSignal& signal : info.Signals)
 						members.Fields += signal.Name + ": " + m_Profile->SignalType(signal) + ", ";
 				for (const ClassMethod& m : info.Methods)
+				{
 					members.Methods.push_back({ m.Name, MethodParamTypes(m.Params),
 						!m.ReturnType.empty() ? m.ReturnType : m.ReturnsValue ? std::string("...any") : std::string("()") });
+					if (m.Name == "Init")
+						members.CtorParams = members.Methods.back().ParamTypes;
+				}
+				if (!members.CtorParams)
+				{
+					if (base.empty())
+						members.CtorParams = std::string();
+					else if (auto inherited = m_CtorParams.find(base); inherited != m_CtorParams.end())
+						members.CtorParams = inherited->second;
+				}
+				m_CtorParams[m_ClassName] = members.CtorParams;
 				std::string type;
 				std::string head;
 				if (m_Profile->Header)
@@ -1515,6 +1605,8 @@ namespace cluau {
 			size_t m_StaticEnd = npos;
 			std::map<size_t, std::pair<size_t, size_t>> m_GeneratedAt; // token -> (offset, length) in its replacement
 			std::string m_ClassName;
+			std::string m_ClassBase; // the class being translated's base ("" without one)
+			std::map<std::string, std::optional<std::string>> m_CtorParams; // each class's constructor parameters, for its subclasses
 			size_t m_ClassEndToken = npos;
 			bool m_ClassEnded = false;
 			size_t m_LastClassEnd = npos; // script mode: the last class's `}`
@@ -1597,26 +1689,30 @@ namespace cluau {
 			ClassProfile p;
 			// The class table: its instances' metatable, callable through the
 			// runtime's shared `__cluau_meta` (the cast types the call with
-			// Init's parameters). Instances: their fields, with a metatable
-			// whose __index holds the methods and which carries the
-			// metamethods, so `a + b` and `tostring(a)` check too.
+			// Init's parameters), naming its base. `__instance` is a
+			// type-only member: the instance type, which a subclass's type
+			// starts from. Instances: their fields, with a metatable whose
+			// __index holds the methods and which carries the metamethods,
+			// so `a + b` and `tostring(a)` check too.
+			p.Inheritance = true;
 			p.Header = [](const ClassInfo& info, const ClassMembers& members) {
-				std::string init = ", ";
-				for (const ClassMembers::Method& m : members.Methods)
-					if (m.Name == "Init")
-						init = m.ParamTypes;
+				const bool derived = !info.Base.empty();
+				// An Init inherited from another module's class: its
+				// parameters are unknown here.
+				const std::string ctor = members.CtorParams ? *members.CtorParams : std::string(", ...any");
 				ClassHeader h;
-				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\" }, __cluau_meta :: { __call: (unknown" +
-					(init == ", " ? std::string() : init) + ") -> $Class })";
+				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\"" + (derived ? ", __base = " + info.Base : std::string()) +
+					", __instance = (nil :: any) :: $Class }, __cluau_meta :: { __call: (unknown" + ctor + ") -> $Class" +
+					(derived ? ", __index: typeof(" + info.Base + ")" : std::string()) + " })";
 				std::string methods, metamethods;
 				for (const ClassMembers::Method& m : members.Methods)
 				{
 					const std::string member = m.Name + ": (self: $Class" + m.ParamTypes + ") -> " + m.ReturnType + ", ";
 					(m.Name.rfind("__", 0) == 0 ? metamethods : methods) += member;
 				}
-				h.Types = "export type $Class = typeof(setmetatable({} :: { " + members.Fields + "}, {} :: { __index: { " + methods + "}, " +
-					metamethods + "}))";
-				(void)info;
+				// A subclass's instances are its base's and its own.
+				h.Types = "export type $Class = " + (derived ? "typeof(" + info.Base + ".__instance) & " : std::string()) +
+					"typeof(setmetatable({} :: { " + members.Fields + "}, {} :: { __index: { " + methods + "}, " + metamethods + "}))";
 				return h;
 			};
 			// A default is evaluated for each instance (a `{}` default is
@@ -1633,7 +1729,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.6.0";
+		return "0.7.0";
 	}
 
 } // namespace cluau

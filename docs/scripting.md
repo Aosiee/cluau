@@ -39,8 +39,8 @@ print(repr(counter.Counts))
 
 The arguments after the script are `process.args`. A script's first line
 may be `#!/usr/bin/env cluau`, so a script marked executable runs by itself
-once `cluau` is on `PATH` (`cmake --install build --prefix ~/.local`, or a
-release's binary copied there).
+once `cluau` is on `PATH` (the installers in the README put it there; so
+does `cmake --install build --prefix ~/.local`).
 A `.luau` file runs as Luau (it is not translated).
 
 The exit status is 0, 1 after an error, 2 when the script cannot be read,
@@ -179,6 +179,59 @@ print(v, Vec.Count)   // Vec(4, 6)    3
 A file whose last statement is a class returns it, so a module may be one
 class (`return` is not needed), as in a host's class files.
 
+### Subclasses
+
+`class Name extends Base` makes a class whose instances are also `Base`'s:
+
+```
+class Animal {
+	Name: string = "?"
+
+	function Init(name: string) {
+		self.Name = name
+	}
+
+	function Speak(): string {
+		return "..."
+	}
+
+	function Describe(): string {
+		return `{self.Name} says {self:Speak()}`
+	}
+}
+
+class Bird extends Animal {
+	Legs: number = 2
+
+	function Init(name: string, legs: number) {
+		super:Init(name)
+		self.Legs = legs
+	}
+
+	function Speak(): string {
+		return "tweet"
+	}
+}
+
+print(Bird("Pip", 2):Describe())   // Pip says tweet
+```
+
+- A subclass has its base's fields (with their defaults), methods, statics
+  and metamethods, and adds or replaces its own. A method it declares
+  replaces the base's for its instances, including where the base's own
+  methods call it (`Describe` above calls `Bird`'s `Speak`).
+- `super:Method(args)` calls the base's method on `self`;
+  `super.Name` is the base's member. Without its own `Init`, a subclass
+  is constructed with its base's.
+- The base is any class value: one declared earlier in the file, or a
+  module's (`class Big extends shapes.Square`, after
+  `const shapes = require("./shapes")`).
+- `cluau check` types an instance as its base's and its own members, so a
+  `Bird` goes wherever an `Animal` is expected. The constructor's
+  arguments are checked against `Init` (or the base's, when the base is in
+  the same file; a subclass of another module's class that declares no
+  `Init` is constructed unchecked).
+
 ## Modules
 
 `require(name)` loads a `.cluau` or `.luau` file once and returns what it
@@ -250,12 +303,44 @@ every platform, Windows included (which accepts them).
 | `args: {string}` | the script's arguments |
 | `script: string` | the script's path (`"-e"`, `"stdin"`; `""` at the prompt) |
 | `platform: string` | `"linux"`, `"macos"`, `"windows"` or `"other"` |
+| `executable: string` | the path of the running `cluau` (to start another script with the same one) |
 | `env(name): string?`, `setEnv(name, value?)` | an environment variable (`nil` unsets it) |
 | `cwd(): string`, `chdir(dir)` | the working directory |
-| `run(command): { code: number, output: string }` | runs a shell command, capturing its standard output (its standard error passes through) |
-| `exec(command): number` | runs a shell command with the script's output; its exit code |
+| `run(command, options?): { code: number, output: string, error: string }` | runs a command to its end, capturing its standard output |
+| `exec(command, options?): number` | runs a command with the script's own output; its exit code |
 | `sleep(seconds)` | waits |
 | `exit(code?)` | ends the script (0 by default) |
+
+A command is a list or a string:
+
+- `{ "git", "commit", "-m", message }` starts the program with exactly these
+  arguments. There is no shell in between, so spaces, quotes and `$` in an
+  argument reach the program as they are: the safe form for anything built
+  from input.
+- `"ls *.txt | wc -l"` is a command line for the system shell (`/bin/sh`;
+  `cmd.exe` on Windows), for pipes, globs and redirections.
+
+The options (a table, all optional):
+
+| option | is |
+|---|---|
+| `input: string` | the command's standard input (by default it reads the script's) |
+| `cwd: string` | the directory it runs in |
+| `env: { [string]: string }` | variables set on top of the script's environment |
+| `stderr` (run only) | `"inherit"` (the default: it goes where the script's goes), `"capture"` (into `error`) or `"merge"` (into `output`, in order) |
+
+```
+const process = require("@std/process")
+
+const status = process.run({ "git", "status", "--short" }, { cwd = "repo" })
+if (status.code != 0) {
+	print("git failed")
+}
+const sorted = process.run({ "sort" }, { input = "b\na\n" }).output
+```
+
+A program that cannot be started (not found, not executable, a missing
+`cwd`) is an error; a program that starts and fails is its exit code.
 
 ### `@std/io`
 

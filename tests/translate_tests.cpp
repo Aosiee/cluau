@@ -298,7 +298,7 @@ TEST("scripts: the script profile constructs instances and evaluates each defaul
 	options.Script = true;
 	options.Profile = &cluau::ScriptProfile();
 	const std::string luau = Luau("class P {\n\tTags: {string} = {}\n\tN: number\n}\n", options);
-	CHECK(luau.rfind("local P = setmetatable({ Fields = {}, __name = \"P\" }, __cluau_meta :: { __call: (unknown) -> P }); ", 0) == 0);
+	CHECK(luau.rfind("local P = setmetatable({ Fields = {}, __name = \"P\", __instance = (nil :: any) :: P }, __cluau_meta :: { __call: (unknown) -> P }); ", 0) == 0);
 	CHECK(luau.find("export type P = typeof(setmetatable({} :: { Tags: {string}, N: number, }, {} :: { __index: { }, }))") != std::string::npos);
 	// Init's parameters type the constructor; metamethods are the instances' metatable's.
 	const std::string vec = Luau("class V {\n\tfunction Init(x: number) { }\n\tfunction __add(o: V): V { return o }\n\tfunction Len(): number { return 1 }\n}\n", options);
@@ -326,4 +326,30 @@ TEST("statements: an empty block and a block's end beside a word stay apart")
 	CHECK_EQ(Luau("function f() {}"), std::string("function f() end"));
 	CHECK_EQ(Luau("if (a) {}else{}"), std::string("if (a) then else end"));
 	CHECK_EQ(Luau("{ x() }print(1)"), std::string("do x() end print(1)"));
+}
+
+TEST("scripts: a class extends another; super calls the base's methods")
+{
+	cluau::TranslateOptions options;
+	options.Script = true;
+	options.Profile = &cluau::ScriptProfile();
+	const cluau::TranslateResult r = cluau::Translate(
+		"class A {\n\tfunction Init(n: number) { }\n}\nclass B extends A {\n\tfunction Hi(): number { return super:Get() + super.Count }\n}\nclass C extends lib.Base {\n}\n", options);
+	CHECK(!r.HasErrors());
+	CHECK_EQ(r.Classes.size(), (size_t)3);
+	CHECK_EQ(r.Classes[1].Base, std::string("A"));
+	CHECK_EQ(r.Classes[2].Base, std::string("lib.Base"));
+	CHECK_EQ(Lines(r.Luau), 8);
+	// B inherits A's constructor; its instances are A's and its own.
+	CHECK(r.Luau.find("__base = A, __instance = (nil :: any) :: B }, __cluau_meta :: { __call: (unknown, n: number) -> B, __index: typeof(A) })") != std::string::npos);
+	CHECK(r.Luau.find("export type B = typeof(A.__instance) & typeof(setmetatable(") != std::string::npos);
+	CHECK(r.Luau.find("return A.Get(self) + A.Count") != std::string::npos);
+	// Another module's base: its constructor's parameters are unknown.
+	CHECK(r.Luau.find("__call: (unknown, ...any) -> C, __index: typeof(lib.Base) }") != std::string::npos);
+	// The `extends` clause is gone from the line.
+	CHECK(r.Luau.find("extends") == std::string::npos);
+
+	CHECK(HasError(cluau::Translate("class A {\n\tfunction F() { super:F() }\n}\n", options), "super needs a base class"));
+	CHECK(HasError(cluau::Translate("class B extends A {\n}\n"), "do not extend"));
+	CHECK(HasError(cluau::Translate("class B extends {\n}\n", options), "extends names the base class"));
 }

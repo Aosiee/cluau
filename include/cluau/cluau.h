@@ -105,6 +105,8 @@ namespace cluau {
 	{
 		std::string Name;
 		Range At;            // the class's name
+		std::string Base;    // `class Name extends Base`: the base class's expression ("" without one)
+		Range BaseAt;        // the base's expression
 		int BodyBeginLine = 0;
 		int BodyEndLine = 0; // the closing brace's line
 		std::vector<ClassField> Fields;
@@ -126,6 +128,11 @@ namespace cluau {
 			std::string ReturnType; // "()" when it returns nothing
 		};
 		std::vector<Method> Methods;
+		// The constructor's parameter types (", x: number", "" for none):
+		// the class's Init, or the one it inherits from a base declared
+		// earlier in the file. Empty when the Init comes from a base the
+		// translator cannot see (another module's class).
+		std::optional<std::string> CtorParams;
 	};
 
 	// The class line a Header hook writes: `local $Class = <TableInit>; <Types>`.
@@ -160,6 +167,10 @@ namespace cluau {
 		// declarations lower to `$Class.<SignalsMember> = { "A", ... }` on
 		// the class line); "" = signals are not allowed.
 		std::string SignalsMember = "Signals";
+		// Classes may extend another (`class Dog extends Animal`, and
+		// `super:Method(...)` in its methods); the profile's Header types
+		// the result. Off: `extends` is an error.
+		bool Inheritance = false;
 		// The whole class line (null = `$Class = <TableInit>; export type
 		// $Class = { <members> }`): a profile whose class table and
 		// instances need richer types (the script profile: a callable class

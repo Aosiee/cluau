@@ -1,6 +1,7 @@
 # A release for each version tag (vX.Y.Z): the command-line tool built and
 # tested on Linux, macOS and Windows, packaged with the licence, the README,
-# the syntax guide and the scripting guide, and published as a GitHub
+# the syntax guide and the scripting guide, the installers tried against
+# those packages on each platform, and all of it published as a GitHub
 # release whose notes are the tag's message. A tag pushed from here on
 # releases by itself; an existing tag (one made before this workflow) is
 # released by running the workflow by hand with its name.
@@ -75,8 +76,56 @@ jobs:
           name: ${{ matrix.name }}
           path: cluau-*.*z*
 
-  release:
+  # The installers, run against this release's own downloads before they are
+  # published: each installs, runs a script from PATH, and uninstalls.
+  installers:
+    name: installer (${{ matrix.os }})
     needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-26.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        shell: bash
+        run: (cd dist && sha256sum * > SHA256SUMS 2>/dev/null || shasum -a 256 * > SHA256SUMS)
+
+      - name: install.sh
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          CLUAU_DOWNLOAD_URL="$PWD/dist" CLUAU_VERSION="$TAG" sh installer/install.sh --prefix "$RUNNER_TEMP/cluau"
+          printf '#!/usr/bin/env cluau\nprint("ran from", require("@std/process").platform)\n' > "$RUNNER_TEMP/hello.cluau"
+          chmod +x "$RUNNER_TEMP/hello.cluau"
+          (cd / && PATH="$RUNNER_TEMP/cluau/bin:$PATH" "$RUNNER_TEMP/hello.cluau")
+          sh installer/install.sh --prefix "$RUNNER_TEMP/cluau" --uninstall
+          test ! -e "$RUNNER_TEMP/cluau/bin/cluau"
+
+      - name: install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CLUAU_DOWNLOAD_URL = "$PWD\dist"
+          $dir = Join-Path $env:RUNNER_TEMP 'cluau'
+          ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -AssociateFiles
+          & (Join-Path $dir 'bin\cluau.exe') -e 'print("ran from", require("@std/process").platform)'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq (Join-Path $dir 'bin') })) { throw 'the user PATH has no cluau' }
+          ./installer/install.ps1 -InstallDir $dir -Uninstall
+          if (Test-Path $dir) { throw 'the uninstall left the install directory' }
+
+  release:
+    needs: [build, installers]
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
@@ -94,8 +143,21 @@ jobs:
           {
             git tag -l --format='%(contents)' "$TAG"
             echo
-            echo "Downloads: the \`cluau\` command line (run scripts and the REPL, translate, convert) for each platform, with the licence, the README, the syntax guide and the scripting guide. To embed the translator, build from source (no dependencies)."
+            echo "Install on Linux or macOS:"
+            echo
+            echo '```'
+            echo "curl -fsSL https://github.com/Aosiee/cluau/releases/latest/download/install.sh | sh"
+            echo '```'
+            echo
+            echo "Install on Windows (PowerShell):"
+            echo
+            echo '```'
+            echo "irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex"
+            echo '```'
+            echo
+            echo "Downloads: the \`cluau\` command line (run and check scripts, the REPL, translate, convert) for each platform, with the licence, the README, the syntax guide and the scripting guide, and the installers. To embed the translator, build from source (no dependencies)."
           } > notes.md
+          cp installer/install.sh installer/install.ps1 dist/
           (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Publish
