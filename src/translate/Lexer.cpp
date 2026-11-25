@@ -207,7 +207,10 @@ namespace cluau::detail {
 					while (m_Pos < m_Src.size() && !(At() == '*' && At(1) == '/'))
 						Advance();
 					if (m_Pos >= m_Src.size())
+					{
 						Error(token, "unterminated comment: /* needs a closing */");
+						token.Open = true;
+					}
 					else
 					{
 						Advance();
@@ -254,14 +257,20 @@ namespace cluau::detail {
 				{
 					token.Kind = TokenKind::Interpolated;
 					if (!SkipInterpolated())
+					{
 						Error(token, "unterminated interpolated string");
+						token.Open = true;
+					}
 					return;
 				}
 				if (const int level = LongBracketLevel(); level >= 0)
 				{
 					token.Kind = TokenKind::LongString;
 					if (!SkipLongBracket(level))
+					{
 						Error(token, "unterminated long string");
+						token.Open = true;
+					}
 					return;
 				}
 				token.Kind = TokenKind::Op;

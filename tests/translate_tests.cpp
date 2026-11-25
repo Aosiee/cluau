@@ -299,11 +299,11 @@ TEST("scripts: the script profile constructs instances and evaluates each defaul
 	options.Profile = &cluau::ScriptProfile();
 	const std::string luau = Luau("class P {\n\tTags: {string} = {}\n\tN: number\n}\n", options);
 	CHECK(luau.rfind("local P = setmetatable({ Fields = {}, __name = \"P\", __instance = (nil :: any) :: P }, __cluau_meta :: { __call: (unknown) -> P }); ", 0) == 0);
-	CHECK(luau.find("export type P = typeof(setmetatable({} :: { Tags: {string}, N: number, }, {} :: { __index: { }, }))") != std::string::npos);
+	CHECK(luau.find("export type P = typeof(setmetatable({} :: { Tags: {string}, N: number, }, {} :: { __index: typeof(P), }))") != std::string::npos);
 	// Init's parameters type the constructor; metamethods are the instances' metatable's.
 	const std::string vec = Luau("class V {\n\tfunction Init(x: number) { }\n\tfunction __add(o: V): V { return o }\n\tfunction Len(): number { return 1 }\n}\n", options);
 	CHECK(vec.find("__call: (unknown, x: number) -> V })") != std::string::npos);
-	CHECK(vec.find("{} :: { __index: { Init: (self: V, x: number) -> (), Len: (self: V) -> number, }, __add: (self: V, o: V) -> V, }") != std::string::npos);
+	CHECK(vec.find("{} :: { __index: typeof(V), __add: (self: V, o: V) -> V, }") != std::string::npos);
 	CHECK_EQ(Lines(vec), 5);
 	CHECK(luau.find("P.Fields.Tags = function() return {} end") != std::string::npos);
 	CHECK(luau.find("P.Fields.N") == std::string::npos);
@@ -352,4 +352,18 @@ TEST("scripts: a class extends another; super calls the base's methods")
 	CHECK(HasError(cluau::Translate("class A {\n\tfunction F() { super:F() }\n}\n", options), "super needs a base class"));
 	CHECK(HasError(cluau::Translate("class B extends A {\n}\n"), "do not extend"));
 	CHECK(HasError(cluau::Translate("class B extends {\n}\n", options), "extends names the base class"));
+}
+
+TEST("scripts: a source that ends inside a block, bracket, comment or long string is unfinished")
+{
+	CHECK(cluau::Translate("if (x) {\n\tprint(1)\n").Unfinished);
+	CHECK(cluau::Translate("print(1,\n").Unfinished);
+	CHECK(cluau::Translate("let t = {\n").Unfinished);
+	CHECK(cluau::Translate("/* a comment\n").Unfinished);
+	CHECK(cluau::Translate("let s = [[long\n").Unfinished);
+	CHECK(cluau::Translate("let s = `text {x}\n").Unfinished);
+	// Finished, or wrong rather than unfinished.
+	CHECK(!cluau::Translate("print(1)\n").Unfinished);
+	CHECK(!cluau::Translate("let s = \"unterminated\n").Unfinished);
+	CHECK(!cluau::Translate("f(1 }\n").Unfinished);
 }

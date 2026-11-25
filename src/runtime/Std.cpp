@@ -587,10 +587,13 @@ namespace cluau::runtime::detail {
 			return WriteTo(L, stderr);
 		}
 
-		bool GetLine(std::string& line)
+		bool GetLine(lua_State* L, std::string& line)
 		{
 			if (!std::getline(std::cin, line))
+			{
+				RaiseIfInterrupted(L);
 				return false;
+			}
 			if (!line.empty() && line.back() == '\r')
 				line.pop_back();
 			return true;
@@ -600,7 +603,7 @@ namespace cluau::runtime::detail {
 		{
 			std::fflush(stdout);
 			std::string line;
-			if (!GetLine(line))
+			if (!GetLine(L, line))
 				lua_pushnil(L);
 			else
 				lua_pushlstring(L, line.data(), line.size());
@@ -612,6 +615,7 @@ namespace cluau::runtime::detail {
 			std::fflush(stdout);
 			std::stringstream buffer;
 			buffer << std::cin.rdbuf();
+			RaiseIfInterrupted(L);
 			const std::string text = buffer.str();
 			lua_pushlstring(L, text.data(), text.size());
 			return 1;

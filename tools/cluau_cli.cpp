@@ -62,12 +62,14 @@ namespace {
 		"       cluau -e '<code>' [args...]         run code given on the command line\n"
 		"       cluau - [args...]                   run the script on standard input\n"
 		"       cluau [-i]                          the interactive prompt (-i: even when stdin is not a terminal)\n"
-		"       cluau check <script.cluau>...       type-check scripts (and the modules they require) without running them\n"
+		"       cluau check [--loose] [--lint] <script.cluau>...\n"
+		"                                           type-check scripts (and the modules they require) without running them\n"
 		"       cluau translate [--manifest|--script] <file.cluau>\n"
 		"       cluau convert [--verify] <file.luau>\n"
 		"       cluau --version\n"
 		"\n"
-		"`cluau check` is Luau's type checker in strict mode plus cluau's strict rules (exit status 1 on an error).\n"
+		"`cluau check` is Luau's type checker in strict mode plus cluau's strict rules (exit status 1 on an error);\n"
+		"--loose leaves out cluau's strict rules, --lint adds Luau's lint warnings.\n"
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
 		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
 		"@std/process, @std/io and @std/json.\n";
@@ -177,15 +179,21 @@ namespace {
 	int Check(int argc, char** argv)
 	{
 		std::vector<std::string> files;
+		cluau::runtime::CheckOptions options;
 		for (int i = 2; i < argc; i++)
 		{
-			if (argv[i][0] == '-' && argv[i][1] != '\0')
+			const std::string arg = argv[i];
+			if (arg == "--loose")
+				options.Loose = true;
+			else if (arg == "--lint")
+				options.Lint = true;
+			else if (arg[0] == '-' && arg.size() > 1)
 				return Usage();
-			files.push_back(argv[i]);
+			else
+				files.push_back(arg);
 		}
 		if (files.empty())
 			return Usage();
-		cluau::runtime::CheckOptions options;
 		options.SearchPath = SearchPath();
 		int errors = 0, warnings = 0;
 		for (const cluau::runtime::CheckFinding& f : cluau::runtime::Check(files, options))

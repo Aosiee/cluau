@@ -4,14 +4,21 @@
 # A <name>.stdin file is the script's standard input; a script named
 # repl_*.cluau is fed to the REPL (`cluau -i`) instead of run.
 # -DMODE=check runs `cluau check <name>.cluau` instead and compares with
-# <name>.checked (no such file: the check must pass with nothing to say).
+# <name>.checked (no such file: the check must pass with nothing to say); a
+# first line `// cluau check --lint` passes the check those flags.
 # -DUPDATE=ON rewrites the expected file.
 get_filename_component(dir ${SCRIPT} DIRECTORY)
 get_filename_component(name ${SCRIPT} NAME_WE)
 set(input "")
 set(expectedFile ${dir}/${name}.expected)
 if(MODE STREQUAL "check")
-    set(command ${CLUAU} check ${name}.cluau)
+    # A first line `// cluau check <flags>` gives the check its flags.
+    file(STRINGS ${SCRIPT} first LIMIT_COUNT 1)
+    set(flags "")
+    if(first MATCHES "^// cluau check (.*)$")
+        separate_arguments(flags UNIX_COMMAND "${CMAKE_MATCH_1}")
+    endif()
+    set(command ${CLUAU} check ${flags} ${name}.cluau)
     set(expectedFile ${dir}/${name}.checked)
 elseif(name MATCHES "^repl_")
     set(command ${CLUAU} -i)

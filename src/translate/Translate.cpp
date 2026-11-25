@@ -946,6 +946,7 @@ namespace cluau {
 						members.CtorParams = inherited->second;
 				}
 				m_CtorParams[m_ClassName] = members.CtorParams;
+	info.UncheckedConstructor = !members.CtorParams;
 				std::string type;
 				std::string head;
 				if (m_Profile->Header)
@@ -1490,6 +1491,7 @@ namespace cluau {
 				}
 				while (!m_ExprIfs.empty())
 					MissingElse();
+				m_R.Unfinished = !m_Stack.empty() || std::any_of(m_Toks.begin(), m_Toks.end(), [](const Token& t) { return t.Open; });
 				while (!m_Stack.empty())
 				{
 					const Open open = m_Stack.back();
@@ -1692,8 +1694,8 @@ namespace cluau {
 			// Init's parameters), naming its base. `__instance` is a
 			// type-only member: the instance type, which a subclass's type
 			// starts from. Instances: their fields, with a metatable whose
-			// __index holds the methods and which carries the metamethods,
-			// so `a + b` and `tostring(a)` check too.
+			// __index is the class table (methods and statics) and which
+			// carries the metamethods, so `a + b` and `tostring(a)` check too.
 			p.Inheritance = true;
 			p.Header = [](const ClassInfo& info, const ClassMembers& members) {
 				const bool derived = !info.Base.empty();
@@ -1704,15 +1706,16 @@ namespace cluau {
 				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\"" + (derived ? ", __base = " + info.Base : std::string()) +
 					", __instance = (nil :: any) :: $Class }, __cluau_meta :: { __call: (unknown" + ctor + ") -> $Class" +
 					(derived ? ", __index: typeof(" + info.Base + ")" : std::string()) + " })";
-				std::string methods, metamethods;
+				// Instances find their methods and statics in the class table
+				// (`__index`: its type, which the methods and statics after
+				// this line extend), and their metamethods in their metatable.
+				std::string metamethods;
 				for (const ClassMembers::Method& m : members.Methods)
-				{
-					const std::string member = m.Name + ": (self: $Class" + m.ParamTypes + ") -> " + m.ReturnType + ", ";
-					(m.Name.rfind("__", 0) == 0 ? metamethods : methods) += member;
-				}
+					if (m.Name.rfind("__", 0) == 0)
+						metamethods += m.Name + ": (self: $Class" + m.ParamTypes + ") -> " + m.ReturnType + ", ";
 				// A subclass's instances are its base's and its own.
 				h.Types = "export type $Class = " + (derived ? "typeof(" + info.Base + ".__instance) & " : std::string()) +
-					"typeof(setmetatable({} :: { " + members.Fields + "}, {} :: { __index: { " + methods + "}, " + metamethods + "}))";
+					"typeof(setmetatable({} :: { " + members.Fields + "}, {} :: { __index: typeof($Class), " + metamethods + "}))";
 				return h;
 			};
 			// A default is evaluated for each instance (a `{}` default is
@@ -1729,7 +1732,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.7.1";
+		return "0.8.0";
 	}
 
 } // namespace cluau

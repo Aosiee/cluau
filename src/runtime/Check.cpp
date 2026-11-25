@@ -10,6 +10,7 @@
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/Config.h"
 #include "Luau/Frontend.h"
+#include "Luau/Linter.h"
 #include "Luau/Error.h"
 #include "Luau/ToString.h"
 
@@ -127,6 +128,19 @@ return m :: {
 			std::stringstream buffer;
 			buffer << in.rdbuf();
 			return buffer.str();
+		}
+
+		// The lint warnings `--lint` reports: Luau's, without those the
+		// translation's layout would raise (several statements on a class's
+		// line) or the type checker already reports.
+		Luau::LintOptions LintOptions()
+		{
+			Luau::LintOptions options;
+			options.warningMask = ~0ull;
+			for (Luau::LintWarning::Code code : { Luau::LintWarning::Code_SameLineStatement, Luau::LintWarning::Code_MultiLineStatement,
+					 Luau::LintWarning::Code_UnknownGlobal, Luau::LintWarning::Code_ImplicitReturn, Luau::LintWarning::Code_CommentDirective })
+				options.warningMask &= ~(1ull << code);
+			return options;
 		}
 
 		bool IsCluau(const std::string& name) { return !StartsWith(name, "@") && !detail::IsLuauFile(fs::u8path(name)); }
@@ -283,6 +297,61 @@ return m :: {
 			errors.insert(errors.end(), result.errors.begin(), result.errors.end());
 		}
 
+		// A subclass's type prints as its whole structure (Luau names an
+		// intersection by its parts): errors say the class's name instead.
+		std::vector<std::pair<std::string, std::string>> classNames; // printed type, class name
+		for (const auto& [name, translation] : files.Translations)
+			if (Luau::ModulePtr m = frontend.moduleResolver.getModule(name))
+				for (const ClassInfo& c : translation.Classes)
+					if (auto it = m->exportedTypeBindings.find(c.Name); it != m->exportedTypeBindings.end())
+					{
+						const std::string printed = Luau::toString(it->second.type);
+						if (printed != c.Name)
+							classNames.emplace_back(printed, c.Name);
+					}
+		std::sort(classNames.begin(), classNames.end(), [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+		// A quoted type in an error is the class's when it reads as the class's
+		// type does (whole, or cut short by Luau: `... *TRUNCATED*` after a
+		// prefix of it), `{| |}` and `{ }` alike.
+		auto plain = [](std::string text) {
+			for (const char* marker : { "{|", "|}" })
+				for (size_t at = text.find(marker); at != std::string::npos; at = text.find(marker, at))
+					text.erase(marker[0] == '{' ? at + 1 : at, 1);
+			return text;
+		};
+		for (auto& [printed, name] : classNames)
+			printed = plain(printed);
+		auto nameClasses = [&](std::string message) {
+			constexpr std::string_view kCut = "... *TRUNCATED*";
+			for (size_t open = message.find('\''); open != std::string::npos; open = message.find('\'', open + 1))
+			{
+				const size_t close = message.find('\'', open + 1);
+				if (close == std::string::npos)
+					break;
+				const std::string quoted = plain(message.substr(open + 1, close - open - 1));
+				for (const auto& [printed, name] : classNames)
+				{
+					const bool cut = quoted.size() > kCut.size() && quoted.compare(quoted.size() - kCut.size(), kCut.size(), kCut) == 0;
+					const size_t length = cut ? quoted.size() - kCut.size() : quoted.size();
+					if (cut ? printed.compare(0, length, quoted, 0, length) == 0 : printed == quoted)
+					{
+						message.replace(open + 1, close - open - 1, name);
+						break;
+					}
+				}
+				const size_t next = message.find('\'', open + 1);
+				if (next == std::string::npos)
+					break;
+				open = next; // past the closing quote
+			}
+			// "Not all intersection parts are compatible", with one part of
+			// a subclass's type: the reason after it says what is wrong.
+			constexpr std::string_view kParts = "caused by:\n  Not all intersection parts are compatible.\n";
+			if (const size_t parts = message.find(kParts); parts != std::string::npos)
+				if (const size_t next = message.find("caused by:\n", parts + kParts.size()); next != std::string::npos)
+					message.erase(parts, next - parts);
+			return message;
+		};
 		std::set<std::string> reported;
 		for (const std::string& name : files.UserModules)
 		{
@@ -295,6 +364,12 @@ return m :: {
 			{
 				for (const Diagnostic& d : translation->Diagnostics)
 					out.push_back({ display, d.At, "cluau", d.Message, d.Warning });
+				for (const ClassInfo& c : translation->Classes)
+					if (c.UncheckedConstructor)
+						out.push_back({ display, c.At, "UncheckedConstructor",
+							c.Name + "(...)'s arguments are not checked: its Init comes from " + c.Base +
+								", another module's class (declare Init in " + c.Name + " to check them)",
+							true });
 				if (translation->HasErrors())
 					continue; // the translation's Luau is not the script: its errors would mislead
 			}
@@ -307,7 +382,7 @@ return m :: {
 				CheckFinding f;
 				f.File = display;
 				f.Code = Luau::get<Luau::SyntaxError>(e) ? "SyntaxError" : "TypeError";
-				f.Message = Luau::toString(e, Luau::TypeErrorToStringOptions{ &files });
+				f.Message = nameClasses(Luau::toString(e, Luau::TypeErrorToStringOptions{ &files }));
 				if (Luau::get<Luau::UnknownRequire>(e))
 				{
 					auto why = files.NotFound.find({ name, (int)e.location.begin.line });
@@ -327,10 +402,27 @@ return m :: {
 				if (seen.insert(key).second)
 					out.push_back(std::move(f));
 			}
-			if (translation)
+			const Luau::SourceModule* source = frontend.getSourceModule(name);
+			Luau::ModulePtr module = frontend.moduleResolver.getModule(name);
+			if (options.Lint && source && source->root && module)
+				for (const Luau::LintWarning& w :
+					Luau::lint(source->root, *source->names, frontend.globals.globalScope, module.get(), source->hotcomments, LintOptions()))
+				{
+					Position begin{ (int)w.location.begin.line, (int)w.location.begin.column };
+					if (translation)
+					{
+						// Not in what the translation generated (a class's header).
+						bool generated = false;
+						for (const Range& g : translation->Generated)
+							generated = generated || (begin.Line == g.Begin.Line && begin.Col >= g.Begin.Col && begin.Col < g.End.Col);
+						if (generated)
+							continue;
+						begin = translation->Map.FromLuau(begin);
+					}
+					out.push_back({ display, { begin, begin }, std::string("lint:") + Luau::LintWarning::getName(w.code), w.text, true });
+				}
+			if (translation && !options.Loose)
 			{
-				const Luau::SourceModule* source = frontend.getSourceModule(name);
-				Luau::ModulePtr module = frontend.moduleResolver.getModule(name);
 				if (source && module)
 					for (const check::Finding& c : check::Run(*source, *module, *translation))
 					{

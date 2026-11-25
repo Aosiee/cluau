@@ -2,6 +2,9 @@ before
 errors.cluau:3: attempt to index nil with 'field'
 stack backtrace:
 errors.cluau:3 function Inner
+    return (t.missing :: { field: number }).field
 errors.cluau:7 function Outer
+    Inner({})
 errors.cluau:11
+    Outer()
 exit: 1

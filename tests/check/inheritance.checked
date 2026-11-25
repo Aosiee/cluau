@@ -1,11 +1,10 @@
-inheritance.cluau:31:17: Expected this to be 'string', but got 'number'
-inheritance.cluau:32:1: Expected this to be 'string', but got 'number'
-inheritance.cluau:33:1: Type 't2 where t1 = setmetatable<{ Name: string }, { __index: { Init: (t1, string) -> (), Speak: (t1) -> string } }> ; t2 = setmetatable<{ Wings: number }, { __index: { Init: (t2, string, number) -> () } }> & t1' does not have key 'Fly'
-inheritance.cluau:35:1: Expected this to be 't2 where t1 = setmetatable<{ Name: string }, { __index: { Init: (t1, string) -> (), Speak: (t1) -> string } }> ; t2 = setmetatable<{ Wings: number }, { __index: { Init: (t2, string, number) -> () } }> & t1', but got 'Animal'
-caused by:
-  Not all intersection parts are compatible.
-Expected this to be 't2 where t1 = setmetatable<{ Name: string }, { __index: { Init: (t1, string) -> (), Speak: (t1) -> string } }> ; t2 = setmetatable<{ Wings: number }, { __index: { Init: (t1 & t2, string, number) -> () } }>', but got 'Animal'
+inheritance.cluau:34:17: Expected this to be 'string', but got 'number'
+inheritance.cluau:35:1: Expected this to be 'string', but got 'number'
+inheritance.cluau:36:1: Type 'Bird' does not have key 'Fly'
+inheritance.cluau:38:1: Expected this to be 'Bird', but got 'Animal'
 caused by:
   Table type '{ Name: string }' not compatible with type '{ Wings: number }' because the former is missing field 'Wings'
-cluau check: 4 error(s), 0 warning(s)
+inheritance.cluau:42:1: Expected this to be 'number', but got 'string & string'; none of the intersection parts are compatible
+inheritance.cluau:46:7: warning: Bike(...)'s arguments are not checked: its Init comes from Vehicle, another module's class (declare Init in Bike to check them)
+cluau check: 5 error(s), 1 warning(s)
 exit: 1

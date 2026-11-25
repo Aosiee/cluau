@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -121,12 +122,28 @@ __cluau_meta = {
 
 		void OnSigint(int)
 		{
-			// A second Ctrl-C while the first is pending (a script blocked
-			// in a read) ends the process.
+			// A second Ctrl-C while the first is pending ends the process.
 			if (g_Interrupt)
 				std::_Exit(130);
 			g_Interrupt = 1;
+	#ifdef _WIN32
 			std::signal(SIGINT, OnSigint);
+	#endif
+		}
+
+		void CatchSigint()
+		{
+	#ifdef _WIN32
+			std::signal(SIGINT, OnSigint);
+	#else
+			// Without SA_RESTART, so a script blocked reading standard input
+			// gets its read back and stops at the first Ctrl-C.
+			struct sigaction action = {};
+			action.sa_handler = OnSigint;
+			sigemptyset(&action.sa_mask);
+			action.sa_flags = 0;
+			sigaction(SIGINT, &action, nullptr);
+	#endif
 		}
 
 		std::string ToUtf8(const fs::path& p) { return detail::PathText(p); }
@@ -155,6 +172,83 @@ __cluau_meta = {
 		fs::path StartDir; // the working directory at start (relative chunk names resolve from it)
 		fs::path MainDir;  // the main script's directory (bare requires search it first)
 		std::set<std::string> Loading; // modules whose chunk is running (a require cycle)
+		std::map<std::string, std::string> Sources; // each chunk's source, by the name errors give it
+
+		// Line `line` (1-based) of a chunk's source, its indentation removed
+		// (how much in `indent`); "" when there is no such line.
+		std::string SourceLine(const std::string& name, int line, size_t* indent = nullptr) const
+		{
+			auto it = Sources.find(name);
+			if (it == Sources.end() || line < 1)
+				return {};
+			const std::string& text = it->second;
+			size_t start = 0;
+			for (int i = 1; i < line; i++)
+			{
+				start = text.find('\n', start);
+				if (start == std::string::npos)
+					return {};
+				start++;
+			}
+			size_t end = text.find('\n', start);
+			std::string out = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+			if (!out.empty() && out.back() == '\r')
+				out.pop_back();
+			const size_t first = out.find_first_not_of(" \t");
+			if (indent)
+				*indent = first == std::string::npos ? 0 : first;
+			return first == std::string::npos ? std::string() : out.substr(first);
+		}
+
+		// The source line under an error (and a caret under its column, when
+		// it has one): what the message is about.
+		std::string Excerpt(const std::string& name, int line, int col = -1) const
+		{
+			size_t indent = 0;
+			const std::string text = SourceLine(name, line, &indent);
+			if (text.empty())
+				return {};
+			std::string out = "\n    " + text;
+			if (col >= (int)indent)
+			{
+				std::string caret = "\n    ";
+				for (size_t i = indent; i < (size_t)col && i - indent < text.size(); i++)
+					caret += text[i - indent] == '\t' ? '\t' : ' ';
+				out += caret + "^";
+			}
+			return out;
+		}
+
+		// Luau's stack (`file:line function name` per frame) with each frame's
+		// source line under it.
+		std::string Backtrace(const std::string& trace) const
+		{
+			std::string out;
+			size_t at = 0;
+			while (at < trace.size())
+			{
+				size_t end = trace.find('\n', at);
+				if (end == std::string::npos)
+					end = trace.size();
+				const std::string frame = trace.substr(at, end - at);
+				at = end + 1;
+				if (frame.empty())
+					continue;
+				out += frame + "\n";
+				const size_t fn = frame.find(" function ");
+				const std::string where = frame.substr(0, fn);
+				const size_t colon = where.rfind(':');
+				if (colon == std::string::npos || colon + 1 >= where.size() ||
+					where.find_first_not_of("0123456789", colon + 1) != std::string::npos)
+					continue;
+				const std::string excerpt = Excerpt(where.substr(0, colon), std::atoi(where.c_str() + colon + 1));
+				if (!excerpt.empty())
+					out += excerpt.substr(1) + "\n";
+			}
+			while (!out.empty() && out.back() == '\n')
+				out.pop_back();
+			return out;
+		}
 
 		static Impl& Get(lua_State* L)
 		{
@@ -177,8 +271,11 @@ __cluau_meta = {
 		// Translates (script mode) and compiles `source`; pushes the chunk
 		// on L's stack on success. A .luau file (`luau`) is compiled as it is.
 		LoadStatus Load(lua_State* L, const std::string& source, const std::string& name, bool repl, bool quiet, std::string& error,
-			bool luau = false)
+			bool luau = false, const std::string* shown = nullptr)
 		{
+			// What errors quote: the source as written (the prompt's input
+			// without the `return ` it tries first).
+			Sources[name] = shown ? *shown : source;
 			TranslateOptions options;
 			options.Script = true;
 			options.Repl = repl;
@@ -194,16 +291,13 @@ __cluau_meta = {
 			for (const Diagnostic& d : result.Diagnostics)
 			{
 				std::string line = name + ":" + std::to_string(d.At.Begin.Line + 1) + ":" + std::to_string(d.At.Begin.Col + 1) + ": " +
-					(d.Warning ? "warning: " : "") + d.Message + "\n";
+					(d.Warning ? "warning: " : "") + d.Message + Excerpt(name, d.At.Begin.Line + 1, d.At.Begin.Col) + "\n";
 				if (d.Warning)
 					warnings += line;
 				else
-				{
 					error += line;
-					incomplete = incomplete || d.Message.find("has no closing") != std::string::npos ||
-						d.Message.find("unclosed") != std::string::npos || d.Message.find("unterminated") != std::string::npos;
-				}
 			}
+			incomplete = result.Unfinished;
 			if (!error.empty())
 			{
 				error.pop_back();
@@ -223,6 +317,10 @@ __cluau_meta = {
 				const char* msg = lua_tolstring(L, -1, &len);
 				error.assign(msg, len);
 				lua_pop(L, 1);
+				// `name:line: message`: the line under it.
+				const std::string prefix = name + ":";
+				if (error.compare(0, prefix.size(), prefix) == 0)
+					error += Excerpt(name, std::atoi(error.c_str() + prefix.size()));
 				return error.find("<eof>") != std::string::npos ? LoadStatus::Incomplete : LoadStatus::Error;
 			}
 			return LoadStatus::Ok;
@@ -258,7 +356,7 @@ __cluau_meta = {
 			if (trace.empty())
 				std::fprintf(stderr, "%s\n", message.c_str());
 			else
-				std::fprintf(stderr, "%s\nstack backtrace:\n%s\n", message.c_str(), trace.c_str());
+				std::fprintf(stderr, "%s\nstack backtrace:\n%s\n", message.c_str(), Backtrace(trace).c_str());
 			lua_pop(L, 1); // the thread
 			return nullptr;
 		}
@@ -525,21 +623,145 @@ __cluau_meta = {
 
 		// ---- the REPL's line reader -----------------------------------------
 
-		bool ReadLine(bool interactive, const char* prompt, std::string& line)
+		enum class Read { Line, End, Cancelled };
+
+	#ifdef CLUAU_HAS_ISOCLINE
+		// isocline gives no line for Ctrl-D on an empty line and for Ctrl-C
+		// alike; its highlighter sees every edit, so a line that had text when
+		// the reader gave up was Ctrl-C.
+		size_t g_EditLength = 0;
+
+		void TrackEdits(ic_highlight_env_t*, const char* input, void*) { g_EditLength = std::strlen(input); }
+
+		bool IsCompletionChar(const char* s, long len)
 		{
-#ifdef CLUAU_HAS_ISOCLINE
+			const char c = *s;
+			return len == 1 && (std::isalnum((unsigned char)c) || c == '.' || c == ':' || c == '_');
+		}
+
+		// The members a completion looks through for `table`: its own keys, then
+		// an `__index` table's, then a script class's base's.
+		void CompleteMembers(lua_State* L, const std::string& prefix, bool methodsOnly, std::set<std::string>& seen, ic_completion_env_t* cenv, const std::string& before)
+		{
+			for (int depth = 0; depth < 8 && lua_istable(L, -1); depth++)
+			{
+				lua_pushnil(L);
+				while (lua_next(L, -2))
+				{
+					if (lua_type(L, -2) == LUA_TSTRING)
+					{
+						const std::string key = lua_tostring(L, -2);
+						const bool isFunction = lua_isfunction(L, -1);
+						if (key.compare(0, prefix.size(), prefix) == 0 && key.rfind("__", 0) != 0 && (!methodsOnly || isFunction) &&
+							seen.insert(key).second)
+						{
+							const std::string completion = before + key + (isFunction ? "(" : "");
+							ic_add_completion_ex(cenv, completion.c_str(), key.c_str(), nullptr);
+						}
+					}
+					lua_pop(L, 1);
+				}
+				// Where missing keys come from.
+				bool next = false;
+				if (lua_getmetatable(L, -1))
+				{
+					lua_rawgetfield(L, -1, "__index");
+					if (lua_istable(L, -1) && !lua_rawequal(L, -1, -3))
+					{
+						lua_remove(L, -2); // the metatable
+						lua_remove(L, -2); // the table
+						next = true;
+					}
+					else
+						lua_pop(L, 2);
+				}
+				if (!next)
+				{
+					lua_rawgetfield(L, -1, "__base");
+					if (!lua_istable(L, -1))
+					{
+						lua_pop(L, 1);
+						break;
+					}
+					lua_remove(L, -2);
+				}
+			}
+		}
+
+		constexpr const char* kKeywords[] = { "let", "const", "class", "extends", "super", "function", "return", "if", "else", "while", "for",
+			"do", "break", "continue", "static", "signal", "true", "false", "nil", "type", "export", "typeof" };
+
+		void Completions(ic_completion_env_t* cenv, const char* word)
+		{
+			lua_State* L = static_cast<lua_State*>(ic_completion_arg(cenv));
+			const std::string text = word;
+			lua_checkstack(L, 16);
+			const int top = lua_gettop(L);
+			lua_pushvalue(L, LUA_GLOBALSINDEX);
+			size_t start = 0;
+			bool methodsOnly = false;
+			for (;;)
+			{
+				const size_t sep = text.find_first_of(".:", start);
+				if (sep == std::string::npos)
+					break;
+				// The next table along the path, without running any code.
+				const std::string key = text.substr(start, sep - start);
+				lua_pushlstring(L, key.data(), key.size());
+				lua_rawget(L, -2);
+				if (!lua_istable(L, -1))
+				{
+					// An instance's key may be its class's (through __index).
+					lua_pop(L, 1);
+					if (!lua_getmetatable(L, -1))
+					{
+						lua_settop(L, top);
+						return;
+					}
+					lua_rawgetfield(L, -1, "__index");
+					lua_pushlstring(L, key.data(), key.size());
+					lua_rawget(L, -2);
+					if (!lua_istable(L, -1))
+					{
+						lua_settop(L, top);
+						return;
+					}
+					lua_remove(L, -2);
+					lua_remove(L, -2);
+				}
+				lua_remove(L, -2);
+				methodsOnly = text[sep] == ':';
+				start = sep + 1;
+			}
+			const std::string prefix = text.substr(start);
+			std::set<std::string> seen;
+			CompleteMembers(L, prefix, methodsOnly, seen, cenv, text.substr(0, start));
+			if (start == 0)
+				for (const char* keyword : kKeywords)
+					if (std::string(keyword).compare(0, prefix.size(), prefix) == 0 && seen.insert(keyword).second)
+						ic_add_completion(cenv, keyword);
+			lua_settop(L, top);
+		}
+
+		void Complete(ic_completion_env_t* cenv, const char* input) { ic_complete_word(cenv, input, Completions, IsCompletionChar); }
+	#endif
+
+		Read ReadLine(bool interactive, const char* prompt, std::string& line)
+		{
+	#ifdef CLUAU_HAS_ISOCLINE
 			if (interactive)
 			{
+				g_EditLength = 0;
 				char* text = ic_readline(prompt);
 				if (!text)
-					return false;
+					return g_EditLength > 0 ? Read::Cancelled : Read::End;
 				line = text;
 				free(text);
 				if (!line.empty())
 					ic_history_add(line.c_str());
-				return true;
+				return Read::Line;
 			}
-#else
+	#else
 			if (interactive)
 			{
 				std::fputs(prompt, stdout);
@@ -547,13 +769,23 @@ __cluau_meta = {
 			}
 #endif
 			if (!std::getline(std::cin, line))
-				return false;
+				return Read::End;
 			if (!line.empty() && line.back() == '\r')
 				line.pop_back();
-			return true;
+			return Read::Line;
 		}
 
 	} // namespace
+
+	void detail::RaiseIfInterrupted(lua_State* L)
+	{
+		if (!g_Interrupt)
+			return;
+		g_Interrupt = 0;
+		g_Interrupted = true;
+		std::cin.clear();
+		luaL_error(L, "interrupted");
+	}
 
 	std::string Repr(lua_State* L, int index)
 	{
@@ -595,7 +827,7 @@ __cluau_meta = {
 		}
 
 		if (rt.Opts.CatchInterrupt)
-			std::signal(SIGINT, OnSigint);
+			CatchSigint();
 	}
 
 	Runtime::~Runtime()
@@ -642,6 +874,8 @@ __cluau_meta = {
 		{
 			ic_set_prompt_marker("", "");
 			ic_enable_brace_insertion(false);
+			ic_set_default_highlighter(TrackEdits, nullptr);
+			ic_set_default_completer(Complete, L);
 			if (const char* home = std::getenv(
 #ifdef _WIN32
 					"USERPROFILE"
@@ -653,12 +887,21 @@ __cluau_meta = {
 		}
 #endif
 		if (interactive)
-			std::printf("cluau %s (C-syntax-flavoured Luau). Ctrl-D exits.\n", Version());
+			std::printf("cluau %s (C-syntax-flavoured Luau). Tab completes; Ctrl-C abandons an input; Ctrl-D exits.\n", Version());
 
 		std::string buffer;
 		std::string line;
-		while (ReadLine(interactive, buffer.empty() ? "> " : ">> ", line))
+		for (;;)
 		{
+			const Read read = ReadLine(interactive, buffer.empty() ? "> " : ">> ", line);
+			if (read == Read::Cancelled || (read == Read::End && !buffer.empty() && interactive))
+			{
+				// Ctrl-C (or Ctrl-D inside a statement): the input is abandoned.
+				buffer.clear();
+				continue;
+			}
+			if (read == Read::End)
+				break;
 			if (buffer.empty() && line.find_first_not_of(" \t") == std::string::npos)
 				continue;
 			const bool force = !buffer.empty() && line.empty(); // an empty line ends an input
@@ -666,7 +909,7 @@ __cluau_meta = {
 
 			std::string error;
 			// An expression prints its value; anything else runs as statements.
-			bool expression = rt.Load(L, "return " + buffer, "stdin", true, true, error) == LoadStatus::Ok;
+			bool expression = rt.Load(L, "return " + buffer, "stdin", true, true, error, false, &buffer) == LoadStatus::Ok;
 			if (!expression)
 			{
 				const LoadStatus status = rt.Load(L, buffer, "stdin", true, false, error);

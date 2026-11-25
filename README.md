@@ -123,7 +123,8 @@ The build fetches Luau 0.748 for the runtime and the checker (`-DCLUAU_LUAU_VERS
 and convert commands with no Luau at all. `ctest` runs the translator's
 tests, the script tests (`tests/scripts/*.cluau` against their `.expected`
 output, and `cluau check` on each) and the checker's tests
-(`tests/check/*.cluau` against their `.checked` output).
+(`tests/check/*.cluau` against their `.checked` output), and on Linux
+and macOS the prompt driven in a pseudo-terminal (`tests/repl_terminal.py`).
 
 `hamr run` runs the same checks as a [hamr](https://github.com/Aosiee/hamr)
 suite (`hamr.cluau`): the tests, the script tests and the checker's tests in

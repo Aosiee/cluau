@@ -1,0 +1,7 @@
+class Vehicle {
+	Wheels: number = 4
+
+	function Init(wheels: number) {
+		self.Wheels = wheels
+	}
+}

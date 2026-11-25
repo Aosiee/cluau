@@ -1,0 +1,10 @@
+// cluau check --lint
+// Luau's lint warnings, at the .cluau lines.
+function Greet(name: string): string {
+	const unused = 1
+	return "hello, " .. name
+}
+
+let count = 1
+let count = 2
+print(Greet("cluau"), count)

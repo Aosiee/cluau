@@ -48,19 +48,29 @@ The exit status is 0, 1 after an error, 2 when the script cannot be read,
 
 ## Errors
 
-An error prints its message at the script's line, then the stack. Every
-translated line stays on its line, so the lines are the `.cluau` file's:
+An error prints its message at the script's line, then the stack, each
+frame with its line of source. Every translated line stays on its line, so
+the lines are the `.cluau` file's:
 
 ```
 errors.cluau:3: attempt to index nil with 'field'
 stack backtrace:
 errors.cluau:3 function Inner
+    return (t.missing :: { field: number }).field
 errors.cluau:7 function Outer
+    Inner({})
 errors.cluau:11
+    Outer()
 ```
 
-A syntax error is reported before anything runs, with its line and column
-(`script.cluau:2:12: this '{' has no closing '}'`).
+A syntax error is reported before anything runs, with its line and
+column, and a caret under the place:
+
+```
+syntax_error.cluau:2:12: this '{' has no closing '}'
+    if (x > 0) {
+               ^
+```
 
 ## Checking
 
@@ -94,6 +104,17 @@ The exit status is 1 when there is an error (warnings alone are 0), so it
 fits a CI step or a pre-commit hook. Running a script does not check it:
 like Python, `cluau script.cluau` runs whatever parses.
 
+Two options change what is checked:
+
+- `--loose` checks with Luau's strict mode alone, without cluau's strict
+  rules: `any` needs no exemption and functions need no annotations
+  beyond what Luau itself asks for. A type error is still an error. It
+  suits throwaway scripts and code on its way to full typing.
+- `--lint` adds Luau's lint warnings: unused locals and functions,
+  shadowed names, unreachable code, duplicate keys and conditions, and
+  more. They are warnings, so they do not change the exit status. Prefix a
+  name with `_` to say it is unused on purpose.
+
 - Modules resolve exactly as `require` resolves them at run time, and a
   module's own errors are reported at its file. A module that is not found
   is an error naming where it was looked for.
@@ -101,20 +122,27 @@ like Python, `cluau script.cluau` runs whatever parses.
   give them). `json.decode` returns `unknown`: cast it to the shape you
   expect (`json.decode(text) :: { name: string }`).
 - Classes are typed: calling one checks the arguments against `Init`'s
-  parameters, an instance has exactly the declared fields and methods,
-  and an operator on instances checks against the class's metamethod
-  (`a + b` needs `__add`). Read statics through the class (`Vec.Count`).
+  parameters, an instance has exactly the declared fields, methods and
+  statics, and an operator on instances checks against the class's
+  metamethod (`a + b` needs `__add`). Errors name classes, subclasses
+  included (`Type 'Bird' does not have key 'Fly'`).
+- A subclass of another module's class that declares no `Init` of its own
+  gets a warning: its constructor's arguments cannot be checked. Declaring
+  `Init` (calling `super:Init(...)`) checks them.
 - A `.luau` module is checked in its own mode (nonstrict unless it starts
   with `--!strict`).
-- `pcall(require, ...)` gives `any` (the module's type is lost), so its use
-  needs an exemption.
+- To catch a module's load errors and keep its type, wrap the `require`
+  in a function: `const ok, mod = pcall(function() { return require("./x") })`.
+  The module must exist for the check. `pcall(require, "./x")` (for a
+  module that may be absent) gives `any`, so its use needs an exemption.
 
 ## The interactive prompt
 
 `cluau` with no arguments reads one input at a time. An expression prints
 its value (`repr`'s form: strings quoted, tables with their contents), and
-the last value is `_`. A statement whose braces or brackets are still open
-continues on the next line (`>>`); an empty line ends it early.
+the last value is `_`. An input whose braces, brackets, comment or long
+string are still open continues on the next line (`>>`); an empty line
+ends it early. A pasted block arrives whole.
 
 ```
 > let words = { "a", "b" }
@@ -129,8 +157,18 @@ continues on the next line (`>>`); an empty line ends it early.
 
 At the prompt a top-level `let`, `const` or `local` sets a global (each
 input is its own chunk, so a local would end with its line), and a class
-is a global too. Ctrl-C stops a running input; Ctrl-D leaves. The history
-is kept in `~/.cluau_history`.
+is a global too.
+
+- Tab completes globals, keywords, a module's or a table's members
+  (`string.up` to `string.upper(`), and an instance's methods after `:`,
+  its class's and its base's included.
+- Ctrl-C abandons the input being typed (a line, or a statement over
+  several) and gives a new prompt; while code runs, it stops the code. On
+  an empty prompt, Ctrl-C and Ctrl-D leave.
+- The history is kept in `~/.cluau_history`.
+
+A script waiting in `input()` or `io.readLine()` stops at the first
+Ctrl-C too (`interrupted`, exit status 130).
 
 ## Classes in scripts
 
@@ -230,7 +268,7 @@ print(Bird("Pip", 2):Describe())   // Pip says tweet
   `Bird` goes wherever an `Animal` is expected. The constructor's
   arguments are checked against `Init` (or the base's, when the base is in
   the same file; a subclass of another module's class that declares no
-  `Init` is constructed unchecked).
+  `Init` is constructed unchecked, and `cluau check` warns about it).
 
 ## Modules
 

@@ -9,5 +9,6 @@ stdin:1: an error, and the session goes on
 stack backtrace:
 [C] function error
 stdin:1
+    error("an error, and the session goes on")
 a block over lines
 exit: 0

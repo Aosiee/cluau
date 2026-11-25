@@ -1,0 +1,5 @@
+lint.cluau:4:8: warning: Variable 'unused' is never used; prefix with '_' to silence
+lint.cluau:8:5: warning: Variable 'count' is never used; prefix with '_' to silence
+lint.cluau:9:5: warning: Variable 'count' shadows previous declaration at line 8
+cluau check: 0 error(s), 3 warning(s)
+exit: 0

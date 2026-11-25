@@ -107,6 +107,10 @@ namespace cluau {
 		Range At;            // the class's name
 		std::string Base;    // `class Name extends Base`: the base class's expression ("" without one)
 		Range BaseAt;        // the base's expression
+		// The class declares no Init and inherits one from a base the
+		// translator cannot see (another module's): its constructor's
+		// arguments cannot be typed.
+		bool UncheckedConstructor = false;
 		int BodyBeginLine = 0;
 		int BodyEndLine = 0; // the closing brace's line
 		std::vector<ClassField> Fields;
@@ -204,6 +208,10 @@ namespace cluau {
 		std::vector<Range> Generated;       // Luau-text ranges the translator generated (type aliases, ...)
 		std::optional<ClassInfo> Class;     // the file's class (the first, in script mode)
 		std::vector<ClassInfo> Classes;     // every class, in order (script mode may declare several)
+		// The source ends inside a block, a bracket, a comment or a long
+		// string: an interactive prompt reads another line rather than
+		// reporting the errors.
+		bool Unfinished = false;
 		bool HasErrors() const;
 	};
 

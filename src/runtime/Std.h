@@ -24,4 +24,8 @@ namespace cluau::runtime::detail {
 	// The standard modules' names, for error messages ("fs, io, ...").
 	const char* StdNames();
 
+	// After a read of standard input came back empty-handed: when a Ctrl-C
+	// stopped it, raises the `interrupted` error (and does not return).
+	void RaiseIfInterrupted(lua_State* L);
+
 } // namespace cluau::runtime::detail

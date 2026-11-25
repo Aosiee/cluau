@@ -1,0 +1,11 @@
+// cluau check --loose
+// Luau's strict mode without cluau's rules: an any needs no exemption and a
+// function needs no return annotation, but a type error is still one.
+const anything: any = 1
+print(anything)
+
+function Describe(x: number) {
+	return `value {x}`
+}
+
+const wrong: number = Describe(2)

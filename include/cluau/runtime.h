@@ -73,6 +73,12 @@ namespace cluau::runtime {
 		// As Options::SearchPath: where bare `require` names are looked for
 		// after each checked script's directory.
 		std::vector<std::string> SearchPath;
+		// Luau's strict mode only, without cluau's strict rules (`any` needs
+		// no exemption, parameters need no annotation): `cluau check --loose`.
+		bool Loose = false;
+		// Luau's lint warnings too (unused locals, shadowing, unreachable
+		// code, ...): `cluau check --lint`.
+		bool Lint = false;
 	};
 
 	struct CheckFinding

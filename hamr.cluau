@@ -37,9 +37,9 @@ for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 		paths = kPaths,
 	})
 	suite:step(`scripts:{name}`, {
-		doc = "Runs tests/scripts/*.cluau and checks them and tests/check/*.cluau with the built tool, comparing the output with the expected files.",
+		doc = "Runs tests/scripts/*.cluau and checks them and tests/check/*.cluau with the built tool, comparing the output with the expected files, and drives the prompt in a terminal.",
 		needs = { `build:{name}` },
-		run = { "ctest", "--test-dir", dir, "-R", "^(script|check):", "--output-on-failure" },
+		run = { "ctest", "--test-dir", dir, "-R", "^(script|check|repl):", "--output-on-failure" },
 		findings = hamr.findings.failLines("script", "FAIL"),
 		timeout = 300,
 		budget = 10,
@@ -73,7 +73,7 @@ suite:step("docs-examples", {
 			ctx:fail("found no cluau example in docs/syntax.md")
 		}
 		// The scripting guide's blocks are scripts, except its transcripts
-		// (a prompt session, a command's output, an error's output).
+		// (a prompt session, a command and its output, an error's output).
 		const scripting = host.read(host.join(ctx.root, "docs", "scripting.md")) or ""
 		const blocks: { string } = {}
 		for (block in string.gmatch(scripting, "```\n(.-)```")) {
@@ -81,7 +81,8 @@ suite:step("docs-examples", {
 		}
 		let scripts = 0
 		for (i, block in blocks) {
-			if (string.sub(block, 1, 2) != "> " && string.sub(block, 1, 2) != "$ " && !string.find(block, "stack backtrace", 1, true)) {
+			const transcript = string.sub(block, 1, 2) == "> " || string.sub(block, 1, 2) == "$ " || string.match(block, "^[%w_%-%./]+%.cluau:%d+") != nil
+			if (!transcript) {
 				scripts += 1
 				const file = host.join(ctx.out, `scripting-example-{scripts}.cluau`)
 				host.write(file, block)

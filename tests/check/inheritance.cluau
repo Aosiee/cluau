@@ -1,6 +1,9 @@
 // Subclass errors cluau check reports.
+const Vehicle = require("./lib/vehicle")
+
 class Animal {
 	Name: string = "?"
+	static Kingdom = "animalia"
 
 	function Init(name: string) {
 		self.Name = name
@@ -33,3 +36,18 @@ const wings: string = pip.Wings     // the subclass's own field keeps its type
 pip:Fly()                           // neither class has Fly
 const animal: Animal = pip          // a subclass is its base
 const bird: Bird = Animal("Generic") // a base is not a subclass
+
+// Statics are read through instances too.
+const kingdom: string = pip.Kingdom
+const notANumber: number = pip.Kingdom
+
+// A subclass of another module's class that declares no Init: a warning,
+// its constructor's arguments are not checked.
+class Bike extends Vehicle {
+}
+class Car extends Vehicle {
+	function Init(doors: number) {
+		super:Init(4)
+	}
+}
+print(kingdom, Bike(2), Car(4))

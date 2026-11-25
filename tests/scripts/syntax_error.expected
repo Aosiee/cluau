@@ -1,2 +1,4 @@
 syntax_error.cluau:2:12: this '{' has no closing '}'
+    if (x > 0) {
+               ^
 exit: 1

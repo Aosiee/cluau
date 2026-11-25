@@ -35,6 +35,7 @@ namespace cluau::detail {
 		int Col = 0;
 		int EndLine = 0;
 		int EndCol = 0;
+		bool Open = false; // a comment, long string or interpolated string the source ends inside
 
 		bool Is(std::string_view text) const { return (Kind == TokenKind::Op || Kind == TokenKind::Name) && Text == text; }
 		bool IsComment() const { return Kind == TokenKind::LineComment || Kind == TokenKind::BlockComment; }
