@@ -1,0 +1,23 @@
+let x: number = 6
+x * 7
+let t = { 1, 2, three = 3 }
+t
+function Square(n: number): number {
+	return n * n
+}
+Square(x)
+class Point {
+	X: number = 0
+	function Init(x: number) {
+		self.X = x
+	}
+}
+Point(5).X
+_ + 1
+"a string"
+print("printed")
+error("an error, and the session goes on")
+if (x > 1) {
+	print("a block over lines")
+}
+nil

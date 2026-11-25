@@ -1,15 +1,14 @@
 // cluau's suite for hamr (github.com/Aosiee/hamr): `hamr run` here.
 //
-// The translator's tests in a release and a debug build, the command-line
-// tool on the docs' examples, and (nightly, with --set luauDir=<a Luau
-// checkout>) the strict checker built against a host's Luau.
+// The translator's tests, the script tests and the checker's tests in a
+// release and a debug build (the builds fetch Luau for the runtime and the
+// checker), and the command-line tool on the docs' examples.
 
 const hamr = require("@hamr")
 type Context = hamr.Context
 
-const suite = hamr.suite("cluau", { budgets = { fast = 60, nightly = 300 } })
+const suite = hamr.suite("cluau", { budgets = { fast = 60 } })
 const cxx = suite:var("cxx", "c++")
-const luauDir = suite:var("luauDir", "")
 
 const kPaths = { "include/**", "src/**", "tests/**", "tools/**", "CMakeLists.txt" }
 
@@ -37,12 +36,22 @@ for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 		budget = 10,
 		paths = kPaths,
 	})
+	suite:step(`scripts:{name}`, {
+		doc = "Runs tests/scripts/*.cluau and checks them and tests/check/*.cluau with the built tool, comparing the output with the expected files.",
+		needs = { `build:{name}` },
+		run = { "ctest", "--test-dir", dir, "-R", "^(script|check):", "--output-on-failure" },
+		findings = hamr.findings.failLines("script", "FAIL"),
+		timeout = 300,
+		budget = 10,
+		paths = kPaths,
+	})
 }
 
 // Every code block the syntax guide marks as cluau translates without an
-// error.
+// error, and so does every script in the scripting guide (in script mode);
+// the guide's self-contained scripts type-check too.
 suite:step("docs-examples", {
-	doc = "Translates every cluau example in docs/syntax.md with the built tool.",
+	doc = "Translates every cluau example in docs/syntax.md and docs/scripting.md with the built tool.",
 	needs = { "build:release" },
 	timeout = 120,
 	budget = 5,
@@ -63,26 +72,31 @@ suite:step("docs-examples", {
 		if (index == 0) {
 			ctx:fail("found no cluau example in docs/syntax.md")
 		}
-	},
-})
-
-// The strict checker compiles against a host's Luau (it is tested in the
-// hosts, which link it).
-suite:step("check-builds", {
-	tier = "nightly",
-	doc = "Builds cluau_check against the Luau checkout --set luauDir names.",
-	resources = { exclusive = true },
-	timeout = 900,
-	budget = 60,
-	run = function(ctx: Context) {
-		if (luauDir == "") {
-			ctx:fail("name a Luau checkout: --set luauDir=<dir>")
-			return
+		// The scripting guide's blocks are scripts, except its transcripts
+		// (a prompt session, a command's output, an error's output).
+		const scripting = host.read(host.join(ctx.root, "docs", "scripting.md")) or ""
+		const blocks: { string } = {}
+		for (block in string.gmatch(scripting, "```\n(.-)```")) {
+			table.insert(blocks, block)
 		}
-		const dir = "build-hamr-check"
-		ctx:run({ "cmake", "-S", ".", "-B", dir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", `-DCMAKE_CXX_COMPILER={cxx}`,
-			`-DCLUAU_LUAU_DIR={luauDir}` })
-		ctx:run({ "cmake", "--build", dir, "-j", tostring(host.cores()), "--target", "cluau_check" })
+		let scripts = 0
+		for (i, block in blocks) {
+			if (string.sub(block, 1, 2) != "> " && string.sub(block, 1, 2) != "$ " && !string.find(block, "stack backtrace", 1, true)) {
+				scripts += 1
+				const file = host.join(ctx.out, `scripting-example-{scripts}.cluau`)
+				host.write(file, block)
+				ctx:run({ "build-hamr-release/cluau", "translate", "--script", file })
+				// A self-contained script also type-checks, unless the guide
+				// shows its errors next (a `$ cluau check` block).
+				const next = blocks[i + 1] or ""
+				if (!string.find(block, "require(\"./", 1, true) && string.sub(next, 1, 13) != "$ cluau check") {
+					ctx:run({ "build-hamr-release/cluau", "check", file })
+				}
+			}
+		}
+		if (scripts == 0) {
+			ctx:fail("found no script in docs/scripting.md")
+		}
 	},
 })
 

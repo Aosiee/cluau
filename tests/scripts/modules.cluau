@@ -1,0 +1,17 @@
+// require: "./" from this file, a bare name from the script's directory,
+// a directory's init file, .luau modules, and each module run once.
+
+const greet = require("./lib/greet")
+const again = require("lib/greet")
+const shapes = require("./lib/shapes")
+const legacy = require("./lib/legacy")
+
+print(greet.Hello("cluau"), greet == again, greet.Loads)
+print(shapes.Square(3).Area, repr(shapes.Square(2)))
+print(legacy.twice(21))
+
+const ok, err = pcall(require, "./lib/missing")
+print(ok, string.find(tostring(err), "not found", 1, true) != nil) // allow-any: pcall(require) cannot type the module
+
+const probe = require("./lib/nested/probe")
+print(probe.Ok, probe.Sibling)

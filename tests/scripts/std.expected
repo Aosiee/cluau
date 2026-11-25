@@ -1,0 +1,34 @@
+args:	{"alpha", "beta"}	std.cluau
+true
+set
+a/b/c.txt	a/b	c.txt
+c.tar	.gz	a/c
+true	false	a/b
+{"one", "two", ""}
+{"a.txt", "sub"}	8
+{"a.txt", "sub/deep/b.txt"}
+true	true	false
+true	true
+remove a full directory:	false
+cleaned:	true
+false	fs.read: cannot read 'no/such/file.txt': no such file or directory
+cluau	b	1.5	true	nil	é😀
+{"n":1.5,"name":"cluau","ok":true,"tags":["a","b"],"u":"é😀"}
+{
+  "empty": [],
+  "list": [
+    1,
+    2,
+    3
+  ],
+  "nested": {
+    "x": 1
+  }
+}
+"line\n\"quoted\""	0.1	1e+300	-3
+false	json.decode: expected ',' or ']' at line 1 column 6
+false	json.encode: a function value has no JSON form
+no newline 42
+0	from a command
+3
+exit: 0

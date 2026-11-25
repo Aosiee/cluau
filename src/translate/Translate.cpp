@@ -236,6 +236,8 @@ namespace cluau {
 				: m_Src(source), m_Options(options)
 			{
 				m_Profile = options.Profile ? options.Profile : &m_DefaultProfile;
+				if (m_Options.Repl)
+					m_Options.Script = true;
 			}
 
 			TranslateResult Run()
@@ -449,6 +451,12 @@ namespace cluau {
 				const Token& t = m_Toks[i];
 				if (t.Kind == TokenKind::LineComment)
 				{
+					if (t.Text.rfind("#!", 0) == 0)
+					{
+						// A script's interpreter line (`#!/usr/bin/env cluau`).
+						m_Repl[i] = "--" + std::string(t.Text);
+						return;
+					}
 					if (t.Text.size() > 2 && t.Text[2] == '!')
 					{
 						// A Luau hot comment (--!nonstrict) would change the
@@ -531,6 +539,8 @@ namespace cluau {
 				}
 				else if (w == "function")
 					Function(i);
+				else if ((w == "let" || w == "local" || w == "const") && m_Options.Repl && m_Stack.empty())
+					ReplDeclaration(i);
 				else if (w == "let" || w == "local")
 					m_Repl[i] = "local";
 				else if (w == "const")
@@ -618,8 +628,8 @@ namespace cluau {
 			}
 
 			// An `if` where an expression is expected (after `=`, `(`, `,`,
-			// an operator, `return`, ...) is an if-expression (CLUAU_PLAN §5
-			// Q12): `if (c) a else if (d) b else e` lowers to Luau's
+			// an operator, `return`, ...) is an if-expression:
+			// `if (c) a else if (d) b else e` lowers to Luau's
 			// `if (c) then a elseif (d) then b else e`, every token in place.
 			bool IsExpressionPosition() const
 			{
@@ -749,6 +759,39 @@ namespace cluau {
 				}
 			}
 
+			// A top-level declaration in REPL mode assigns globals:
+			// `let x: T = v` -> `x = v`, `let x` -> `x = nil`,
+			// `local function f` -> `function f`.
+			void ReplDeclaration(size_t i)
+			{
+				m_Repl[i] = "";
+				size_t j = Sig(i + 1);
+				if (m_Toks[j].Is("function"))
+					return;
+				size_t last = npos;
+				while (m_Toks[j].Kind == TokenKind::Name)
+				{
+					last = j;
+					j = Sig(j + 1);
+					if (m_Toks[j].Is(":"))
+					{
+						const size_t typeEnd = SkipType(j + 1);
+						for (size_t k = j; k < typeEnd; k++)
+							if (!m_Toks[k].IsComment())
+							{
+								m_Repl[k] = "";
+								m_Skip[k] = 1;
+							}
+						j = Sig(typeEnd);
+					}
+					if (!m_Toks[j].Is(","))
+						break;
+					j = Sig(j + 1);
+				}
+				if (last != npos && !m_Toks[j].Is("="))
+					m_Repl[last] = std::string(m_Toks[last].Text) + " = nil";
+			}
+
 			// ---- classes -------------------------------------------------
 
 			struct FieldSpan
@@ -766,7 +809,7 @@ namespace cluau {
 					Error(t, "manifests are declarations: classes are not allowed");
 					return;
 				}
-				if (m_R.Class)
+				if (m_R.Class && !m_Options.Script)
 				{
 					Error(t, "a file declares at most one class");
 					return;
@@ -800,24 +843,36 @@ namespace cluau {
 
 				// The header: the module table and the class type, on the
 				// class line.
-				std::string type = "export type " + m_ClassName + " = { " + ExpandClass(m_Profile->BaseMembers, m_ClassName);
+				ClassMembers members;
+				members.Fields = ExpandClass(m_Profile->BaseMembers, m_ClassName);
 				for (const ClassField& field : info.Fields)
 				{
 					const std::string luauType = m_Profile->FieldType ? m_Profile->FieldType(field) : field.Type;
-					type += field.Name + ": " + (luauType.empty() ? "any" : luauType) + ", ";
+					members.Fields += field.Name + ": " + (luauType.empty() ? "any" : luauType) + ", ";
 				}
 				if (m_Profile->SignalType)
 					for (const ClassSignal& signal : info.Signals)
-						type += signal.Name + ": " + m_Profile->SignalType(signal) + ", ";
+						members.Fields += signal.Name + ": " + m_Profile->SignalType(signal) + ", ";
 				for (const ClassMethod& m : info.Methods)
+					members.Methods.push_back({ m.Name, MethodParamTypes(m.Params),
+						!m.ReturnType.empty() ? m.ReturnType : m.ReturnsValue ? std::string("...any") : std::string("()") });
+				std::string type;
+				std::string head;
+				if (m_Profile->Header)
 				{
-					type += m.Name + ": (self: " + m_ClassName + MethodParamTypes(m.Params) + ") -> ";
-					type += !m.ReturnType.empty() ? m.ReturnType : m.ReturnsValue ? std::string("...any") : std::string("()");
-					type += ", ";
+					ClassHeader custom = m_Profile->Header(info, members);
+					head = m_ClassName + " = " + ExpandClass(custom.TableInit, m_ClassName) + "; ";
+					type = ExpandClass(custom.Types, m_ClassName);
 				}
-				type += "}";
-				m_Repl[i] = "local";
-				const std::string head = m_ClassName + " = " + ExpandClass(m_Profile->TableInit, m_ClassName) + "; ";
+				else
+				{
+					type = "export type " + m_ClassName + " = { " + members.Fields;
+					for (const ClassMembers::Method& m : members.Methods)
+						type += m.Name + ": (self: " + m_ClassName + m.ParamTypes + ") -> " + m.ReturnType + ", ";
+					type += "}";
+					head = m_ClassName + " = " + ExpandClass(m_Profile->TableInit, m_ClassName) + "; ";
+				}
+				m_Repl[i] = m_Options.Repl ? "" : "local";
 				std::string signals;
 				if (!info.Signals.empty())
 				{
@@ -836,12 +891,17 @@ namespace cluau {
 					}
 				}
 				m_Repl[nameTok] = head + type + signals;
-				m_GeneratedAt[nameTok] = { head.size(), type.size() };
+				if (m_Profile->Header)
+					m_GeneratedAt[nameTok] = { 0, head.size() + type.size() };
+				else
+					m_GeneratedAt[nameTok] = { head.size(), type.size() };
 				m_Repl[brace] = "";
 				m_Stack.push_back({ Frame::Class, BlockKind::Plain, brace });
 				m_OpenedBlock[brace] = 1;
 				m_ClassEndToken = end;
-				m_R.Class = std::move(info);
+				m_R.Classes.push_back(info);
+				if (!m_R.Class)
+					m_R.Class = std::move(info);
 				m_Skip[nameTok] = 1;
 				m_Skip[brace] = 1;
 			}
@@ -1289,6 +1349,14 @@ namespace cluau {
 				m_ClosedBlock[i] = 1;
 				if (open.Kind == Frame::Class)
 				{
+					if (m_Options.Script)
+					{
+						// A local the code after it uses; CloseAtEnd returns it when
+						// it is the file's last statement.
+						m_Repl[i] = "";
+						m_LastClassEnd = i;
+						return;
+					}
 					m_Repl[i] = "return " + m_ClassName;
 					m_ClassEnded = true;
 					return;
@@ -1322,6 +1390,14 @@ namespace cluau {
 
 			void CloseAtEnd()
 			{
+				if (m_LastClassEnd != npos && !m_Options.Repl)
+				{
+					size_t k = Sig(m_LastClassEnd + 1);
+					while (m_Toks[k].Is(";"))
+						k = Sig(k + 1);
+					if (m_Toks[k].Kind == TokenKind::Eof)
+						m_Repl[m_LastClassEnd] = "return " + m_ClassName;
+				}
 				while (!m_ExprIfs.empty())
 					MissingElse();
 				while (!m_Stack.empty())
@@ -1334,7 +1410,7 @@ namespace cluau {
 					case Frame::Paren: m_Tail += ")"; Error(at, "unclosed '('"); break;
 					case Frame::Bracket: m_Tail += "]"; Error(at, "unclosed '['"); break;
 					case Frame::Table: m_Tail += "}"; Error(at, "unclosed '{'"); break;
-					case Frame::Class: m_Tail += " return " + m_ClassName; Error(at, "the class's '{' has no closing '}'"); break;
+					case Frame::Class: m_Tail += m_Options.Script ? std::string() : " return " + m_ClassName; Error(at, "the class's '{' has no closing '}'"); break;
 					case Frame::Block:
 						m_Tail += open.Block == BlockKind::Repeat ? " until false" : " end";
 						Error(at, "this '{' has no closing '}'");
@@ -1386,9 +1462,16 @@ namespace cluau {
 						continue;
 					}
 					m_R.Map.AddAnchor(t.Line, t.Col, outCol);
+					// A word never runs into the word beside it (`{}` is
+					// `do end`, `}print()` is `end print()`).
+					auto isWord = [](char c) { return std::isalnum((unsigned char)c) || c == '_'; };
+					if (!text.empty() && isWord(text.front()) && !out.empty() && isWord(out.back()))
+						append(" ");
 					if (auto gen = m_GeneratedAt.find(i); gen != m_GeneratedAt.end())
 						m_R.Generated.push_back({ { t.Line, outCol + (int)gen->second.first }, { t.Line, outCol + (int)(gen->second.first + gen->second.second) } });
 					append(text);
+					if (!out.empty() && isWord(out.back()) && t.End < m_Src.size() && isWord(m_Src[t.End]))
+						append(" ");
 					m_R.Map.AddAnchor(t.EndLine, t.EndCol, outCol);
 					pos = t.End;
 				}
@@ -1434,6 +1517,7 @@ namespace cluau {
 			std::string m_ClassName;
 			size_t m_ClassEndToken = npos;
 			bool m_ClassEnded = false;
+			size_t m_LastClassEnd = npos; // script mode: the last class's `}`
 			size_t m_PrevSig = npos;
 			size_t m_MethodHeaderEnd = npos;
 			std::string m_Tail;
@@ -1507,9 +1591,49 @@ namespace cluau {
 		return Translator(source, options).Run();
 	}
 
+	const ClassProfile& ScriptProfile()
+	{
+		static const ClassProfile profile = [] {
+			ClassProfile p;
+			// The class table: its instances' metatable, callable through the
+			// runtime's shared `__cluau_meta` (the cast types the call with
+			// Init's parameters). Instances: their fields, with a metatable
+			// whose __index holds the methods and which carries the
+			// metamethods, so `a + b` and `tostring(a)` check too.
+			p.Header = [](const ClassInfo& info, const ClassMembers& members) {
+				std::string init = ", ";
+				for (const ClassMembers::Method& m : members.Methods)
+					if (m.Name == "Init")
+						init = m.ParamTypes;
+				ClassHeader h;
+				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\" }, __cluau_meta :: { __call: (unknown" +
+					(init == ", " ? std::string() : init) + ") -> $Class })";
+				std::string methods, metamethods;
+				for (const ClassMembers::Method& m : members.Methods)
+				{
+					const std::string member = m.Name + ": (self: $Class" + m.ParamTypes + ") -> " + m.ReturnType + ", ";
+					(m.Name.rfind("__", 0) == 0 ? metamethods : methods) += member;
+				}
+				h.Types = "export type $Class = typeof(setmetatable({} :: { " + members.Fields + "}, {} :: { __index: { " + methods + "}, " +
+					metamethods + "}))";
+				(void)info;
+				return h;
+			};
+			// A default is evaluated for each instance (a `{}` default is
+			// each instance's own table).
+			p.LowerField = [](const ClassField& field, const std::string& className, std::string&) {
+				if (field.Default.empty())
+					return std::string();
+				return className + ".Fields." + field.Name + " = function() return " + field.Default + " end";
+			};
+			return p;
+		}();
+		return profile;
+	}
+
 	const char* Version()
 	{
-		return "0.5.0";
+		return "0.6.0";
 	}
 
 } // namespace cluau

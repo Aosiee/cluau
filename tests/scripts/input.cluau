@@ -1,0 +1,11 @@
+// input() and io.readLine() read standard input (input.stdin).
+const io = require("@std/io")
+const name = input("name? ")
+print(`hello, {name}`)
+let total = 0
+let line = io.readLine()
+while (line != nil) {
+	total += tonumber(line) or 0
+	line = io.readLine()
+}
+print("total", total)

@@ -77,7 +77,9 @@ annotations and method calls.
 ## Classes
 
 A file may declare one class. It must be the file's last statement; the
-file's module value is the class.
+file's module value is the class. (A script that `cluau` runs may declare
+any number, anywhere at its top level, and construct them by calling them:
+see [scripting.md](scripting.md#classes-in-scripts).)
 
 ```
 class Player {

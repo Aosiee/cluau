@@ -1,0 +1,9 @@
+// Modules: their types follow require, and each module's own errors are
+// reported at its file.
+const greet = require("./lib/greet")
+const missing = require("./lib/missing")
+const nope = require("@std/nope")
+
+print(greet.Hello("cluau"))
+print(greet.Hello(42))
+print(greet.Goodbye())

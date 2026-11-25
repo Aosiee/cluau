@@ -1,0 +1,4 @@
+// A module whose last statement is a class returns it; this one returns a
+// table of classes.
+const square = require("./square")
+return { Square = square }

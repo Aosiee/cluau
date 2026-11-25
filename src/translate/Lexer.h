@@ -19,7 +19,7 @@ namespace cluau::detail {
 		String,        // "..." / '...'
 		Interpolated,  // `...` (its {} segments are part of the token)
 		LongString,    // [[...]] / [==[...]==]
-		LineComment,   // // ...
+		LineComment,   // // ... (and a `#!` first line)
 		BlockComment,  // /* ... */
 		Op,
 		Eof,

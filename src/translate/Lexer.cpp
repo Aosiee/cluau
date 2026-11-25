@@ -190,8 +190,9 @@ namespace cluau::detail {
 			void LexOne(Token& token)
 			{
 				const char c = At();
-				// Comments.
-				if (c == '/' && At(1) == '/')
+				// Comments. A `#!` first line (a script's interpreter line) is
+				// one too.
+				if ((c == '/' && At(1) == '/') || (c == '#' && At(1) == '!' && m_Pos == 0))
 				{
 					token.Kind = TokenKind::LineComment;
 					while (m_Pos < m_Src.size() && At() != '\n')

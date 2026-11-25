@@ -1,0 +1,56 @@
+// The standard modules.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const json = require("@std/json")
+const io = require("@std/io")
+
+// process
+print("args:", repr(process.args), process.script)
+print(process.env("CLUAU_TEST_UNSET") == nil)
+process.setEnv("CLUAU_TEST_VAR", "set")
+print(process.env("CLUAU_TEST_VAR"))
+
+// path
+print(path.join("a", "b", "c.txt"), path.dirname("a/b/c.txt"), path.basename("a/b/c.txt"))
+print(path.stem("c.tar.gz"), path.extension("c.tar.gz"), path.normalize("a/./b/../c"))
+print(path.isAbsolute(path.absolute("x")), path.isAbsolute("x"), path.relative(path.absolute("a/b"), path.absolute(".")))
+
+// fs, in a scratch directory
+const dir = path.join(fs.tempDir(), `cluau-std-test-{os.time()}-{math.random(1000000)}`)
+fs.mkdir(path.join(dir, "sub", "deep"))
+fs.write(path.join(dir, "a.txt"), "one\n")
+fs.append(path.join(dir, "a.txt"), "two\n")
+fs.write(path.join(dir, "sub", "deep", "b.txt"), "b")
+print(repr(string.split(fs.read(path.join(dir, "a.txt")), "\n")))
+print(repr(fs.list(dir)), fs.size(path.join(dir, "a.txt")))
+let walked = {}
+for (_, file in fs.walk(dir)) {
+	table.insert(walked, path.relative(file, dir))
+}
+print(repr(walked))
+print(fs.isFile(path.join(dir, "a.txt")), fs.isDir(path.join(dir, "sub")), fs.exists(path.join(dir, "nope")))
+fs.copy(path.join(dir, "a.txt"), path.join(dir, "c.txt"))
+fs.rename(path.join(dir, "c.txt"), path.join(dir, "d.txt"))
+print(fs.read(path.join(dir, "d.txt")) == "one\ntwo\n", fs.modified(path.join(dir, "d.txt")) > 0)
+const ok = pcall(fs.remove, path.join(dir, "sub"))
+print("remove a full directory:", ok)
+fs.remove(dir, true)
+print("cleaned:", !fs.exists(dir))
+print(pcall(fs.read, "no/such/file.txt"))
+
+// json
+type Value = { name: string, tags: { string }, n: number, ok: boolean, nothing: nil, u: string }
+const value = json.decode('{"name": "cluau", "tags": ["a", "b"], "n": 1.5, "ok": true, "nothing": null, "u": "\\u00e9\\ud83d\\ude00"}') :: Value
+print(value.name, value.tags[2], value.n, value.ok, value.nothing, value.u)
+print(json.encode(value))
+print(json.encode({ list = { 1, 2, 3 }, nested = { x = 1 }, empty = {} }, true))
+print(json.encode("line\n\"quoted\""), json.encode(0.1), json.encode(1e300), json.encode(-3))
+print(pcall(json.decode, "[1, 2"))
+print(pcall(json.encode, { f = print }))
+
+// io, and commands
+io.write("no newline", " ", 42, "\n")
+const r = process.run("echo from a command")
+print(r.code, (string.gsub(r.output, "%s+$", "")))
+print(process.exec("exit 3"))

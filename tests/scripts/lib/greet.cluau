@@ -1,0 +1,8 @@
+let loads = 0
+loads++
+
+function Hello(name: string): string {
+	return `hello, {name}`
+}
+
+return { Hello = Hello, Loads = loads }

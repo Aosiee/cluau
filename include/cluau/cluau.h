@@ -91,8 +91,8 @@ namespace cluau {
 		int BodyEndLine = 0;
 	};
 
-	// `signal Name(param: Type, ...)` in a class body (CLUAU_PLAN §5 Q13): a
-	// signal the class emits, with its payload's types. A host types its
+	// `signal Name(param: Type, ...)` in a class body: a signal the class
+	// emits, with its payload's types. A host types its
 	// emit / connect calls from these; the module table lists the names.
 	struct ClassSignal
 	{
@@ -111,6 +111,28 @@ namespace cluau {
 		std::vector<ClassMethod> Methods;
 		std::vector<std::string> Statics; // `static Name = value` members (of the module table)
 		std::vector<ClassSignal> Signals;
+	};
+
+	// A class's members as Luau types, for a profile's Header hook.
+	struct ClassMembers
+	{
+		// The instance members that are not methods ("X: number, Y: number, ":
+		// the profile's base members, the fields, signal members).
+		std::string Fields;
+		struct Method
+		{
+			std::string Name;
+			std::string ParamTypes; // after `self`: ", x: number, y: number" ("" without parameters)
+			std::string ReturnType; // "()" when it returns nothing
+		};
+		std::vector<Method> Methods;
+	};
+
+	// The class line a Header hook writes: `local $Class = <TableInit>; <Types>`.
+	struct ClassHeader
+	{
+		std::string TableInit;
+		std::string Types; // type declarations (at least `export type $Class = ...`)
 	};
 
 	// What a class lowers to beyond cluau's generic shape (a module table, a
@@ -138,12 +160,27 @@ namespace cluau {
 		// declarations lower to `$Class.<SignalsMember> = { "A", ... }` on
 		// the class line); "" = signals are not allowed.
 		std::string SignalsMember = "Signals";
+		// The whole class line (null = `$Class = <TableInit>; export type
+		// $Class = { <members> }`): a profile whose class table and
+		// instances need richer types (the script profile: a callable class
+		// table, instances whose metatable carries the metamethods). The
+		// line is generated text: the strict rules do not report in it.
+		std::function<ClassHeader(const ClassInfo&, const ClassMembers&)> Header;
 	};
 
 	struct TranslateOptions
 	{
 		const ClassProfile* Profile = nullptr; // nullptr = the generic profile
 		bool Manifest = false;                 // reject function / while / do-while / class
+		// Script mode (a program or module the runner executes, not a host's
+		// class file): a file may declare any number of classes, anywhere at
+		// its top level, and each is a local of the file that the code after
+		// it uses. A file whose last statement is a class still returns it.
+		bool Script = false;
+		// REPL mode (each input is its own chunk; implies Script): top-level
+		// `let`, `const` and `local` assign globals, so a name outlives the
+		// input that declared it, and a class is a global too.
+		bool Repl = false;
 	};
 
 	struct TranslateResult
@@ -154,11 +191,21 @@ namespace cluau {
 		std::vector<Exemption> Exemptions;
 		std::vector<Range> ConstNames;      // each `const` local's name (source positions)
 		std::vector<Range> Generated;       // Luau-text ranges the translator generated (type aliases, ...)
-		std::optional<ClassInfo> Class;
+		std::optional<ClassInfo> Class;     // the file's class (the first, in script mode)
+		std::vector<ClassInfo> Classes;     // every class, in order (script mode may declare several)
 		bool HasErrors() const;
 	};
 
 	TranslateResult Translate(std::string_view source, const TranslateOptions& options = {});
+
+	// The class profile scripts run with (cluau_runtime, `cluau script.cluau`):
+	// `Name(...)` constructs an instance (each field's default evaluated
+	// afresh, then the class's `Init(...)` when it declares one), methods
+	// and statics are the class table's, and the class table is its
+	// instances' metatable, so a method named `__tostring`, `__eq`, `__add`,
+	// ... is a metamethod. Its class tables share the runtime's
+	// `__cluau_meta` metatable.
+	const ClassProfile& ScriptProfile();
 
 	// "1.2.3": enters a host's cache keys / build digests, so a translator
 	// change re-translates.

@@ -1,0 +1,7 @@
+function Hello(name: string): string {
+	return "hello, " .. name
+}
+
+const broken: number = "not a number"
+
+return { Hello = Hello }

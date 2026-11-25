@@ -1,0 +1,9 @@
+class Square {
+	Side: number = 1
+	Area: number = 1
+
+	function Init(side: number) {
+		self.Side = side
+		self.Area = side * side
+	}
+}

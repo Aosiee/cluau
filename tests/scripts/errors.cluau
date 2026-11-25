@@ -1,0 +1,12 @@
+// A runtime error: the message at the .cluau line, a backtrace, exit 1.
+function Inner(t: { missing: { field: number }? }): number {
+	return (t.missing :: { field: number }).field
+}
+
+function Outer() {
+	Inner({})
+}
+
+print("before")
+Outer()
+print("not reached")

@@ -268,3 +268,62 @@ TEST("classes: a profile's SignalType makes each signal a member of the class ty
 	// Without the hook, signals stay out of the type.
 	CHECK(Luau("class C {\n\tsignal Hit(by: number)\n}\n").find("Hit: ") == std::string::npos);
 }
+
+TEST("scripts: a #! first line is a comment, on its line")
+{
+	CHECK_EQ(Luau("#!/usr/bin/env cluau\nlet x = 1"), std::string("--#!/usr/bin/env cluau\nlocal x = 1"));
+	// Only the first line: `#` elsewhere is the length operator.
+	CHECK_EQ(Luau("let n = #t"), std::string("local n = #t"));
+}
+
+TEST("scripts: script mode allows several classes, each a local the code after it uses")
+{
+	cluau::TranslateOptions options;
+	options.Script = true;
+	const cluau::TranslateResult r = cluau::Translate("class A {\n\tV: number = 1\n}\nclass B {\n}\nlet a = A\n", options);
+	CHECK(!r.HasErrors());
+	CHECK_EQ(r.Classes.size(), (size_t)2);
+	CHECK_EQ(r.Class->Name, std::string("A"));
+	CHECK(r.Luau.find("return") == std::string::npos);
+	CHECK_EQ(Lines(r.Luau), 6);
+	// A file whose last statement is a class still returns it (a module).
+	CHECK(Luau("class A {\n}\nclass B {\n};\n", options).find("return B;") != std::string::npos);
+	// Outside script mode, one class, last.
+	CHECK(HasError(cluau::Translate("class A {\n}\nclass B {\n}\n"), "at most one class"));
+}
+
+TEST("scripts: the script profile constructs instances and evaluates each default afresh")
+{
+	cluau::TranslateOptions options;
+	options.Script = true;
+	options.Profile = &cluau::ScriptProfile();
+	const std::string luau = Luau("class P {\n\tTags: {string} = {}\n\tN: number\n}\n", options);
+	CHECK(luau.rfind("local P = setmetatable({ Fields = {}, __name = \"P\" }, __cluau_meta :: { __call: (unknown) -> P }); ", 0) == 0);
+	CHECK(luau.find("export type P = typeof(setmetatable({} :: { Tags: {string}, N: number, }, {} :: { __index: { }, }))") != std::string::npos);
+	// Init's parameters type the constructor; metamethods are the instances' metatable's.
+	const std::string vec = Luau("class V {\n\tfunction Init(x: number) { }\n\tfunction __add(o: V): V { return o }\n\tfunction Len(): number { return 1 }\n}\n", options);
+	CHECK(vec.find("__call: (unknown, x: number) -> V })") != std::string::npos);
+	CHECK(vec.find("{} :: { __index: { Init: (self: V, x: number) -> (), Len: (self: V) -> number, }, __add: (self: V, o: V) -> V, }") != std::string::npos);
+	CHECK_EQ(Lines(vec), 5);
+	CHECK(luau.find("P.Fields.Tags = function() return {} end") != std::string::npos);
+	CHECK(luau.find("P.Fields.N") == std::string::npos);
+}
+
+TEST("scripts: REPL mode makes top-level declarations globals")
+{
+	cluau::TranslateOptions options;
+	options.Repl = true;
+	CHECK_EQ(Luau("let x: number = 1", options), std::string(" x  = 1"));
+	CHECK_EQ(Luau("const a, b: {number}", options), std::string(" a, b = nil "));
+	CHECK_EQ(Luau("local function f() { let y = 2 }", options), std::string(" function f()  local y = 2 end"));
+	CHECK_EQ(Luau("if (c) { let z = 3 }", options), std::string("if (c) then local z = 3 end"));
+	CHECK(Luau("class P {\n}", options).rfind(" P = ", 0) == 0);
+}
+
+TEST("statements: an empty block and a block's end beside a word stay apart")
+{
+	CHECK_EQ(Luau("while (true) {}"), std::string("while (true) do end"));
+	CHECK_EQ(Luau("function f() {}"), std::string("function f() end"));
+	CHECK_EQ(Luau("if (a) {}else{}"), std::string("if (a) then else end"));
+	CHECK_EQ(Luau("{ x() }print(1)"), std::string("do x() end print(1)"));
+}

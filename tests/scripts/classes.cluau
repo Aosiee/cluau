@@ -1,0 +1,53 @@
+// Classes in a script: several per file, constructed by calling them, used
+// by the code after them.
+
+class Vec {
+	X: number = 0
+	Y: number = 0
+
+	static Count = 0
+
+	function Init(x: number, y: number) {
+		self.X = x
+		self.Y = y
+		Vec.Count += 1
+	}
+
+	function Length(): number {
+		return math.sqrt(self.X * self.X + self.Y * self.Y)
+	}
+
+	function __add(other: Vec): Vec {
+		return Vec(self.X + other.X, self.Y + other.Y)
+	}
+
+	function __eq(other: Vec): boolean {
+		return self.X == other.X && self.Y == other.Y
+	}
+
+	function __tostring(): string {
+		return `Vec({self.X}, {self.Y})`
+	}
+}
+
+class Bag {
+	Items: {string} = {}
+	Label: string = "bag"
+
+	function Add(item: string) {
+		table.insert(self.Items, item)
+	}
+}
+
+const a = Vec(3, 4)
+const b = Vec(1, 2)
+print(a, a:Length(), a + b, a + b == Vec(4, 6))
+print("constructed:", Vec.Count)
+
+// Each instance gets its own default table.
+const first = Bag()
+const second = Bag()
+first:Add("apple")
+print(#first.Items, #second.Items, second.Label)
+print(repr(first))
+print(tostring(Vec))

@@ -28,9 +28,33 @@ class Player {
 }
 ```
 
+It is also a scripting language on its own: `cluau script.cluau` runs a
+script the way `python script.py` does, with a REPL, `require` for other
+files and a standard library for files, paths, processes and JSON, and
+`cluau check script.cluau` type-checks it (and the modules it requires)
+without running it.
+
+```
+#!/usr/bin/env cluau
+const fs = require("@std/fs")
+const process = require("@std/process")
+
+for (_, file in fs.walk(process.args[1] or ".")) {
+	if (string.sub(file, -6) == ".cluau") {
+		print(file, #string.split(fs.read(file), "\n"))
+	}
+}
+```
+
 - [`docs/syntax.md`](docs/syntax.md) is the language reference.
+- [`docs/scripting.md`](docs/scripting.md) is the scripting guide: running
+  and checking scripts, the REPL, classes in scripts, modules and the
+  standard library.
 - `cluau` (the translator, `include/cluau/cluau.h`, and the Luau-to-cluau
   converter, `include/cluau/convert.h`) has no dependencies.
+- `cluau_runtime` (`include/cluau/runtime.h`, the script runner and checker
+  behind the `cluau` tool) runs on Luau's VM, compiler and analysis, which
+  CMake fetches (or `-DCLUAU_LUAU_DIR=<a Luau checkout>`).
 - `cluau_check` (the strict-typing rules: strict mode, no `any` without a
   line exemption, required annotations) runs over Luau's analysis and builds
   against the host's Luau.
@@ -39,28 +63,44 @@ class Player {
 
 Each version is a tag (`vX.Y.Z`), and each tag is a
 [release](https://github.com/Aosiee/cluau/releases) with the `cluau` tool
-built for Linux (x86-64), macOS (arm64) and Windows (x86-64), its tests run
+(scripts, the REPL, check, translate, convert) built for Linux (x86-64), macOS (arm64) and Windows (x86-64), its tests run
 on each, and a `SHA256SUMS` file. A host that embeds the translator pins a
 tag and builds from source.
 
 ## Building
 
 ```
-cmake -S . -B build && cmake --build build && ./build/cluau_tests
+cmake -S . -B build && cmake --build build && ctest --test-dir build
+./build/cluau script.cluau args...
+./build/cluau check script.cluau
+./build/cluau
 ./build/cluau translate file.cluau
 ./build/cluau convert --verify file.luau
 ```
 
+`cmake --install build` puts `cluau` on the install prefix's `bin` (add
+`--prefix ~/.local` for a user install) with the guides beside it; a
+release's archive holds the same tool, to put on `PATH` by hand.
+
+The build fetches Luau (`CLUAU_LUAU_TAG`, 0.688) for the runtime;
+`-DCLUAU_LUAU_DIR=<dir>` uses a local checkout instead, and
+`-DCLUAU_BUILD_RUNTIME=OFF` builds the translator and the tool's translate
+and convert commands with no Luau at all. `ctest` runs the translator's
+tests, the script tests (`tests/scripts/*.cluau` against their `.expected`
+output, and `cluau check` on each) and the checker's tests
+(`tests/check/*.cluau` against their `.checked` output).
+
 `hamr run` runs the same checks as a [hamr](https://github.com/Aosiee/hamr)
-suite (`hamr.cluau`): the tests in a release and a debug build and the
-syntax guide's examples through the tool; `hamr run --tier nightly --set
-luauDir=<a Luau checkout>` also builds the strict checker. Each build lives
-in its own `build-hamr-<name>` directory.
+suite (`hamr.cluau`): the tests, the script tests and the checker's tests in
+a release and a debug build, and the guides' examples through the tool.
+Each build lives in its own `build-hamr-<name>` directory.
 
 A host embeds the translator with `add_subdirectory` (CMake) or its own build
 manifest over `src/translate/*.cpp` (plus `src/convert/*.cpp` for the
 converter), and supplies a `ClassProfile` for what
-its classes lower to.
+its classes lower to. Under `add_subdirectory` the runtime is off (no Luau
+is fetched); `-DCLUAU_BUILD_RUNTIME=ON` adds it, against the host's own
+Luau targets when they exist.
 
 ## Hosts
 

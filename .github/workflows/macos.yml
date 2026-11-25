@@ -1,5 +1,6 @@
-# Builds the translator, the converter and the tool on macOS (Apple Clang) and
-# runs the tests, on every push.
+# Builds the translator, the converter, the runtime (Luau fetched by CMake) and
+# the tool on macOS (Apple Clang) and runs the tests and the script tests, on every
+# push.
 name: macOS
 
 on:
@@ -34,4 +35,4 @@ jobs:
           cmake --build build --config Release -j 4
 
       - name: Test
-        run: build/cluau_tests
+        run: ctest --test-dir build -C Release --output-on-failure

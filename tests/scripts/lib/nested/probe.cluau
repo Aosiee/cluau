@@ -1,0 +1,3 @@
+// pcall(require, "./...") resolves from this file, not the script's directory.
+const ok, sibling = pcall(require, "./sibling")
+return { Ok = ok, Sibling = tostring(sibling) } // allow-any: pcall(require) cannot type the module

@@ -61,10 +61,17 @@ namespace cluau::check {
 
 			void Finish()
 			{
-				// Any-typed values the script uses, one finding per line.
+				// Any-typed values the script uses, one finding per line (the
+				// first on it: the map's order is the memory's).
+				std::vector<Luau::Location> anys;
 				for (const auto& [expr, type] : m_Module.astTypes)
 					if (expr && IsAny(type))
-						NoteAny(expr->location, "a value of type any");
+						anys.push_back(expr->location);
+				std::sort(anys.begin(), anys.end(), [](const Luau::Location& a, const Luau::Location& b) {
+					return a.begin.line != b.begin.line ? a.begin.line < b.begin.line : a.begin.column < b.begin.column;
+				});
+				for (const Luau::Location& location : anys)
+					NoteAny(location, "a value of type any");
 				for (const auto& [line, used] : m_Exempt)
 					if (!used)
 					{

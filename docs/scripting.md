@@ -1,0 +1,286 @@
+# Scripting with cluau
+
+The `cluau` tool runs cluau as a scripting language, the way `python` runs
+Python: no host, no build step. A script is translated in *script mode*,
+compiled by Luau and run on Luau's VM, with `require` for other files and a
+small standard library for files, paths, processes, standard input and
+output, and JSON.
+
+```
+#!/usr/bin/env cluau
+const fs = require("@std/fs")
+const process = require("@std/process")
+
+class Counter {
+	Counts: { [string]: number } = {}
+
+	function Add(word: string) {
+		self.Counts[word] = (self.Counts[word] or 0) + 1
+	}
+}
+
+const counter = Counter()
+for (word in string.gmatch(fs.read(process.args[1]), "%a+")) {
+	counter:Add(string.lower(word))
+}
+print(repr(counter.Counts))
+```
+
+## Running
+
+| command | runs |
+|---|---|
+| `cluau script.cluau [args...]` | a script (also `cluau run script.cluau ...`) |
+| `cluau -e 'print(1 + 2)' [args...]` | code from the command line |
+| `cluau - [args...]` | the script on standard input |
+| `cluau` | the interactive prompt (or standard input, when it is not a terminal) |
+| `cluau -i` | the interactive prompt, even when standard input is not a terminal |
+| `cluau check script.cluau...` | type-checks scripts without running them (see [Checking](#checking)) |
+
+The arguments after the script are `process.args`. A script's first line
+may be `#!/usr/bin/env cluau`, so a script marked executable runs by itself
+once `cluau` is on `PATH` (`cmake --install build --prefix ~/.local`, or a
+release's binary copied there).
+A `.luau` file runs as Luau (it is not translated).
+
+The exit status is 0, 1 after an error, 2 when the script cannot be read,
+130 after Ctrl-C, or the code passed to `process.exit(code)`.
+
+## Errors
+
+An error prints its message at the script's line, then the stack. Every
+translated line stays on its line, so the lines are the `.cluau` file's:
+
+```
+errors.cluau:3: attempt to index nil with 'field'
+stack backtrace:
+errors.cluau:3 function Inner
+errors.cluau:7 function Outer
+errors.cluau:11
+```
+
+A syntax error is reported before anything runs, with its line and column
+(`script.cluau:2:12: this '{' has no closing '}'`).
+
+## Checking
+
+`cluau check script.cluau` type-checks a script, and every module it
+requires, without running it. This is Luau's type checker in strict mode
+plus cluau's strict rules ([syntax.md](syntax.md#strict-typing)): no `any`
+without an `// allow-any: <reason>` on the line, annotated parameters and
+return types, and `const` locals that are never assigned again. Positions
+are the `.cluau` file's:
+
+```
+function Greet(name: string): string {
+	return "hello, " .. name
+}
+
+const count = 1
+print(Greet(42))
+print(Greeet("x"))
+count = 2
+```
+
+```
+$ cluau check greet.cluau
+greet.cluau:6:13: Type 'number' could not be converted into 'string'
+greet.cluau:7:7: Unknown global 'Greeet'
+greet.cluau:8:1: 'count' is const and cannot be assigned
+cluau check: 3 error(s), 0 warning(s)
+```
+
+The exit status is 1 when there is an error (warnings alone are 0), so it
+fits a CI step or a pre-commit hook. Running a script does not check it:
+like Python, `cluau script.cluau` runs whatever parses.
+
+- Modules resolve exactly as `require` resolves them at run time, and a
+  module's own errors are reported at its file. A module that is not found
+  is an error naming where it was looked for.
+- The standard modules are typed (their functions as the tables below
+  give them). `json.decode` returns `unknown`: cast it to the shape you
+  expect (`json.decode(text) :: { name: string }`).
+- Classes are typed: calling one checks the arguments against `Init`'s
+  parameters, an instance has exactly the declared fields and methods,
+  and an operator on instances checks against the class's metamethod
+  (`a + b` needs `__add`). Read statics through the class (`Vec.Count`).
+- A `.luau` module is checked in its own mode (nonstrict unless it starts
+  with `--!strict`).
+- `pcall(require, ...)` gives `any` (the module's type is lost), so its use
+  needs an exemption.
+
+## The interactive prompt
+
+`cluau` with no arguments reads one input at a time. An expression prints
+its value (`repr`'s form: strings quoted, tables with their contents), and
+the last value is `_`. A statement whose braces or brackets are still open
+continues on the next line (`>>`); an empty line ends it early.
+
+```
+> let words = { "a", "b" }
+> #words
+2
+> function Shout(s: string): string {
+>>     return string.upper(s) .. "!"
+>> }
+> Shout(words[1])
+"A!"
+```
+
+At the prompt a top-level `let`, `const` or `local` sets a global (each
+input is its own chunk, so a local would end with its line), and a class
+is a global too. Ctrl-C stops a running input; Ctrl-D leaves. The history
+is kept in `~/.cluau_history`.
+
+## Classes in scripts
+
+In script mode a file may declare any number of classes, anywhere at its
+top level, and each is a local that the code after it uses. Calling a
+class constructs an instance:
+
+```
+class Vec {
+	X: number = 0
+	Y: number = 0
+	static Count = 0
+
+	function Init(x: number, y: number) {
+		self.X = x
+		self.Y = y
+		Vec.Count += 1
+	}
+
+	function __add(other: Vec): Vec {
+		return Vec(self.X + other.X, self.Y + other.Y)
+	}
+
+	function __tostring(): string {
+		return `Vec({self.X}, {self.Y})`
+	}
+}
+
+let v = Vec(1, 2) + Vec(3, 4)
+print(v, Vec.Count)   // Vec(4, 6)    3
+```
+
+- `Name(args...)` makes an instance: each field gets its default, then the
+  class's `Init(args...)` runs when it declares one.
+- A field's default is evaluated for each instance, so `Items: {string} = {}`
+  gives every instance its own table. A field without a default starts as
+  `nil`.
+- Methods are called with `:` (`v:Length()`); a `static` member is the
+  class's own (`Vec.Count`) and instances read it too.
+- The class is its instances' metatable, so a method named `__tostring`,
+  `__eq`, `__lt`, `__le`, `__add`, `__sub`, `__mul`, `__div`, `__unm`,
+  `__concat`, `__len` or `__call` is that metamethod.
+- `repr(instance)` shows its class and fields (`Vec {X = 4, Y = 6}`) unless
+  the class has a `__tostring`.
+
+A file whose last statement is a class returns it, so a module may be one
+class (`return` is not needed), as in a host's class files.
+
+## Modules
+
+`require(name)` loads a `.cluau` or `.luau` file once and returns what it
+returns (`true` when it returns nothing); later calls give the same value.
+
+| name | is looked for |
+|---|---|
+| `"./name"`, `"../name"` | from the requiring file's directory |
+| `"name"`, `"dir/name"` | in the main script's directory, then each `CLUAU_PATH` directory (`:`-separated; `;` on Windows) |
+| `"/abs/name"` | at that path |
+| `"@std/name"` | a standard module |
+
+For each, `name`, `name.cluau`, `name.luau`, `name/init.cluau` and
+`name/init.luau` are tried in that order. A module that requires itself,
+directly or through others, is an error (`require cycle`).
+
+```
+// lib/greet.cluau
+function Hello(name: string): string {
+	return `hello, {name}`
+}
+return { Hello = Hello }
+
+// main.cluau
+const greet = require("./lib/greet")
+print(greet.Hello("cluau"))
+```
+
+## The standard library
+
+Luau's own libraries are all there: `string` (with `string.split`),
+`table`, `math`, `os` (`os.time`, `os.clock`, `os.date`), `coroutine`,
+`utf8`, `bit32`, `buffer`, `vector`, `debug`. On top of them, the globals
+`require`, `repr(value): string` and `input(prompt?): string?` (a line from
+standard input, `nil` at its end), and these modules:
+
+### `@std/fs`
+
+| function | does |
+|---|---|
+| `read(path): string` | the file's contents |
+| `write(path, text)` | replaces the file's contents (creating it) |
+| `append(path, text)` | adds to the end of the file |
+| `exists(path)`, `isFile(path)`, `isDir(path)`: `boolean` | what is at `path` |
+| `list(dir): {string}` | the names in a directory, sorted |
+| `walk(dir): {string}` | every file under a directory (paths), sorted |
+| `mkdir(path)` | creates a directory and its parents |
+| `remove(path, all?)` | removes a file or an empty directory; `all` removes a directory's contents too |
+| `rename(from, to)`, `copy(from, to)` | moves, or copies (directories recursively) |
+| `size(path): number`, `modified(path): number` | the size in bytes; the last change, in seconds since 1970 |
+| `tempDir(): string` | the system's temporary directory |
+
+A failure is an error naming the call, the path and why
+(`fs.read: cannot read 'x.txt': no such file or directory`); `pcall` it to
+handle it.
+
+### `@std/path`
+
+`join(...)`, `dirname(p)`, `basename(p)`, `stem(p)` (the name without its
+extension), `extension(p)` (with its dot: `".txt"`), `normalize(p)`
+(`a/./b/../c` is `a/c`), `absolute(p)`, `relative(p, base?)` (from the
+current directory by default), `isAbsolute(p)`. Paths come back with `/` on
+every platform, Windows included (which accepts them).
+
+### `@std/process`
+
+| member | is |
+|---|---|
+| `args: {string}` | the script's arguments |
+| `script: string` | the script's path (`"-e"`, `"stdin"`; `""` at the prompt) |
+| `platform: string` | `"linux"`, `"macos"`, `"windows"` or `"other"` |
+| `env(name): string?`, `setEnv(name, value?)` | an environment variable (`nil` unsets it) |
+| `cwd(): string`, `chdir(dir)` | the working directory |
+| `run(command): { code: number, output: string }` | runs a shell command, capturing its standard output (its standard error passes through) |
+| `exec(command): number` | runs a shell command with the script's output; its exit code |
+| `sleep(seconds)` | waits |
+| `exit(code?)` | ends the script (0 by default) |
+
+### `@std/io`
+
+`write(...)` writes its arguments to standard output with no separator and
+no newline; `writeError(...)` writes to standard error; `readLine():
+string?` reads a line (without its newline; `nil` at the end of input);
+`readAll(): string` reads the rest; `flush()`.
+
+### `@std/json`
+
+`encode(value, pretty?): string` and `decode(text): any`. `pretty` is
+`true` (two spaces) or an indent string. Objects' keys are written sorted,
+so the output is the same every run; a table whose keys are `1..n` is an
+array, and an empty table is `[]`. `null` decodes to `nil` (a key whose
+value is `null` is absent). A value with no JSON form (a function, a
+table that contains itself, NaN) is an error.
+
+## Embedding the runtime
+
+The runtime is a library (`cluau_runtime`, `include/cluau/runtime.h`):
+`cluau::runtime::Runtime` runs a file (`RunFile`), source text
+(`RunSource`) or the prompt (`Repl`), and `State()` is its `lua_State` for a
+host to add its own globals; `cluau::runtime::Check` is `cluau check`. It
+builds against Luau's VM, compiler and analysis: the
+checkout `CLUAU_LUAU_DIR` names, else Luau fetched at `CLUAU_LUAU_TAG`
+(CMake's FetchContent). `CLUAU_BUILD_RUNTIME` is on for a standalone build
+and off under `add_subdirectory`, so a host that embeds only the translator
+needs no Luau.

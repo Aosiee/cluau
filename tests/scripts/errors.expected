@@ -1,0 +1,7 @@
+before
+errors.cluau:3: attempt to index nil with 'field'
+stack backtrace:
+errors.cluau:3 function Inner
+errors.cluau:7 function Outer
+errors.cluau:11
+exit: 1

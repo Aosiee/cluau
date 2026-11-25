@@ -1,0 +1,13 @@
+42
+{1, 2, three = 3}
+36
+5
+6
+"a string"
+printed
+stdin:1: an error, and the session goes on
+stack backtrace:
+[C] function error
+stdin:1
+a block over lines
+exit: 0

@@ -1,0 +1,31 @@
+// Type errors cluau check reports (each line is one).
+const fs = require("@std/fs")
+const json = require("@std/json")
+
+class Vec {
+	X: number = 0
+
+	function Init(x: number) {
+		self.X = x
+	}
+
+	function __add(other: Vec): Vec {
+		return Vec(self.X + other.X)
+	}
+}
+
+class Plain {
+	N: number = 1
+}
+
+const v = Vec(1) + Vec(2)
+const ok: number = v.X
+
+const a = Vec("one")           // the constructor takes Init's parameters
+v:Missing()                    // no such method
+v.Extra = 1                    // instances have their declared fields only
+const b = Plain() + Plain()    // Plain has no __add
+const size: string = fs.size("x")
+const data = json.decode("{}")
+print(data.name)               // decode gives unknown: cast it to a type first
+print(undefinedName)

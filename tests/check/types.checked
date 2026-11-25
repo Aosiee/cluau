@@ -1,0 +1,9 @@
+types.cluau:24:15: Type 'string' could not be converted into 'number'
+types.cluau:25:1: Type 'Vec' does not have key 'Missing'
+types.cluau:26:1: Cannot add property 'Extra' to table 'Vec'
+types.cluau:27:11: Binary operator '+' not supported by types 'Plain' and 'Plain'
+types.cluau:28:1: Type 'number' could not be converted into 'string'
+types.cluau:30:7: Type 'unknown' does not have key 'name'
+types.cluau:31:7: Unknown global 'undefinedName'
+cluau check: 7 error(s), 0 warning(s)
+exit: 1

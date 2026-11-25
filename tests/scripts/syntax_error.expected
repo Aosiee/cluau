@@ -1,0 +1,2 @@
+syntax_error.cluau:2:12: this '{' has no closing '}'
+exit: 1

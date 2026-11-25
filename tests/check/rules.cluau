@@ -1,0 +1,16 @@
+// cluau's strict rules, on top of Luau's strict mode.
+function NoAnnotation(x) {
+	print(x)
+}
+
+function ReturnsUnannotated(n: number) {
+	return n * 2
+}
+
+const limit = 10
+limit = 11
+
+const loose: any = 1
+const allowed: any = 2 // allow-any: the test's exemption
+// allow-any: an exemption that covers nothing
+print(loose, allowed)

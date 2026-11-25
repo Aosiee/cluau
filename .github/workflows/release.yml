@@ -1,9 +1,9 @@
 # A release for each version tag (vX.Y.Z): the command-line tool built and
-# tested on Linux, macOS and Windows, packaged with the licence, the README
-# and the syntax guide, and published as a GitHub release whose notes are
-# the tag's message. A tag pushed from here on releases by itself; an
-# existing tag (one made before this workflow) is released by running the
-# workflow by hand with its name.
+# tested on Linux, macOS and Windows, packaged with the licence, the README,
+# the syntax guide and the scripting guide, and published as a GitHub
+# release whose notes are the tag's message. A tag pushed from here on
+# releases by itself; an existing tag (one made before this workflow) is
+# released by running the workflow by hand with its name.
 name: Release
 
 on:
@@ -29,9 +29,9 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { name: linux-x86_64, os: ubuntu-26.04, exe: cluau, tests: cluau_tests, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
-          - { name: macos-arm64, os: macos-latest, exe: cluau, tests: cluau_tests, flags: '' }
-          - { name: windows-x86_64, os: windows-latest, exe: Release/cluau.exe, tests: Release/cluau_tests.exe, flags: '' }
+          - { name: linux-x86_64, os: ubuntu-26.04, exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
+          - { name: macos-arm64, os: macos-latest, exe: cluau, flags: '' }
+          - { name: windows-x86_64, os: windows-latest, exe: Release/cluau.exe, flags: '' }
     defaults:
       run:
         shell: bash
@@ -55,7 +55,7 @@ jobs:
           cmake --build build --config Release -j 4
 
       - name: Test
-        run: build/${{ matrix.tests }}
+        run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Package
         run: |
@@ -63,7 +63,7 @@ jobs:
           mkdir -p "$dir"
           cp "build/${{ matrix.exe }}" "$dir/"
           cp LICENSE README.md "$dir/"
-          cp docs/syntax.md "$dir/"
+          cp docs/syntax.md docs/scripting.md "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$dir.zip" "$dir" > /dev/null
           else
@@ -94,7 +94,7 @@ jobs:
           {
             git tag -l --format='%(contents)' "$TAG"
             echo
-            echo "Downloads: the \`cluau\` command line (translate, convert) for each platform, with the licence, the README and the syntax guide. To embed the translator, build from source (no dependencies)."
+            echo "Downloads: the \`cluau\` command line (run scripts and the REPL, translate, convert) for each platform, with the licence, the README, the syntax guide and the scripting guide. To embed the translator, build from source (no dependencies)."
           } > notes.md
           (cd dist && sha256sum * > SHA256SUMS)
 
