@@ -265,8 +265,10 @@ namespace {
 
 		Project()
 		{
-			Dir = TempDir() / "lsp";
-			std::filesystem::create_directories(Dir);
+			// Canonical: definitions in files the editor has not opened name
+			// them by their canonical paths.
+			std::filesystem::create_directories(TempDir() / "lsp");
+			Dir = std::filesystem::canonical(TempDir() / "lsp");
 			std::ofstream(Dir / "shapes.cluau", std::ios::binary) << "// A point on the plane.\n"
 																	 "class Point {\n"
 																	 "\tX: number = 0\n"

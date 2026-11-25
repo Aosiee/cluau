@@ -112,6 +112,8 @@ namespace cluau::runtime::detail {
 
 	private:
 		std::string Name(const std::string& path) const;
+		std::string PathOf(const std::string& name) const;
+		std::optional<Location> Find(const std::string& path, int line, int col);
 		Luau::Position In(const std::string& name, int line, int col) const;
 		Range Out(const std::string& name, const Luau::Location& at) const;
 		bool Prepare(const std::string& name);

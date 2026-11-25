@@ -608,7 +608,23 @@ namespace cluau::runtime::detail {
 		return info;
 	}
 
+	std::string LanguageService::PathOf(const std::string& name) const
+	{
+		auto open = m_Open.find(name);
+		return open == m_Open.end() ? name : open->second;
+	}
+
 	std::optional<Location> LanguageService::Definition(const std::string& path, int line, int col)
+	{
+		std::optional<Location> found = Find(path, line, col);
+		// An open file by the path the editor knows it by (a module's name is
+		// its canonical path, which may differ: a link, a short name).
+		if (found)
+			found->Path = PathOf(found->Path);
+		return found;
+	}
+
+	std::optional<Location> LanguageService::Find(const std::string& path, int line, int col)
 	{
 		const std::string name = Name(path);
 		if (!Prepare(name))
