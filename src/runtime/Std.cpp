@@ -2124,7 +2124,7 @@ namespace cluau::runtime::detail {
 
 	} // namespace
 
-	bool SandboxLeavesOut(const std::string& name) { return name == "fs" || name == "http" || name == "_packages"; }
+	bool SandboxLeavesOut(const std::string& name) { return name == "fs" || name == "http" || name == "net" || name == "_packages"; }
 
 	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox)
 	{
@@ -2192,6 +2192,11 @@ namespace cluau::runtime::detail {
 		OpenRegex(L);
 		lua_setfield(L, -2, "regex");
 #endif
+		if (!sandbox)
+		{
+			OpenNet(L);
+			lua_setfield(L, -2, "net");
+		}
 
 		OpenJobs(L);
 		lua_setfield(L, -2, "_jobs");
@@ -2220,7 +2225,7 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_REGEX
 										 + ", @std/regex"
 #endif
-										 + ", @std/task, @std/args, @std/csv";
+										 + ", @std/net, @std/task, @std/args, @std/csv";
 		return names.c_str();
 	}
 

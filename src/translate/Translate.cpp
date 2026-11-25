@@ -2367,7 +2367,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.20.0";
+		return "0.21.0";
 	}
 
 } // namespace cluau

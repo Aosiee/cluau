@@ -47,6 +47,9 @@ namespace cluau::runtime::detail {
 	// Pushes @std/regex's table (when the runtime is built with it).
 	void OpenRegex(lua_State* L);
 
+	// Pushes @std/net's table (TCP connections and servers).
+	void OpenNet(lua_State* L);
+
 	// After a read of standard input came back empty-handed: when a Ctrl-C
 	// stopped it, raises the `interrupted` error (and does not return).
 	void RaiseIfInterrupted(lua_State* L);

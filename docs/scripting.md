@@ -67,8 +67,8 @@ before the script (`cluau --no-native script.cluau`) interprets it instead.
 network or other programs: for a script from somewhere else, or one that
 only computes.
 
-- `@std/fs` and `@std/http` are not available (`require` raises an error
-  saying so).
+- `@std/fs`, `@std/http` and `@std/net` are not available (`require`
+  raises an error saying so).
 - `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
   environment variables, the working directory and running commands are
   left out.
@@ -981,6 +981,49 @@ print(date:replace("2026-11-25", "${day}/${month}/${year}")) // 25/11/2026 1
 A pattern that backtracks too long on a text (nested repetition such as
 `(a+)+$`) stops with an error instead of running on.
 
+### `@std/net`
+
+TCP connections and servers. Each wait (connecting, accepting, reading,
+writing) waits on its own in a task (see [`@std/task`](#stdtask)), so one
+script serves many connections, or talks to many servers, at once.
+
+| function | is |
+|---|---|
+| `connect(host, port, options?): Socket` | a connection to `host` (a name or an address) on `port`; `options.timeout` limits the wait in seconds |
+| `listen(host, port, options?): Server` | a server on `host` (`"127.0.0.1"` for this machine only, `"0.0.0.0"` or `"::"` for every network) and `port` (0: any free one); `options.backlog` is how many connections may wait to be accepted |
+
+A `Server` has `host` and `port` (the port it got), `accept(options?)`
+(the next connection; `options.timeout`) and `close()`.
+
+A `Socket` has `localHost`, `localPort`, `remoteHost` and `remotePort`,
+and:
+
+| method | is |
+|---|---|
+| `read(count?): string?` | what has arrived, up to `count` bytes (64 KiB by default), waiting for at least one; `nil` at the end of the stream |
+| `readLine(): string?` | the next line, without its line break (`\r\n` or `\n`); the last line may have none; `nil` at the end |
+| `lines()` | an iterator over the lines: `for (line in socket:lines()) { }` |
+| `readAll(): string` | the rest of the stream, until the other side closes it |
+| `write(...)` | sends the strings, in order |
+| `setTimeout(seconds?)` | how long a read or write may wait (none, or 0: no limit) |
+| `close()` | ends the connection (a wait on it in another task ends with an error) |
+
+```
+const net = require("@std/net")
+const task = require("@std/task")
+
+const server = net.listen("127.0.0.1", 8080)
+while (true) {
+	const client = server:accept()
+	task.spawn(function() {
+		for (line in client:lines()) {
+			client:write(string.upper(line), "\n")
+		}
+		client:close()
+	})
+}
+```
+
 ### `@std/task`
 
 Tasks that run side by side on the script's one thread, for waiting on
@@ -1026,7 +1069,7 @@ for (_, page in pages) {
   `task.wait` or `task.join` in the script's code, or the script's end),
   with the task's own stack in the report.
 - The standard library's blocking calls wait on their own: `@std/http`'s
-  requests and downloads, `process.run` and `process.exec`, a child's
+  requests and downloads, `@std/net`'s waits, `process.run` and `process.exec`, a child's
   `read`, `readLine`, `lines` and `wait`, `io.readLine`, `io.readAll` and
   `input`, and `process.sleep`. In a task, the call runs on a thread of its
   own while the task waits, and the other tasks run meanwhile; in the

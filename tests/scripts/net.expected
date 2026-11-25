@@ -1,0 +1,11 @@
+listening	127.0.0.1	true
+HELLO 1 / BYE 1
+HELLO 2 / BYE 2
+HELLO 3 / BYE 3
+served	3
+127.0.0.1	true	true
+one	two	nil
+refused	false	true
+timeout	false	true
+closed	false	true
+exit: 0

@@ -161,6 +161,32 @@ return m :: {
 	register: (tasks: { [thread]: unknown }, runUntilJob: (id: number) -> ()) -> (),
 }
 )LUAU" },
+				{ "net", R"LUAU(
+export type Socket = {
+	localHost: string,
+	localPort: number,
+	remoteHost: string,
+	remotePort: number,
+	read: (self: Socket, count: number?) -> string?,
+	readLine: (self: Socket) -> string?,
+	readAll: (self: Socket) -> string,
+	lines: (self: Socket) -> () -> string?,
+	write: (self: Socket, ...string) -> (),
+	setTimeout: (self: Socket, seconds: number?) -> (),
+	close: (self: Socket) -> (),
+}
+export type Server = {
+	host: string,
+	port: number,
+	accept: (self: Server, options: { timeout: number? }?) -> Socket,
+	close: (self: Server) -> (),
+}
+local m: any = nil
+return m :: {
+	connect: (host: string, port: number, options: { timeout: number? }?) -> Socket,
+	listen: (host: string, port: number, options: { backlog: number? }?) -> Server,
+}
+)LUAU" },
 				{ "regex", R"LUAU(
 export type Match = {
 	text: string,

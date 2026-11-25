@@ -1,0 +1,82 @@
+// @std/net: a server and its clients in tasks, on this machine.
+const net = require("@std/net")
+const task = require("@std/task")
+
+const server = net.listen("127.0.0.1", 0)
+print("listening", server.host, server.port > 0)
+
+// The server: each connection in a task of its own, answering each line.
+const serving = task.spawn(function(): number {
+	let served = 0
+	for (i = 1, 3) {
+		const client = server:accept()
+		served += 1
+		task.spawn(function() {
+			for (line in client:lines()) {
+				client:write(string.upper(line), "\n")
+			}
+			client:close()
+		})
+	}
+	return served
+})
+
+// Three clients at once.
+const replies: { task.Task<string> } = {}
+for (i = 1, 3) {
+	table.insert(replies, task.spawn(function(): string {
+		const socket = net.connect("127.0.0.1", server.port)
+		socket:write(`hello {i}\n`, `bye {i}\n`)
+		const first = socket:readLine() or "?"
+		const second = socket:readLine() or "?"
+		socket:close()
+		return `{first} / {second}`
+	}))
+}
+for (_, reply in replies) {
+	print(task.join(reply))
+}
+print("served", task.join(serving))
+
+// A connection's whole stream, and the last line without a line break.
+const another = net.listen("127.0.0.1", 0)
+task.spawn(function() {
+	const client = another:accept()
+	client:write("one\ntwo")
+	client:close()
+})
+const socket = net.connect("127.0.0.1", another.port)
+print(socket.remoteHost, socket.remotePort == another.port, socket.localPort > 0)
+print(socket:readLine(), socket:readLine(), socket:readLine())
+socket:close()
+another:close()
+
+// What goes wrong: no one listening, a read that waits too long, a closed server.
+const unused = net.listen("127.0.0.1", 0)
+const freePort = unused.port
+unused:close()
+const refused, why = pcall(function() {
+	net.connect("127.0.0.1", freePort)
+})
+print("refused", refused, string.find(tostring(why), "net.connect: cannot connect to 127.0.0.1:", 1, true) != nil)
+
+const quiet = net.listen("127.0.0.1", 0)
+task.spawn(function() {
+	const client = quiet:accept()
+	task.wait(0.4)
+	client:close()
+})
+const waiting = net.connect("127.0.0.1", quiet.port)
+waiting:setTimeout(0.2)
+const answered, late = pcall(function() {
+	waiting:readLine()
+})
+print("timeout", answered, string.find(tostring(late), "no answer within 0.2", 1, true) != nil)
+waiting:close()
+quiet:close()
+
+server:close()
+const accepted, closed = pcall(function() {
+	server:accept()
+})
+print("closed", accepted, string.find(tostring(closed), "the socket is closed", 1, true) != nil)
