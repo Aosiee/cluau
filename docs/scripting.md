@@ -4,7 +4,9 @@ The `cluau` tool runs cluau as a scripting language, the way `python` runs
 Python: no host, no build step. A script is translated in *script mode*,
 compiled by Luau and run on Luau's VM, with `require` for other files and a
 standard library for files, paths, processes, standard input and output,
-JSON, dates and times, HTTP, command-line arguments and CSV.
+JSON, dates and times, HTTP, command-line arguments and CSV. The same tool
+type-checks scripts (`cluau check`), runs their tests (`cluau test`) and
+formats them (`cluau fmt`).
 
 ```
 #!/usr/bin/env cluau
@@ -36,6 +38,8 @@ print(repr(counter.Counts))
 | `cluau` | the interactive prompt (or standard input, when it is not a terminal) |
 | `cluau -i` | the interactive prompt, even when standard input is not a terminal |
 | `cluau check script.cluau...` | type-checks scripts without running them (see [Checking](#checking)) |
+| `cluau test [-k text] [path...]` | runs the test cases in `*_test.cluau` files (see [Testing](#testing)) |
+| `cluau fmt [--check] [path...]` | formats `.cluau` files (see [Formatting](#formatting)) |
 
 The arguments after the script are `process.args`. A script's first line
 may be `#!/usr/bin/env cluau`, so a script marked executable runs by itself
@@ -135,6 +139,66 @@ Two options change what is checked:
   in a function: `const ok, mod = pcall(function() { return require("./x") })`.
   The module must exist for the check. `pcall(require, "./x")` (for a
   module that may be absent) gives `any`, so its use needs an exemption.
+
+## Testing
+
+A test file is a script named `*_test.cluau` whose cases use `@std/test`:
+
+```
+const test = require("@std/test")
+const shapes = require("./shapes")
+
+test.case("a square's area", function() {
+	test.equal(shapes.Square(3).Area, 9)
+})
+
+test.case("sides are positive", function() {
+	test.raises(function() {
+		shapes.Square(-1)
+	}, "positive")
+})
+```
+
+`cluau test` runs every `*_test.cluau` under the current directory (or
+the files and directories named), each in a fresh runtime, and reports
+each case as it runs:
+
+```
+$ cluau test
+tests/shapes_test.cluau
+  ok    a square's area
+  FAIL  sides are positive
+        tests/shapes_test.cluau:9: expected an error containing 'positive', but none was raised
+1 passed, 1 failed (1 file(s))
+```
+
+- A case runs when it is declared. A failed assertion or an error ends
+  that case, and the file goes on with the next. An error outside any case
+  stops the file, which is reported as not finished.
+- `-k text` runs the cases whose names contain `text` (in any case).
+- The exit status is 1 when a case failed, a file did not finish, or
+  nothing ran, so `cluau test` fits a CI step.
+- Hidden directories (`.git`, ...) are skipped.
+
+## Formatting
+
+`cluau fmt` makes a file's layout regular without moving any code to
+another line, so error positions and line-based tools still match:
+
+- Each line is indented by the brackets open at its start: one level for a
+  line that opens any, a closing line back at its opener's level, and one
+  more for a statement continued from the line before (`a +` then `b`, or
+  a line starting with `.`, `:` or a binary operator).
+- Trailing whitespace goes, and the file ends with one line break.
+- Text inside strings, long strings and comments that span lines is left
+  exactly as written.
+
+`cluau fmt` formats every `.cluau` under the current directory (or the
+files and directories named) in place; `--check` changes nothing and exits
+with status 1 when a file would change, for CI; `--indent "    "` indents
+with spaces instead of a tab; `cluau fmt -` formats standard input to
+standard output. A file that does not lex (an unterminated string) is
+reported and left alone.
 
 ## The interactive prompt
 
@@ -557,6 +621,22 @@ for (_, file in options:list("files")) {
   value or its default, or a single positional), `number(name): number?`,
   `list(name): {string}`.
 - `usage()` and `help()` are the texts it prints.
+
+### `@std/test`
+
+The assertions `cluau test` runs (see [Testing](#testing)). Each one fails
+the case with a message at the assertion's line:
+
+| function | checks |
+|---|---|
+| `case(name, fn)` | declares a case and runs it |
+| `skip(name, fn)` | declares a case without running it (reported as skipped) |
+| `equal(actual, expected, message?)` | equal values; tables are equal when their keys and values are |
+| `notEqual(actual, unexpected, message?)` | anything but `unexpected` |
+| `ok(value, message?)` | a value other than `false` or `nil` |
+| `near(actual, expected, tolerance?, message?)` | numbers within `tolerance` (`1e-9` by default) |
+| `raises(fn, text?): string` | `fn` raises an error (containing `text`, when given); its message |
+| `fail(message)` | fails the case here |
 
 ### `@std/csv`
 

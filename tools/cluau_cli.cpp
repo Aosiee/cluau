@@ -12,14 +12,17 @@
 
 #include "cluau/cluau.h"
 #include "cluau/convert.h"
+#include "cluau/format.h"
 
 #ifdef CLUAU_HAS_RUNTIME
 #include "cluau/runtime.h"
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -62,10 +65,12 @@ namespace {
 		"       cluau -e '<code>' [args...]         run code given on the command line\n"
 		"       cluau - [args...]                   run the script on standard input\n"
 		"       cluau [-i]                          the interactive prompt (-i: even when stdin is not a terminal)\n"
+		"       cluau test [-k <text>] [path...]      run the @std/test cases in *_test.cluau files (no path: .)\n"
 		"       cluau check [--loose] [--lint] <script.cluau>...\n"
 		"                                           type-check scripts (and the modules they require) without running them\n"
 		"       cluau translate [--manifest|--script] <file.cluau>\n"
 		"       cluau convert [--verify] <file.luau>\n"
+		"       cluau fmt [--check] [--indent <text>] [path...]   format .cluau files (every one under a directory; no path: .)\n"
 		"       cluau --version\n"
 		"\n"
 		"`cluau check` is Luau's type checker in strict mode plus cluau's strict rules (exit status 1 on an error);\n"
@@ -111,6 +116,110 @@ namespace {
 		Report(path, result.Diagnostics);
 		std::cout << result.Luau;
 		return result.HasErrors() ? 1 : 0;
+	}
+
+	// cluau fmt: each file formatted in place (`--check`: only reported, and
+	// the exit status 1 when one would change); `-` formats standard input
+	// to standard output.
+	int Fmt(int argc, char** argv)
+	{
+		namespace fs = std::filesystem;
+		bool check = false;
+		cluau::FormatOptions options;
+		std::vector<std::string> paths;
+		for (int i = 2; i < argc; i++)
+		{
+			const std::string arg = argv[i];
+			if (arg == "--check")
+				check = true;
+			else if (arg == "--indent")
+			{
+				if (++i >= argc)
+					return Usage();
+				options.Indent = argv[i];
+			}
+			else if (arg.rfind("--", 0) == 0)
+				return Usage();
+			else
+				paths.push_back(arg);
+		}
+		if (paths.size() == 1 && paths[0] == "-")
+		{
+			std::stringstream buffer;
+			buffer << std::cin.rdbuf();
+			const cluau::FormatResult result = cluau::Format(buffer.str(), options);
+			Report("stdin", result.Diagnostics);
+			std::cout << result.Text;
+			return result.HasErrors() ? 1 : 0;
+		}
+		if (paths.empty())
+			paths.push_back(".");
+
+		// The files: those named, and every .cluau under a directory named
+		// (hidden directories left out), in order.
+		std::vector<std::string> files;
+		for (const std::string& path : paths)
+		{
+			std::error_code ec;
+			if (fs::is_directory(fs::u8path(path), ec))
+			{
+				std::vector<std::string> found;
+				fs::recursive_directory_iterator it(fs::u8path(path), ec), end;
+				for (; !ec && it != end; it.increment(ec))
+				{
+					const std::string name = it->path().filename().u8string();
+					if (it->is_directory(ec) && !name.empty() && name[0] == '.' && name != "." && name != "..")
+					{
+						it.disable_recursion_pending();
+						continue;
+					}
+					if (it->is_regular_file(ec) && cluau::IsCluauPath(name))
+						found.push_back(it->path().lexically_normal().generic_u8string());
+				}
+				std::sort(found.begin(), found.end());
+				files.insert(files.end(), found.begin(), found.end());
+			}
+			else
+				files.push_back(path);
+		}
+
+		int changed = 0, failed = 0;
+		for (const std::string& file : files)
+		{
+			std::string text;
+			if (!Read(file, text))
+			{
+				failed++;
+				continue;
+			}
+			const cluau::FormatResult result = cluau::Format(text, options);
+			if (result.HasErrors())
+			{
+				Report(file, result.Diagnostics);
+				failed++;
+				continue;
+			}
+			if (!result.Changed)
+				continue;
+			changed++;
+			if (check)
+			{
+				std::printf("%s needs formatting\n", file.c_str());
+				continue;
+			}
+			std::ofstream out(file, std::ios::binary | std::ios::trunc);
+			out << result.Text;
+			if (!out)
+			{
+				std::fprintf(stderr, "cluau: cannot write '%s'\n", file.c_str());
+				failed++;
+				continue;
+			}
+			std::printf("formatted %s\n", file.c_str());
+		}
+		if (check && changed)
+			std::printf("%d of %zu file(s) need formatting (cluau fmt formats them)\n", changed, files.size());
+		return failed || (check && changed) ? 1 : 0;
 	}
 
 	int Convert(int argc, char** argv)
@@ -207,6 +316,93 @@ namespace {
 		return errors ? 1 : 0;
 	}
 
+	cluau::runtime::Options RunOptions(int argc, char** argv, int firstArg);
+
+	// cluau test: every *_test.cluau under the paths (and files named), each
+	// in a runtime of its own, then a summary. The exit status is 1 when a
+	// case failed, a file did not run, or there was nothing to run.
+	int Test(int argc, char** argv)
+	{
+		namespace fs = std::filesystem;
+		std::string filter;
+		std::vector<std::string> paths;
+		for (int i = 2; i < argc; i++)
+		{
+			const std::string arg = argv[i];
+			if (arg == "-k")
+			{
+				if (++i >= argc)
+					return Usage();
+				filter = argv[i];
+			}
+			else if (arg.rfind("-", 0) == 0)
+				return Usage();
+			else
+				paths.push_back(arg);
+		}
+		if (paths.empty())
+			paths.push_back(".");
+		auto isTestFile = [](const std::string& name) {
+			return name.size() > 11 && name.compare(name.size() - 11, 11, "_test.cluau") == 0;
+		};
+		std::vector<std::string> files;
+		for (const std::string& path : paths)
+		{
+			std::error_code ec;
+			if (!fs::is_directory(fs::u8path(path), ec))
+			{
+				files.push_back(path);
+				continue;
+			}
+			std::vector<std::string> found;
+			fs::recursive_directory_iterator it(fs::u8path(path), ec), end;
+			for (; !ec && it != end; it.increment(ec))
+			{
+				const std::string name = it->path().filename().u8string();
+				if (it->is_directory(ec) && !name.empty() && name[0] == '.' && name != "." && name != "..")
+				{
+					it.disable_recursion_pending();
+					continue;
+				}
+				if (it->is_regular_file(ec) && isTestFile(name))
+				{
+					std::string shown = it->path().lexically_normal().generic_u8string();
+					found.push_back(shown);
+				}
+			}
+			std::sort(found.begin(), found.end());
+			files.insert(files.end(), found.begin(), found.end());
+		}
+		if (files.empty())
+		{
+			std::printf("no test files (*_test.cluau) under %s\n", paths.size() == 1 ? paths[0].c_str() : "the paths given");
+			return 1;
+		}
+		int passed = 0, failed = 0, skipped = 0, broken = 0;
+		for (const std::string& file : files)
+		{
+			std::printf("%s\n", file.c_str());
+			std::fflush(stdout);
+			cluau::runtime::Runtime runtime(RunOptions(argc, argv, argc));
+			cluau::runtime::Runtime::TestCounts counts;
+			if (!runtime.RunTest(file, filter, counts))
+				broken++;
+			passed += counts.Passed;
+			failed += counts.Failed;
+			skipped += counts.Skipped;
+			std::fflush(stdout);
+		}
+		std::string summary = std::to_string(passed) + " passed";
+		if (failed)
+			summary += ", " + std::to_string(failed) + " failed";
+		if (skipped)
+			summary += ", " + std::to_string(skipped) + " skipped";
+		if (broken)
+			summary += ", " + std::to_string(broken) + " file(s) did not finish";
+		std::printf("%s (%zu file(s))\n", summary.c_str(), files.size());
+		return failed || broken || passed + skipped == 0 ? 1 : 0;
+	}
+
 	cluau::runtime::Options RunOptions(int argc, char** argv, int firstArg)
 	{
 		cluau::runtime::Options options;
@@ -233,6 +429,8 @@ int main(int argc, char** argv)
 		return Translate(argc, argv);
 	if (first == "convert")
 		return Convert(argc, argv);
+	if (first == "fmt")
+		return Fmt(argc, argv);
 	if (first == "--help" || first == "-h")
 		return Usage(0);
 	if (first == "--version" || first == "-v")
@@ -243,6 +441,8 @@ int main(int argc, char** argv)
 #ifdef CLUAU_HAS_RUNTIME
 	if (first == "check")
 		return Check(argc, argv);
+	if (first == "test")
+		return Test(argc, argv);
 	if (first.empty() || first == "-i")
 	{
 		if (first.empty() && !CLUAU_ISATTY(0))

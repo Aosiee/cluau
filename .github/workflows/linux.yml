@@ -37,3 +37,7 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Formatting
+        if: matrix.name == 'gcc'
+        run: build/cluau fmt --check src tests hamr.cluau

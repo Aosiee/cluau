@@ -54,6 +54,18 @@ namespace cluau::runtime {
 		// (top-level `let` names persist), an expression's value is printed.
 		int Repl();
 
+		// Runs a test file (`cluau test`): its @std/test cases matching
+		// `filter` (a part of their names, any case; "" for all) report as
+		// they run. False when the file itself fails (it does not load, or
+		// an error escapes its cases).
+		struct TestCounts
+		{
+			int Passed = 0;
+			int Failed = 0;
+			int Skipped = 0;
+		};
+		bool RunTest(const std::string& path, const std::string& filter, TestCounts& counts);
+
 		lua_State* State() const;
 
 		struct Impl; // the runtime's state (Runtime.cpp)

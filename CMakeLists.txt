@@ -15,6 +15,7 @@ add_library(cluau_translator STATIC
     src/translate/Lexer.cpp
     src/translate/Translate.cpp
     src/convert/Convert.cpp
+    src/translate/Format.cpp
 )
 target_include_directories(cluau_translator PUBLIC include PRIVATE src/translate)
 

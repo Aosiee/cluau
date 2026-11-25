@@ -870,6 +870,36 @@ __cluau_meta = {
 		return rt.RunChunk(text, path, detail::IsLuauFile(file));
 	}
 
+	bool Runtime::RunTest(const std::string& path, const std::string& filter, TestCounts& counts)
+	{
+		Impl& rt = *m_Impl;
+		lua_State* L = rt.L;
+		// @std/test, told the file and the filter.
+		lua_getglobal(L, "require");
+		lua_pushstring(L, "@std/test");
+		if (lua_pcall(L, 1, 1, 0) != 0)
+		{
+			std::fprintf(stderr, "cluau: %s\n", lua_tostring(L, -1));
+			lua_pop(L, 1);
+			return false;
+		}
+		const int module = lua_gettop(L);
+		lua_getfield(L, module, "_begin");
+		lua_pushstring(L, path.c_str());
+		lua_pushstring(L, filter.c_str());
+		lua_call(L, 2, 0);
+
+		const bool ran = RunFile(path) == 0;
+
+		lua_getfield(L, module, "_finish");
+		lua_call(L, 0, 3);
+		counts.Passed = (int)lua_tonumber(L, -3);
+		counts.Failed = (int)lua_tonumber(L, -2);
+		counts.Skipped = (int)lua_tonumber(L, -1);
+		lua_settop(L, module - 1);
+		return ran;
+	}
+
 	int Runtime::RunSource(const std::string& source, const std::string& name)
 	{
 		Impl& rt = *m_Impl;

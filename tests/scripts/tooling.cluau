@@ -1,0 +1,59 @@
+// cluau test and cluau fmt, run on a project made here.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const cluau = process.executable
+const dir = path.join(fs.tempDir(), `cluau-tooling-{process.platform}-{math.floor(time.now() * 1000)}`)
+fs.mkdir(path.join(dir, "tests"))
+
+fs.write(path.join(dir, "tests", "math_test.cluau"), [[
+const test = require("@std/test")
+
+test.case("adds", function() {
+	test.equal(1 + 1, 2)
+})
+test.case("compares tables by contents", function() {
+	test.equal({ x = 1, list = { 1, 2 } }, { list = { 1, 2 }, x = 1 })
+})
+test.case("fails an equal", function() {
+	test.equal({ a = 1 }, { a = 2 }, "the record")
+})
+test.case("errors", function() {
+	error("an error in the code", 0)
+})
+test.case("raises", function() {
+	test.raises(function() { error("boom!") }, "boom")
+})
+test.case("raises nothing", function() {
+	test.raises(function() { })
+})
+test.case("near", function() {
+	test.near(0.1 + 0.2, 0.3)
+	test.ok(true)
+	test.notEqual(1, 2)
+})
+test.skip("later", function() { })
+]])
+fs.write(path.join(dir, "tests", "passing_test.cluau"), 'require("@std/test").case("passes", function() { })\n')
+fs.write(path.join(dir, "helper.cluau"), 'if (true) {\nprint("messy")\n    }   \n\n\n')
+
+function Run(args: { string }): string {
+	const command: { string } = { cluau }
+	for (_, arg in args) {
+		table.insert(command, arg)
+	}
+	const r = process.run(command, { cwd = dir, stderr = "merge" })
+	return `{(string.gsub(r.output, "\r", ""))}[exit {r.code}]`
+}
+
+print(Run({ "test" }))
+print(Run({ "test", "-k", "TABLE" }))
+print(Run({ "test", path.join("tests", "passing_test.cluau") }))
+print(Run({ "fmt", "--check" }))
+print(Run({ "fmt", "helper.cluau" }))
+print(repr(fs.read(path.join(dir, "helper.cluau"))))
+print(Run({ "fmt", "--check", "." }))
+
+fs.remove(dir, true)

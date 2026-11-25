@@ -101,4 +101,14 @@ suite:step("docs-examples", {
 	},
 })
 
+// The repository's own .cluau files stay as cluau fmt has them.
+suite:step("format", {
+	doc = "Checks the repository's .cluau files with cluau fmt --check.",
+	needs = { "build:release" },
+	timeout = 60,
+	budget = 2,
+	paths = { "src/**", "tests/**", "hamr.cluau" },
+	run = { "build-hamr-release/cluau", "fmt", "--check", "src", "tests", "hamr.cluau" },
+})
+
 return suite

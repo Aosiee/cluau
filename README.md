@@ -33,7 +33,8 @@ script the way `python script.py` does, with a REPL, `require` for other
 files and a standard library for files, paths, processes, JSON, times,
 HTTP, command-line arguments and CSV, and
 `cluau check script.cluau` type-checks it (and the modules it requires)
-without running it.
+without running it, `cluau test` runs its test files, and `cluau fmt`
+formats it.
 
 ```
 #!/usr/bin/env cluau
@@ -111,6 +112,8 @@ A host that embeds the translator pins a tag and builds from source.
 cmake -S . -B build && cmake --build build && ctest --test-dir build
 ./build/cluau script.cluau args...
 ./build/cluau check script.cluau
+./build/cluau test
+./build/cluau fmt --check
 ./build/cluau
 ./build/cluau translate file.cluau
 ./build/cluau convert --verify file.luau

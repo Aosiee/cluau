@@ -1,0 +1,189 @@
+// @std/test: test cases and assertions for `cluau test`.
+//
+//   const test = require("@std/test")
+//
+//   test.case("adds", function() {
+//   	test.equal(1 + 1, 2)
+//   	test.equal({ x = 1, y = 2 }, { y = 2, x = 1 }) // tables compare by contents
+//   	test.raises(function() { error("boom") }, "boom")
+//   })
+//
+// Each case runs when it is declared; a failed assertion ends that case and
+// the next one runs. `cluau test` runs every *_test.cluau file and reports.
+
+const io = require("@std/io")
+
+// What an assertion raises: the case fails with its message, at the line
+// of the assertion in the test file.
+type Failure = { __cluauTestFailure: boolean, message: string, where: string }
+
+const state = {
+	file = "",
+	filter = "",
+	passed = 0,
+	failed = 0,
+	skipped = 0,
+}
+
+// The line that called the assertion `depth` calls up (file:line).
+function Where(depth: number): string {
+	const source, line = debug.info(depth + 1, "sl")
+	if (source == nil || line == nil) {
+		return "?"
+	}
+	const shown = if (string.sub(source, 1, 1) == "@") string.sub(source, 2) else source
+	return `{shown}:{line}`
+}
+
+function Fail(message: string, depth: number): never {
+	const failure: Failure = { __cluauTestFailure = true, message = message, where = Where(depth + 1) }
+	error(failure, 0)
+}
+
+function Shown(value: unknown): string {
+	return repr(value)
+}
+
+// Deep equality: tables are equal when their keys and values are (cycles
+// compare by position), and NaN equals NaN.
+function Same(a: unknown, b: unknown, seen: { [unknown]: unknown }): boolean {
+	if (a == b) {
+		return true
+	}
+	if (type(a) == "number" && type(b) == "number") {
+		return a != a && b != b
+	}
+	if (type(a) != "table" || type(b) != "table") {
+		return false
+	}
+	const ta = a :: { [unknown]: unknown }
+	const tb = b :: { [unknown]: unknown }
+	if (seen[ta] == tb) {
+		return true
+	}
+	seen[ta] = tb
+	for (key, value in ta) {
+		if (!Same(value, tb[key], seen)) {
+			return false
+		}
+	}
+	for (key in tb) {
+		if (ta[key] == nil) {
+			return false
+		}
+	}
+	return true
+}
+
+function Matches(name: string): boolean {
+	return state.filter == "" || string.find(string.lower(name), string.lower(state.filter), 1, true) != nil
+}
+
+// A test case: `fn` runs now; a failed assertion or an error in it fails the
+// case, and the file goes on with the next.
+function case(name: string, fn: () -> ()) {
+	if (!Matches(name)) {
+		return
+	}
+	const ok, problem = pcall(fn)
+	if (ok) {
+		state.passed += 1
+		io.write(`  ok    {name}\n`)
+		return
+	}
+	state.failed += 1
+	let message: string
+	if (type(problem) == "table" && (problem :: Failure).__cluauTestFailure) {
+		const failure = problem :: Failure
+		message = `{failure.where}: {failure.message}`
+	} else {
+		message = tostring(problem)
+	}
+	io.write(`  FAIL  {name}\n`)
+	for (line in string.gmatch(message, "[^\n]+")) {
+		io.write(`        {line}\n`)
+	}
+}
+
+// A case declared but not run (reported as skipped).
+function skip(name: string, fn: () -> ()) {
+	if (!Matches(name)) {
+		return
+	}
+	state.skipped += 1
+	io.write(`  skip  {name}\n`)
+}
+
+// `actual` equals `expected` (tables by their contents).
+function equal(actual: unknown, expected: unknown, message: string?) {
+	if (!Same(actual, expected, {})) {
+		Fail(`{if (message != nil) message .. ": " else ""}expected {Shown(expected)}, got {Shown(actual)}`, 2)
+	}
+}
+
+function notEqual(actual: unknown, unexpected: unknown, message: string?) {
+	if (Same(actual, unexpected, {})) {
+		Fail(`{if (message != nil) message .. ": " else ""}expected anything but {Shown(unexpected)}`, 2)
+	}
+}
+
+// `value` is neither false nor nil.
+function ok(value: unknown, message: string?) {
+	if (!value) {
+		Fail(message or `expected a true value, got {Shown(value)}`, 2)
+	}
+}
+
+// Two numbers within `tolerance` (1e-9 by default) of each other.
+function near(actual: number, expected: number, tolerance: number?, message: string?) {
+	const within = tolerance or 1e-9
+	if (math.abs(actual - expected) > within) {
+		Fail(`{if (message != nil) message .. ": " else ""}expected {expected} (within {within}), got {actual}`, 2)
+	}
+}
+
+// `fn` raises an error (whose message contains `text`, when given); the
+// error's message.
+function raises(fn: () -> (), text: string?): string {
+	const completed, problem = pcall(fn)
+	if (completed) {
+		return Fail(if (text != nil) `expected an error containing '{text}', but none was raised` else "expected an error, but none was raised", 2)
+	}
+	const message = if (type(problem) == "table" && (problem :: Failure).__cluauTestFailure) (problem :: Failure).message else tostring(problem)
+	if (text != nil && string.find(message, text, 1, true) == nil) {
+		return Fail(`expected an error containing '{text}', got '{message}'`, 2)
+	}
+	return message
+}
+
+// Fails the case here.
+function fail(message: string): never {
+	return Fail(message, 2)
+}
+
+// For `cluau test`: a file starts (its cases matching `filter`) ...
+function _begin(file: string, filter: string) {
+	state.file = file
+	state.filter = filter
+	state.passed = 0
+	state.failed = 0
+	state.skipped = 0
+}
+
+// ... and ends: how its cases went.
+function _finish(): (number, number, number) {
+	return state.passed, state.failed, state.skipped
+}
+
+return {
+	case = case,
+	skip = skip,
+	equal = equal,
+	notEqual = notEqual,
+	ok = ok,
+	near = near,
+	raises = raises,
+	fail = fail,
+	_begin = _begin,
+	_finish = _finish,
+}

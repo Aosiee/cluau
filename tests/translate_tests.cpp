@@ -1,6 +1,7 @@
 #include "test.h"
 
 #include "cluau/cluau.h"
+#include "cluau/format.h"
 
 #include <algorithm>
 
@@ -366,4 +367,59 @@ TEST("scripts: a source that ends inside a block, bracket, comment or long strin
 	CHECK(!cluau::Translate("print(1)\n").Unfinished);
 	CHECK(!cluau::Translate("let s = \"unterminated\n").Unfinished);
 	CHECK(!cluau::Translate("f(1 }\n").Unfinished);
+}
+
+namespace {
+
+	std::string Formatted(const std::string& source) { return cluau::Format(source).Text; }
+
+} // namespace
+
+TEST("format: indentation follows the brackets open at each line's start")
+{
+	CHECK_EQ(Formatted("if (a) {\nprint(1)\n  } else {\n      print(2)\n}\n"),
+		std::string("if (a) {\n\tprint(1)\n} else {\n\tprint(2)\n}\n"));
+	// Several brackets opened on one line are one level; the closing line is back at the opener's.
+	CHECK_EQ(Formatted("print(call(1,\n{\nx = 1,\n}))\n"), std::string("print(call(1,\n\t{\n\t\tx = 1,\n\t}))\n"));
+	CHECK_EQ(Formatted("class P {\n  X: number = 0\nfunction F() {\nreturn 1\n}\n}\n"),
+		std::string("class P {\n\tX: number = 0\n\tfunction F() {\n\t\treturn 1\n\t}\n}\n"));
+}
+
+TEST("format: a continued statement is one level in, once")
+{
+	CHECK_EQ(Formatted("const x = a +\nb +\nc\n"), std::string("const x = a +\n\tb +\n\tc\n"));
+	CHECK_EQ(Formatted("let t = obj\n:Method()\n.Field\n"), std::string("let t = obj\n\t:Method()\n\t.Field\n"));
+	CHECK_EQ(Formatted("let v = if (x) 1\nelse 2\n"), std::string("let v = if (x) 1\n\telse 2\n"));
+	// A bracket opened on the line before already gives the level.
+	CHECK_EQ(Formatted("f(a +\nb)\n"), std::string("f(a +\n\tb)\n"));
+	CHECK_EQ(Formatted("f(\na +\nb)\n"), std::string("f(\n\ta +\n\t\tb)\n"));
+	// A line starting with `-` may start an expression: not a continuation.
+	CHECK_EQ(Formatted("x = 1\n-y()\n"), std::string("x = 1\n-y()\n"));
+}
+
+TEST("format: whitespace inside strings and comments that span lines stays")
+{
+	const std::string source = "let s = [[\n  keep   this   \n\tas is]]   \n/* a\n     comment */\nlet t = 1   \n";
+	CHECK_EQ(Formatted(source), std::string("let s = [[\n  keep   this   \n\tas is]]\n/* a\n     comment */\nlet t = 1\n"));
+}
+
+TEST("format: trailing blank lines go, line breaks keep their kind, a second pass changes nothing")
+{
+	CHECK_EQ(Formatted("let a = 1\n\n\n"), std::string("let a = 1\n"));
+	CHECK_EQ(Formatted("if (a) {\r\nf()\r\n}"), std::string("if (a) {\r\n\tf()\r\n}\r\n"));
+	const std::string messy = "class A {\n  function F(): number {\n        return g(1,\n  2) +\n3\n  }\n}\n";
+	const std::string once = Formatted(messy);
+	CHECK_EQ(Formatted(once), once);
+	CHECK(!cluau::Format(once).Changed);
+	cluau::FormatOptions spaces;
+	spaces.Indent = "    ";
+	CHECK_EQ(cluau::Format("if (a) {\nf()\n}\n", spaces).Text, std::string("if (a) {\n    f()\n}\n"));
+}
+
+TEST("format: a source that does not lex is left as it is")
+{
+	const cluau::FormatResult r = cluau::Format("let s = \"unterminated\n  let t = 1\n");
+	CHECK(r.HasErrors());
+	CHECK(!r.Changed);
+	CHECK_EQ(r.Text, std::string("let s = \"unterminated\n  let t = 1\n"));
 }
