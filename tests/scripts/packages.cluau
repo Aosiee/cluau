@@ -1,0 +1,84 @@
+// The package commands against Git repositories made here: init, add (a tag,
+// the latest tag), install (from the lock), update, list, remove, and a
+// package's own dependency installed beside it.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const cluau = process.executable
+const work = path.join(fs.tempDir(), `cluau-packages-{process.platform}-{math.floor(time.now() * 1000)}`)
+const app = path.join(work, "app")
+fs.mkdir(app)
+
+function Run(args: { string }, cwd: string): string {
+	const r = process.run(args, { cwd = cwd, stderr = "merge" })
+	return (string.gsub(r.output, "\r", ""))
+}
+
+function Git(args: { string }, cwd: string) {
+	const command = { "git", "-c", "user.name=cluau tests", "-c", "user.email=tests@example.invalid", "-c", "init.defaultBranch=main" }
+	for (_, a in args) {
+		table.insert(command, a)
+	}
+	Run(command, cwd)
+}
+
+// What a command prints, the same on every machine: no commit ids, no paths.
+function Shown(text: string): string {
+	let out = string.gsub(text, (string.gsub(work, "%p", "%%%0")), "<work>")
+	out = string.gsub(out, "%x%x%x%x%x%x%x%x%x%x%x%x+", "<commit>")
+	return (string.gsub(out, "%s+$", ""))
+}
+
+function Cluau(args: { string }): string {
+	const command: { string } = { cluau }
+	for (_, a in args) {
+		table.insert(command, a)
+	}
+	return Shown(Run(command, app))
+}
+
+// Two repositories: mathlib (tags v1.0.0, v1.1.0) needs helpers (v0.1.0).
+const helpers = path.join(work, "repos", "helpers")
+const mathlib = path.join(work, "repos", "mathlib")
+fs.mkdir(helpers)
+fs.mkdir(mathlib)
+fs.write(path.join(helpers, "init.cluau"), "function Twice(x: number): number {\n\treturn x * 2\n}\nreturn { Twice = Twice }\n")
+Git({ "init", "-q" }, helpers)
+Git({ "add", "-A" }, helpers)
+Git({ "commit", "-q", "-m", "helpers" }, helpers)
+Git({ "tag", "v0.1.0" }, helpers)
+fs.write(path.join(mathlib, "cluau.toml"), `[package]\nname = "mathlib"\n\n[dependencies]\nhelpers = \{ git = "{helpers}", tag = "v0.1.0" }\n`)
+fs.write(path.join(mathlib, "init.cluau"),
+	'const helpers = require("helpers")\nfunction Quad(x: number): number {\n\treturn helpers.Twice(helpers.Twice(x))\n}\nreturn { Quad = Quad, Version = "1.0" }\n')
+Git({ "init", "-q" }, mathlib)
+Git({ "add", "-A" }, mathlib)
+Git({ "commit", "-q", "-m", "one" }, mathlib)
+Git({ "tag", "v1.0.0" }, mathlib)
+fs.write(path.join(mathlib, "init.cluau"), (string.gsub(fs.read(path.join(mathlib, "init.cluau")), "1%.0", "1.1")))
+Git({ "commit", "-q", "-a", "-m", "two" }, mathlib)
+Git({ "tag", "v1.1.0" }, mathlib)
+
+fs.write(path.join(app, "main.cluau"), 'const mathlib = require("mathlib")\nprint(mathlib.Quad(3), mathlib.Version)\n')
+fs.write(path.join(app, "main_test.cluau"), 'const test = require("@std/test")\ntest.case("quad", function() { test.equal(require("mathlib").Quad(1), 4) })\n')
+
+print(Cluau({ "init" }))
+print(Cluau({ "add", `{mathlib}@v1.0.0` }))
+print(Cluau({ "main.cluau" }))
+print(Cluau({ "check", "main.cluau" }), "(checked)")
+print(Cluau({ "list" }))
+print(Cluau({ "install" }))
+print(Cluau({ "test" }))
+print(Cluau({ "add", mathlib }))
+print(Cluau({ "main.cluau" }))
+fs.remove(path.join(app, "cluau_modules"), true)
+print(Cluau({ "install" }))
+print(Cluau({ "update", "mathlib" }))
+print(Shown(fs.read(path.join(app, "cluau.toml"))))
+print(Cluau({ "remove", "mathlib" }))
+print(Cluau({ "list" }))
+print(Cluau({ "add", `{mathlib}@no-such-tag` }))
+print(Cluau({ "remove", "nothing" }))
+
+fs.remove(work, true)

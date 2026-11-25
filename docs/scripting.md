@@ -380,7 +380,7 @@ returns (`true` when it returns nothing); later calls give the same value.
 | name | is looked for |
 |---|---|
 | `"./name"`, `"../name"` | from the requiring file's directory |
-| `"name"`, `"dir/name"` | in the main script's directory, then each `CLUAU_PATH` directory (`:`-separated; `;` on Windows) |
+| `"name"`, `"dir/name"` | in the main script's directory, then in each `cluau_modules` directory from the requiring file's up (see [Packages](#packages)), then each `CLUAU_PATH` directory (`:`-separated; `;` on Windows) |
 | `"/abs/name"` | at that path |
 | `"@std/name"` | a standard module |
 
@@ -399,6 +399,59 @@ return { Hello = Hello }
 const greet = require("./lib/greet")
 print(greet.Hello("cluau"))
 ```
+
+## Packages
+
+A project's dependencies are other people's (or your own) cluau code in Git
+repositories. `cluau.toml`, at the project's root, names them; `cluau.lock`
+pins each to an exact commit; `cluau install` fetches them into
+`cluau_modules/`, where `require("name")` finds them:
+
+```
+$ cluau init
+made cluau.toml for my-tool
+made .gitignore (leaving cluau_modules/ out of Git)
+$ cluau add github.com/someone/mathlib@v1.2.0
+added mathlib (https://github.com/someone/mathlib v1.2.0) to cluau.toml
+  mathlib v1.2.0 (4376c77d4c8d)
+1 package(s) in cluau_modules, 1 fetched
+```
+
+```toml
+[package]
+name = "my-tool"
+version = "0.1.0"
+
+[dependencies]
+mathlib = { git = "https://github.com/someone/mathlib", tag = "v1.2.0" }
+utils = { git = "git@example.com:team/utils.git", branch = "main" }
+pinned = { git = "https://github.com/someone/pinned", rev = "0007d6e4fc04c4a1d5b1e0f7a1b2c3d4e5f60718" }
+```
+
+| command | does |
+|---|---|
+| `cluau init [name]` | makes `cluau.toml` (and a `.gitignore` leaving `cluau_modules/` out, when there is none) |
+| `cluau add <repository>[@ref] [--name <name>]` | adds a dependency and installs it. `@ref` is a tag, a branch or a commit; without one, the newest version tag (`v1.2.3`), else the default branch. The name is the repository's last part unless `--name` gives one |
+| `cluau install` | fetches every dependency at the commit `cluau.lock` pins (resolving and pinning the new ones), and removes what is no longer wanted |
+| `cluau update [name...]` | resolves the dependencies' tags and branches again (all of them, or those named) and pins the new commits |
+| `cluau remove <name>` | removes a dependency |
+| `cluau list` | the installed packages, their commits, and which package wanted each |
+
+- A repository is `github.com/owner/name` (an `https://` address), any Git
+  URL (`https://`, `ssh://`, `git@host:path`), or a local directory. Git
+  fetches them, so `git` must be on `PATH`; private repositories use your
+  Git credentials.
+- A package is a repository whose `init.cluau` is what `require("name")`
+  returns; `require("name/part")` loads `part.cluau` from it.
+- A package's own `cluau.toml` dependencies are installed too, beside it in
+  the same `cluau_modules/`. Two packages that want one name from different
+  places or versions is an error naming both.
+- Commit `cluau.toml` and `cluau.lock`; leave `cluau_modules/` out. Anyone
+  with the project runs `cluau install` and gets the same commits.
+- `cluau check` types packages like any module, and `cluau test` and
+  `cluau fmt` leave `cluau_modules/` alone.
+- For code you are working on beside a project, `CLUAU_PATH` (or a
+  relative `require("../shared/x")`) is quicker than a package.
 
 ## The standard library
 

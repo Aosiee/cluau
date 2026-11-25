@@ -47,6 +47,31 @@ for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 	})
 }
 
+// A Markdown file's fenced code blocks without a language (the guides'
+// cluau), in order: a labelled block (```toml, ...) is left out.
+function CodeBlocks(text: string): { string } {
+	const blocks: { string } = {}
+	let inside = false
+	let label = ""
+	let lines: { string } = {}
+	for (line in string.gmatch(text .. "\n", "([^\n]*)\n")) {
+		const fence = string.match(line, "^```(.*)$")
+		if (fence != nil && !inside) {
+			inside = true
+			label = fence
+			lines = {}
+		} else if (fence != nil && fence == "") {
+			inside = false
+			if (label == "") {
+				table.insert(blocks, table.concat(lines, "\n") .. "\n")
+			}
+		} else if (inside) {
+			table.insert(lines, line)
+		}
+	}
+	return blocks
+}
+
 // Every code block the syntax guide marks as cluau translates without an
 // error, and so does every script in the scripting guide (in script mode);
 // the guide's self-contained scripts type-check too.
@@ -59,7 +84,7 @@ suite:step("docs-examples", {
 	run = function(ctx: Context) {
 		const text = host.read(host.join(ctx.root, "docs", "syntax.md")) or ""
 		let index = 0
-		for (block in string.gmatch(text, "```\n(.-)```")) {
+		for (_, block in CodeBlocks(text)) {
 			// The guide's tables of Luau equivalents are prose; its fenced
 			// blocks are cluau (the class and if-expression examples).
 			if (string.find(block, "class ", 1, true) || string.find(block, "let ", 1, true)) {
@@ -75,10 +100,7 @@ suite:step("docs-examples", {
 		// The scripting guide's blocks are scripts, except its transcripts
 		// (a prompt session, a command and its output, an error's output).
 		const scripting = host.read(host.join(ctx.root, "docs", "scripting.md")) or ""
-		const blocks: { string } = {}
-		for (block in string.gmatch(scripting, "```\n(.-)```")) {
-			table.insert(blocks, block)
-		}
+		const blocks = CodeBlocks(scripting)
 		let scripts = 0
 		for (i, block in blocks) {
 			const transcript = string.sub(block, 1, 2) == "> " || string.sub(block, 1, 2) == "$ " || string.match(block, "^[%w_%-%./]+%.cluau:%d+") != nil

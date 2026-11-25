@@ -66,6 +66,8 @@ namespace {
 		"       cluau - [args...]                   run the script on standard input\n"
 		"       cluau [-i]                          the interactive prompt (-i: even when stdin is not a terminal)\n"
 		"       cluau test [-k <text>] [path...]      run the @std/test cases in *_test.cluau files (no path: .)\n"
+		"       cluau init | add <repository>[@ref] | remove <name> | install | update [name...] | list\n"
+		"                                           packages from Git repositories (cluau.toml, cluau.lock, cluau_modules/)\n"
 		"       cluau check [--loose] [--lint] <script.cluau>...\n"
 		"                                           type-check scripts (and the modules they require) without running them\n"
 		"       cluau translate [--manifest|--script] <file.cluau>\n"
@@ -168,7 +170,7 @@ namespace {
 				for (; !ec && it != end; it.increment(ec))
 				{
 					const std::string name = it->path().filename().u8string();
-					if (it->is_directory(ec) && !name.empty() && name[0] == '.' && name != "." && name != "..")
+					if (it->is_directory(ec) && ((!name.empty() && name[0] == '.' && name != "." && name != "..") || name == "cluau_modules"))
 					{
 						it.disable_recursion_pending();
 						continue;
@@ -359,7 +361,7 @@ namespace {
 			for (; !ec && it != end; it.increment(ec))
 			{
 				const std::string name = it->path().filename().u8string();
-				if (it->is_directory(ec) && !name.empty() && name[0] == '.' && name != "." && name != "..")
+				if (it->is_directory(ec) && ((!name.empty() && name[0] == '.' && name != "." && name != "..") || name == "cluau_modules"))
 				{
 					it.disable_recursion_pending();
 					continue;
@@ -443,6 +445,12 @@ int main(int argc, char** argv)
 		return Check(argc, argv);
 	if (first == "test")
 		return Test(argc, argv);
+	if (first == "init" || first == "add" || first == "remove" || first == "install" || first == "update" || first == "list")
+	{
+		// The package commands are written in cluau (src/runtime/std/_packages.cluau).
+		cluau::runtime::Runtime runtime(RunOptions(argc, argv, 1));
+		return runtime.RunSource("require(\"@std/_packages\").main(require(\"@std/process\").args)", "cluau");
+	}
 	if (first.empty() || first == "-i")
 	{
 		if (first.empty() && !CLUAU_ISATTY(0))

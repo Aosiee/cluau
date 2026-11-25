@@ -1,0 +1,36 @@
+made cluau.toml for app
+made .gitignore (leaving cluau_modules/ out of Git)
+added mathlib (<work>/repos/mathlib v1.0.0) to cluau.toml
+  mathlib v1.0.0 (<commit>)
+  helpers v0.1.0 (<commit>)
+2 package(s) in cluau_modules, 2 fetched
+12	1.0
+	(checked)
+helpers v0.1.0 <commit> <work>/repos/helpers (for mathlib)
+mathlib v1.0.0 <commit> <work>/repos/mathlib
+2 package(s) in cluau_modules
+main_test.cluau
+  ok    quad
+1 passed (1 file(s))
+added mathlib (<work>/repos/mathlib v1.1.0) to cluau.toml
+  mathlib v1.1.0 (<commit>)
+2 package(s) in cluau_modules, 1 fetched
+12	1.1
+  mathlib v1.1.0 (<commit>)
+  helpers v0.1.0 (<commit>)
+2 package(s) in cluau_modules, 2 fetched
+2 package(s) in cluau_modules
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+mathlib = { git = "<work>/repos/mathlib", tag = "v1.1.0" }
+removed mathlib from cluau.toml
+  removed helpers
+  removed mathlib
+0 package(s) in cluau_modules
+no packages (cluau add <repository> adds one)
+cluau: <work>/repos/mathlib has no tag, branch or commit 'no-such-tag'
+cluau: nothing is not a dependency in cluau.toml
+exit: 0

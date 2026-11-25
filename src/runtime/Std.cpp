@@ -209,7 +209,22 @@ namespace cluau::runtime::detail {
 			if (!fs::exists(fs::symlink_status(path, ec)))
 				return 0;
 			if (all)
+			{
 				fs::remove_all(path, ec);
+				if (ec)
+				{
+					// Read-only files (Git's objects on Windows) refuse to go:
+					// made writable, then removed again.
+					std::error_code walk;
+					for (fs::recursive_directory_iterator it(path, walk), end; !walk && it != end; it.increment(walk))
+					{
+						std::error_code ignored;
+						fs::permissions(it->path(), fs::perms::owner_write, fs::perm_options::add, ignored);
+					}
+					ec.clear();
+					fs::remove_all(path, ec);
+				}
+			}
 			else
 				fs::remove(path, ec);
 			if (ec)

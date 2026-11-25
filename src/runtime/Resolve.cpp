@@ -46,6 +46,17 @@ namespace cluau::runtime::detail {
 		else
 		{
 			bases.push_back(mainDir / asPath);
+			// Packages: the nearest cluau_modules directory up from the
+			// requiring file (a package's own dependencies sit beside it).
+			std::error_code ec;
+			for (fs::path dir = fromDir.lexically_normal(); !dir.empty(); dir = dir.parent_path())
+			{
+				const fs::path modules = dir / "cluau_modules";
+				if (fs::is_directory(modules, ec))
+					bases.push_back(modules / asPath);
+				if (dir == dir.parent_path())
+					break;
+			}
 			for (const fs::path& dir : searchDirs)
 				bases.push_back(dir / asPath);
 		}
