@@ -7,6 +7,8 @@ https	ada	secret	example.com	8443	/docs/a b	q=1&x=two+words	top
 https://ada:secret@example.com:8443/docs/a%20b?q=1&x=two+words#top
 ::1	8080
 relative/path	ada@example.com
+/a/b/c d	/a%2Fb/c%20d	http://h/a%2Fb/c%20d
+http://h/a%20b	http://h/x%20y
 g	->	http://a/b/c/g
 ./g	->	http://a/b/c/g
 g/	->	http://a/b/c/g/
@@ -19,6 +21,10 @@ g/	->	http://a/b/c/g/
 ../../../g	->	http://a/g
 g?y#s	->	http://a/b/c/g?y#s
 https://x/y	->	https://x/y
+?	->	http://a/b/c/d;p?
+g//h	->	http://a/b/c/g//h
+a%2Fb/../c	->	http://a/b/c/c
+w	->	http://a/x%2Fy/w
 a%20b%2Fc%26d%3D%C3%A9	a%20b/c	a b/c
 ada lovelace	cluau	true	true
 ok=true&page=2&q=two%20words
@@ -33,4 +39,16 @@ plain	true	ustar
 escape	false	true
 system tar	from a file
 false	tar: the data is not a tar archive (a header's checksum does not match at byte 0)
+long entry	124	false
+long entry	131	true
+long entry	255	false
+system tar lists	124 131 255
+special	link	0	false	150
+special	fifo	0	false	nil
+special	device	0	false	nil
+special	file.txt	4	false	nil
+special extracted	1	{"file.txt"}
+false	tar: the data is not a tar archive (it is shorter than a header)
+false	tar: the data ends inside a header (at byte 2560)
+empty	0
 exit: 0

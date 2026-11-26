@@ -12,6 +12,7 @@
 #include <miniz.h>
 
 #include <ctime>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -49,8 +50,9 @@ namespace cluau::runtime::detail {
 				return 6;
 			luaL_checktype(L, index, LUA_TTABLE);
 			lua_getfield(L, index, "level");
-			const int level = lua_isnil(L, -1) ? 6 : (int)lua_tointeger(L, -1);
+			const double given = lua_isnil(L, -1) ? 6 : (lua_type(L, -1) == LUA_TNUMBER ? lua_tonumber(L, -1) : -1);
 			lua_pop(L, 1);
+			const int level = given == std::floor(given) ? (int)given : -1;
 			if (level < 0 || level > 9)
 				luaL_error(L, "%s: options.level is from 0 (stored) to 9 (smallest)", fn);
 			return level;
@@ -219,6 +221,10 @@ namespace cluau::runtime::detail {
 					luaL_error(L, "compress.gunzip: the checksum does not match: the data is damaged");
 				out += member;
 				at = p + 8;
+				// Zero bytes after the last member are padding (tape blocks):
+				// gzip itself passes over them.
+				if (data.find_first_not_of('\0', at) == std::string_view::npos)
+					break;
 			} while (at < data.size());
 			lua_pushlstring(L, out.data(), out.size());
 			return 1;
@@ -343,7 +349,7 @@ namespace cluau::runtime::detail {
 		{
 			Archive& a = CheckArchive(L, "archive:read");
 			const char* name = luaL_checkstring(L, 2);
-			const int index = mz_zip_reader_locate_file(&a.Zip, name, nullptr, 0);
+			const int index = mz_zip_reader_locate_file(&a.Zip, name, nullptr, MZ_ZIP_FLAG_CASE_SENSITIVE);
 			if (index < 0)
 				luaL_error(L, "archive:read: no '%s' in the archive", name);
 			mz_zip_archive_file_stat stat;

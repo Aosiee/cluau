@@ -20,6 +20,14 @@ export type PositionalOptions = { help: string?, many: boolean?, optional: boole
 
 type Kind = "flag" | "option" | "positional"
 
+// A number as a person writes one in decimal (-1.5, 2e3): not nan, inf or
+// 0x10, nor one with spaces around it.
+const IsDecimal = function(text: string): boolean {
+	const value = tonumber(text)
+	return value != nil && value == value && math.abs(value) != math.huge && string.find(text, "%d") != nil
+		&& string.find(text, "^[+-]?%d*%.?%d*[eE]?[+-]?%d*$") != nil
+}
+
 type Spec = {
 	Kind: Kind,
 	Name: string,
@@ -215,7 +223,7 @@ class Parser {
 		let onlyPositional = false
 
 		local function store(spec: Spec, value: string): string? {
-			if (spec.Number && tonumber(value) == nil) {
+			if (spec.Number && !IsDecimal(value)) {
 				return `--{spec.Name} takes a number, not '{value}'`
 			}
 			const values = parsed.Values[spec.Name] or {}
@@ -230,7 +238,10 @@ class Parser {
 		let i = 1
 		while (i <= #given) {
 			const arg = given[i]
-			if (onlyPositional || arg == "-" || string.sub(arg, 1, 1) != "-" || tonumber(arg) != nil) {
+			// A negative number is an argument, unless it starts like a short
+			// flag that is declared (-1 with a flag -1).
+			const negative = IsDecimal(arg) && self:find(nil, string.sub(arg, 2, 2)) == nil
+			if (onlyPositional || arg == "-" || string.sub(arg, 1, 1) != "-" || negative) {
 				table.insert(positional, arg)
 			} else if (arg == "--") {
 				onlyPositional = true
@@ -269,6 +280,10 @@ class Parser {
 				while (k <= #arg) {
 					const short = string.sub(arg, k, k)
 					const spec = self:find(nil, short)
+					if (spec == nil && short == "h") {
+						parsed.Help = true
+						return parsed, nil
+					}
 					if (spec == nil) {
 						return nil, `unknown option -{short}`
 					}

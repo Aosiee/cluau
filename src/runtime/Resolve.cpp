@@ -16,8 +16,11 @@ namespace cluau::runtime::detail {
 
 		bool Candidate(const fs::path& base, fs::path& found)
 		{
+			// The name as given only when it names a module: `require` loads
+			// code, never another kind of file.
+			const fs::path extension = base.extension();
 			const fs::path candidates[] = {
-				base.has_extension() ? base : fs::path(),
+				extension == ".cluau" || extension == ".luau" ? base : fs::path(),
 				fs::path(base).concat(".cluau"),
 				fs::path(base).concat(".luau"),
 				base / "init.cluau",

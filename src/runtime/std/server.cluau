@@ -45,9 +45,15 @@ export type Options = {
 const kReasons: { [number]: string } = {
 	[101] = "Switching Protocols", [200] = "OK", [201] = "Created", [204] = "No Content", [301] = "Moved Permanently", [302] = "Found",
 	[304] = "Not Modified", [400] = "Bad Request", [401] = "Unauthorized", [403] = "Forbidden", [404] = "Not Found",
-	[405] = "Method Not Allowed", [408] = "Request Timeout", [413] = "Content Too Large", [500] = "Internal Server Error",
+	[405] = "Method Not Allowed", [408] = "Request Timeout", [413] = "Content Too Large", [414] = "URI Too Long",
+	[417] = "Expectation Failed", [431] = "Request Header Fields Too Large", [500] = "Internal Server Error",
 	[501] = "Not Implemented", [503] = "Service Unavailable",
 }
+
+// The most a line of a request's head may have, and the whole head (its
+// request line and headers).
+const kLineLimit = 64 * 1024
+const kHeadLimit = 256 * 1024
 
 // %XX (and + in a query) back to their characters.
 const Decode = function(text: string, query: boolean): string {
@@ -96,33 +102,112 @@ const Fail = function(status: number, message: string): never {
 	error(Failure(status, message), 0)
 }
 
+// A line of a request's head or of a chunked body's framing, of at most
+// `limit` bytes: a longer one is answered with `status` and `message`.
+const ReadLine = function(socket: net.Socket, limit: number, status: number, message: string): string? {
+	const ok, line = pcall(function(): string? {
+		return socket:readLine(limit)
+	})
+	if (!ok) {
+		if (string.find(tostring(line), "longer than", 1, true) != nil) {
+			Fail(status, message)
+		}
+		error(line, 0)
+	}
+	return line
+}
+
+// A chunked body (its trailers read and left out); nil when it ends early.
+const ReadChunked = function(socket: net.Socket, maxBody: number): string {
+	const parts: { string } = {}
+	let size = 0
+	while (true) {
+		const sizeLine = ReadLine(socket, kLineLimit, 400, "a chunk's size line is too long")
+		if (sizeLine == nil) {
+			Fail(400, "the body ends before its last chunk")
+		}
+		// The size in hex, then perhaps ;extensions.
+		const hex = string.match(sizeLine, "^%x+")
+		const rest = string.sub(sizeLine, #(hex or "") + 1)
+		if (hex == nil || (rest != "" && string.find(rest, "^[ \t]*;") == nil)) {
+			Fail(400, "a chunk's size is a hexadecimal number")
+		}
+		if (#hex > 12) {
+			Fail(413, `a body of more than {maxBody} bytes`)
+		}
+		const chunk = tonumber(hex, 16) :: number
+		if (chunk == 0) {
+			let trailers = 0
+			while (true) {
+				const trailer = ReadLine(socket, kLineLimit, 431, `a trailer of more than {kLineLimit} bytes`)
+				if (trailer == nil) {
+					Fail(400, "the body ends inside its trailers")
+				}
+				if (trailer == "") {
+					break
+				}
+				trailers += 1
+				if (trailers > 100) {
+					Fail(431, "more than 100 trailers")
+				}
+			}
+			break
+		}
+		size += chunk
+		if (size > maxBody) {
+			Fail(413, `a body of more than {maxBody} bytes`)
+		}
+		const data = Exactly(socket, chunk)
+		if (data == nil) {
+			Fail(400, "the body ends inside a chunk")
+		}
+		table.insert(parts, data)
+		if (ReadLine(socket, kLineLimit, 400, "a chunk does not end with a line break") != "") {
+			Fail(400, "a chunk does not end with a line break")
+		}
+	}
+	return table.concat(parts)
+}
+
 // The next request on the connection (nil when it closed between requests).
-const ReadRequest = function(socket: net.Socket, maxBody: number): Request? {
-	let line = socket:readLine()
+// `busy` is called once its first line has arrived.
+const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()): Request? {
+	const tooLong = `a request line of more than {kLineLimit} bytes`
+	let line = ReadLine(socket, kLineLimit, 414, tooLong)
 	// Browsers may send an empty line between requests.
-	while (line == "") {
-		line = socket:readLine()
+	let blank = 0
+	while (line == "" && blank < 16) {
+		blank += 1
+		line = ReadLine(socket, kLineLimit, 414, tooLong)
 	}
 	if (line == nil) {
 		return nil
 	}
+	busy()
 	const method, target, version = string.match(line, "^(%u+) (%S+) HTTP/(%d%.%d)$")
 	if (method == nil || target == nil || version == nil) {
 		Fail(400, "a request line is METHOD /path HTTP/1.1")
 	}
 	const headers: { [string]: string } = {}
 	let count = 0
+	let head = #line
 	while (true) {
-		const header = socket:readLine()
+		const room = kHeadLimit - head
+		const header = if (room >= kLineLimit) ReadLine(socket, kLineLimit, 431, `a header line of more than {kLineLimit} bytes`)
+			else ReadLine(socket, room + 1, 431, `headers of more than {kHeadLimit} bytes`)
 		if (header == nil) {
 			return nil
 		}
 		if (header == "") {
 			break
 		}
+		head += #header + 2
+		if (head > kHeadLimit) {
+			Fail(431, `headers of more than {kHeadLimit} bytes`)
+		}
 		count += 1
 		if (count > 100) {
-			Fail(400, "more than 100 headers")
+			Fail(431, "more than 100 headers")
 		}
 		const name, value = string.match(header, "^([^:%s]+):%s*(.-)%s*$")
 		if (name == nil || value == nil) {
@@ -134,37 +219,59 @@ const ReadRequest = function(socket: net.Socket, maxBody: number): Request? {
 	if (version == "1.0" && headers["connection"] == nil) {
 		headers["connection"] = "close"
 	}
-	// The body: by its length, or in chunks.
+	// The body: in chunks, or by its length. Both, or a coding other than
+	// chunked, is refused: two servers could read the request differently.
+	const encoding = headers["transfer-encoding"]
+	const declared = headers["content-length"]
+	let length: number? = nil
+	let chunked = false
+	if (encoding != nil) {
+		if (declared != nil) {
+			Fail(400, "a request has Transfer-Encoding or Content-Length, not both")
+		}
+		const codings: { string } = {}
+		for (coding in string.gmatch(string.lower(encoding), "[^,]+")) {
+			table.insert(codings, string.match(coding, "^%s*(.-)%s*$") or coding)
+		}
+		if (codings[#codings] != "chunked") {
+			Fail(400, "a Transfer-Encoding ends with chunked")
+		}
+		if (#codings > 1) {
+			Fail(501, `Transfer-Encoding {encoding} (only chunked is understood)`)
+		}
+		chunked = true
+	} else if (declared != nil) {
+		// Digits only; repeated, the same number each time.
+		for (part in string.gmatch(declared .. ",", "([^,]*),")) {
+			const digits = string.match(part, "^%s*(%d+)%s*$")
+			if (digits == nil) {
+				Fail(400, "Content-Length is a number of bytes")
+			}
+			const n = tonumber(digits) :: number
+			if (length != nil && n != length) {
+				Fail(400, "two different Content-Lengths")
+			}
+			length = n
+		}
+		if ((length :: number) > maxBody) {
+			Fail(413, `a body of {declared} bytes (at most {maxBody})`)
+		}
+	}
+	// A client that waits to be told to send its body is told.
+	const expect = headers["expect"]
+	if (expect != nil) {
+		if (string.lower(expect) != "100-continue") {
+			Fail(417, `Expect: {expect}`)
+		}
+		if (version != "1.0" && (chunked || (length or 0) > 0)) {
+			socket:write("HTTP/1.1 100 Continue\r\n\r\n")
+		}
+	}
 	let body = ""
-	if (string.lower(headers["transfer-encoding"] or "") == "chunked") {
-		const parts: { string } = {}
-		let size = 0
-		while (true) {
-			const sizeLine = socket:readLine() or "0"
-			const chunk = tonumber(string.match(sizeLine, "^%x+") or "0", 16) or 0
-			if (chunk == 0) {
-				while ((socket:readLine() or "") != "") {
-					// the trailers, unused
-				}
-				break
-			}
-			size += chunk
-			if (size > maxBody) {
-				Fail(413, `a body of more than {maxBody} bytes`)
-			}
-			table.insert(parts, Exactly(socket, chunk) or "")
-			socket:readLine()
-		}
-		body = table.concat(parts)
-	} else if (headers["content-length"] != nil) {
-		const length = tonumber(headers["content-length"])
-		if (length == nil || length < 0) {
-			Fail(400, "Content-Length is a number")
-		}
-		if (length > maxBody) {
-			Fail(413, `a body of {length} bytes (at most {maxBody})`)
-		}
-		body = Exactly(socket, length) or ""
+	if (chunked) {
+		body = ReadChunked(socket, maxBody)
+	} else if (length != nil && length > 0) {
+		body = Exactly(socket, length) or Fail(400, `the body ends before its {length} bytes`)
 	}
 	const rawPath, rawQuery = string.match(target, "^([^?]*)%??(.*)$")
 	return {
@@ -181,6 +288,20 @@ const ReadRequest = function(socket: net.Socket, maxBody: number): Request? {
 	}
 }
 
+// A response's headers are names and values that cannot end the header
+// they are in (no line break), so a handler cannot add a header or a body
+// it did not mean to.
+const CheckHeaders = function(headers: { [string]: string }) {
+	for (name, value in headers) {
+		if (type(name) != "string" || string.find(name, "^[%w!#$%%&'*+%-.^_`|~]+$") == nil) {
+			error(`server: '{tostring(name)}' is not a header name`, 0)
+		}
+		if (string.find(tostring(value), "[\r\n%z]") != nil) {
+			error(`server: the {name} header's value has a line break in it`, 0)
+		}
+	}
+}
+
 const Write = function(socket: net.Socket, request: Request?, response: Response, keepAlive: boolean) {
 	const status = response.status or 200
 	const given = response.body
@@ -188,6 +309,7 @@ const Write = function(socket: net.Socket, request: Request?, response: Response
 	const lines = { `HTTP/1.1 {status} {kReasons[status] or "Status"}` }
 	const headers = response.headers or {}
 	let typed = false
+	CheckHeaders(headers)
 	for (name, value in headers) {
 		const lower = string.lower(name)
 		if (lower != "content-length" && lower != "connection") {
@@ -225,11 +347,44 @@ const upgrade = function(request: Request, run: (ws: websocket.WebSocket) -> ())
 	return Upgrade(run) :: any // allow-any: an answer serve knows
 }
 
-const Serve = function(socket: net.Socket, handler: Handler, options: Options) {
+class Running {
+	Server: net.Server = nil :: any // allow-any: set by the constructor
+	Closed: boolean = false
+	// The connections waiting for their next request (closed by close()).
+	Idle: { [net.Socket]: boolean } = {}
+	host: string = ""
+	port: number = 0
+	function Init(server: net.Server) {
+		self.Server = server
+		self.host = server.host
+		self.port = server.port
+	}
+	// Stops taking connections: those waiting for a request are closed, and
+	// those with a request under way finish it.
+	function close() {
+		if (self.Closed) {
+			return
+		}
+		self.Closed = true
+		self.Server:close()
+		for (socket in self.Idle) {
+			pcall(function() {
+				socket:close()
+			})
+		}
+		table.clear(self.Idle)
+	}
+}
+
+const Serve = function(socket: net.Socket, handler: Handler, options: Options, running: Running) {
 	socket:setTimeout(options.idle or 60)
 	const maxBody = options.maxBody or 16 * 1024 * 1024
-	while (true) {
-		const read, request = pcall(ReadRequest, socket, maxBody)
+	while (!running.Closed) {
+		running.Idle[socket] = true
+		const read, request = pcall(ReadRequest, socket, maxBody, function() {
+			running.Idle[socket] = nil
+		})
+		running.Idle[socket] = nil
 		if (!read) {
 			// A broken request is answered; a connection gone quiet just ends.
 			if (typeof(request) == "table" && getmetatable(request) == Failure) {
@@ -272,7 +427,13 @@ const Serve = function(socket: net.Socket, handler: Handler, options: Options) {
 		} else {
 			response = answer :: Response
 		}
-		const wrote = pcall(Write, socket, request, response, keepAlive)
+		const valid, problem = pcall(CheckHeaders, response.headers or {})
+		if (!valid) {
+			io.writeError(`server: {request.method} {request.path}: {tostring(problem)}\n`)
+			pcall(Write, socket, request, { status = 500, body = "Internal Server Error" }, false)
+			break
+		}
+		const wrote = pcall(Write, socket, request, response, keepAlive && !running.Closed)
 		if (!wrote || !keepAlive) {
 			break
 		}
@@ -282,37 +443,39 @@ const Serve = function(socket: net.Socket, handler: Handler, options: Options) {
 	})
 }
 
-class Running {
-	Server: net.Server = nil :: any // allow-any: set by the constructor
-	host: string = ""
-	port: number = 0
-	function Init(server: net.Server) {
-		self.Server = server
-		self.host = server.host
-		self.port = server.port
-	}
-	// Stops taking connections (those under way finish).
-	function close() {
-		self.Server:close()
-	}
-}
-
 // Serves `handler` on options.host and options.port; returns at once.
 const serve = function(options: Options?, handler: Handler): Running {
 	const given = options or {}
 	const listening = net.listen(given.host or "127.0.0.1", given.port or 8080, { tls = given.tls })
+	const running = Running(listening)
 	task.spawn(function() {
-		while (true) {
+		// A failed accept (out of file descriptors, say) is reported and
+		// tried again after a pause, longer each time it fails again; only
+		// close() ends the loop.
+		let pause = 0.05
+		while (!running.Closed) {
 			const accepted, socket = pcall(function(): net.Socket {
 				return listening:accept()
 			})
-			if (!accepted) {
+			if (running.Closed) {
+				if (accepted) {
+					pcall(function() {
+						socket:close()
+					})
+				}
 				break
 			}
-			task.spawn(Serve, socket, handler, given)
+			if (accepted) {
+				pause = 0.05
+				task.spawn(Serve, socket, handler, given, running)
+			} else {
+				io.writeError(`server: accepting a connection: {tostring(socket)} (trying again in {pause} s)\n`)
+				task.wait(pause)
+				pause = math.min(pause * 2, 2)
+			}
 		}
 	})
-	return Running(listening)
+	return running
 }
 
 // ---- routing --------------------------------------------------------------
@@ -347,9 +510,13 @@ class Router {
 
 	// The first route the request's path and method match.
 	function handle(request: Request): Answer {
+		// The path's parts as the request wrote them, each decoded after, so
+		// that /users/a%2Fb has the one part a/b.
+		const raw = string.match(request.target, "^/[^?]*")
+		const source = if (raw != nil && Decode(raw, false) == request.path) raw else nil
 		const parts: { string } = {}
-		for (part in string.gmatch(request.path, "[^/]+")) {
-			table.insert(parts, part)
+		for (part in string.gmatch(source or request.path, "[^/]+")) {
+			table.insert(parts, if (source != nil) Decode(part, false) else part)
 		}
 		let pathMatched = false
 		for (_, route in self.Routes) {
@@ -413,7 +580,8 @@ const kTypes: { [string]: string } = {
 }
 
 // A handler serving the files under `directory` (index.html for a
-// directory); a path that would leave the directory is refused.
+// directory); a path that would leave the directory is refused, and hidden
+// files (a part starting with .) are not found.
 const files = function(directory: string): Handler {
 	return function(request: Request): Answer {
 		if (request.method != "GET" && request.method != "HEAD") {
@@ -421,8 +589,12 @@ const files = function(directory: string): Handler {
 		}
 		const parts: { string } = {}
 		for (part in string.gmatch(request.params["*"] or request.path, "[^/\\]+")) {
-			if (part == ".." || string.find(part, ":", 1, true) != nil) {
+			if (part == ".." || string.find(part, "[:%z]") != nil) {
 				return { status = 403, body = "Forbidden" }
+			}
+			// Hidden files and directories (.git, .env) are not served.
+			if (string.sub(part, 1, 1) == "." && part != ".") {
+				return nil
 			}
 			if (part != ".") {
 				table.insert(parts, part)

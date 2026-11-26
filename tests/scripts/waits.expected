@@ -1,0 +1,10 @@
+large input	1000000	false
+lines read	3000
+written and read	200000
+wait ended by the task's error	false	the task fails
+the next wait waits	true
+sorted in a task	1,2,3
+write timed out	false	true	true
+long line	false	true
+two accepts	accepted, timed out
+exit: 0

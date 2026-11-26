@@ -30,6 +30,9 @@ option(CLUAU_BUILD_RUNTIME "Build the script runtime (needs Luau)" ${PROJECT_IS_
 # overrides it; left empty, a build directory follows the pinned release
 # when cluau updates it (a cached default would keep the old one).
 set(CLUAU_LUAU_PINNED "0.748")
+# The pinned release's source archive, by its hash (a moved tag cannot
+# change what is built); another version is fetched by its tag.
+set(CLUAU_LUAU_PINNED_SHA256 "810b13d1480a7a2efa66fe356d7e551d2ba3548823a69a4df5a6597f2beb35e5")
 set(CLUAU_LUAU_VERSION "" CACHE STRING "A Luau release to fetch instead of cluau's pinned one (without CLUAU_LUAU_DIR)")
 if(CLUAU_LUAU_VERSION)
     set(cluau_luau_tag ${CLUAU_LUAU_VERSION})
@@ -45,10 +48,17 @@ if(CLUAU_BUILD_RUNTIME)
             set(cluau_luau_source ${CLUAU_LUAU_DIR})
         else()
             include(FetchContent)
-            FetchContent_Declare(luau
-                GIT_REPOSITORY https://github.com/luau-lang/luau.git
-                GIT_TAG ${cluau_luau_tag}
-                GIT_SHALLOW TRUE)
+            if(CLUAU_LUAU_VERSION)
+                FetchContent_Declare(luau
+                    GIT_REPOSITORY https://github.com/luau-lang/luau.git
+                    GIT_TAG ${cluau_luau_tag}
+                    GIT_SHALLOW TRUE)
+            else()
+                FetchContent_Declare(luau
+                    URL https://github.com/luau-lang/luau/archive/refs/tags/${CLUAU_LUAU_PINNED}.tar.gz
+                    URL_HASH SHA256=${CLUAU_LUAU_PINNED_SHA256}
+                    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            endif()
             FetchContent_MakeAvailable(luau)
             set(cluau_luau_source ${luau_SOURCE_DIR})
             # Only what the runtime links is built.
@@ -59,8 +69,9 @@ if(CLUAU_BUILD_RUNTIME)
     # pinned releases and linked in, so the tool stays one file. The
     # certificates come from the system at run time (src/runtime/Http.cpp).
     option(CLUAU_HTTP "Build @std/http (fetches libcurl and mbedTLS)" ON)
-    # @std/crypto, and TLS in @std/net, on the same mbedTLS.
-    option(CLUAU_CRYPTO "Build @std/crypto and TLS connections in @std/net (fetches mbedTLS)" ON)
+    # @std/crypto on the same mbedTLS. TLS in @std/net is built with either
+    # (it needs mbedTLS only), and @std/websocket needs @std/crypto.
+    option(CLUAU_CRYPTO "Build @std/crypto (fetches mbedTLS)" ON)
     if(CLUAU_HTTP OR CLUAU_CRYPTO)
         include(FetchContent)
         # With its threading (cmake/mbedtls/cluau_config.h): transfers and
@@ -297,7 +308,15 @@ if(CLUAU_BUILD_RUNTIME)
         # built with the sanitizers; run by hand (hamr's manual tier).
         option(CLUAU_FUZZ "Build the fuzz targets (clang's libFuzzer)" OFF)
         if(CLUAU_FUZZ)
-            foreach(target translate gunzip inflate zip base64 json csv regex)
+            # Only the targets whose module this build has.
+            set(cluau_fuzz_targets translate base64 json csv)
+            if(CLUAU_COMPRESS)
+                list(APPEND cluau_fuzz_targets gunzip inflate zip)
+            endif()
+            if(CLUAU_REGEX)
+                list(APPEND cluau_fuzz_targets regex)
+            endif()
+            foreach(target ${cluau_fuzz_targets})
                 add_executable(fuzz_${target} tests/fuzz/fuzz.cpp)
                 target_compile_definitions(fuzz_${target} PRIVATE CLUAU_FUZZ_TARGET="${target}")
                 target_link_libraries(fuzz_${target} PRIVATE cluau_runtime Luau.VM Luau.Compiler)
@@ -308,9 +327,30 @@ if(CLUAU_BUILD_RUNTIME)
         # with <name>.expected, and `cluau check` passes on it (or reports
         # what <name>.checked says); each tests/check/<name>.cluau is checked
         # only (tests/run_script.cmake).
+        # A test of a module a build leaves out is left out with it: the
+        # options each needs (all of them).
+        set(cluau_test_needs_crypto CLUAU_CRYPTO)
+        set(cluau_test_needs_web CLUAU_HTTP CLUAU_CRYPTO)
+        set(cluau_test_needs_sqlite CLUAU_SQLITE)
+        set(cluau_test_needs_regex CLUAU_REGEX)
+        set(cluau_test_needs_compress CLUAU_COMPRESS)
+        set(cluau_test_needs_term_url_tar CLUAU_COMPRESS)
+        if(CLUAU_HTTP OR CLUAU_CRYPTO)
+            set(cluau_has_tls ON)
+        endif()
+        set(cluau_test_needs_tls cluau_has_tls)
         file(GLOB CLUAU_SCRIPT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/*.cluau)
         foreach(script ${CLUAU_SCRIPT_TESTS})
             get_filename_component(name ${script} NAME_WE)
+            set(cluau_test_missing "")
+            foreach(need IN LISTS cluau_test_needs_${name})
+                if(NOT ${need})
+                    set(cluau_test_missing ${need})
+                endif()
+            endforeach()
+            if(cluau_test_missing)
+                continue()
+            endif()
             add_test(NAME script:${name}
                 COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)

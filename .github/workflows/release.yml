@@ -26,8 +26,9 @@ on:
         type: boolean
         default: true
 
+# Read-only by default; only the job that creates the release can write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
@@ -268,14 +269,20 @@ jobs:
           where.exe hello
           cmd /c hello
           if (-not (Test-Path $mark)) { throw 'hello did not run by its name' }
+          # Uninstalling takes only what the installer put there.
+          Set-Content -Path (Join-Path $dir 'keep.txt') -Value 'not the installer''s'
           ./installer/install.ps1 -InstallDir $dir -Uninstall
-          if (Test-Path $dir) { throw 'the uninstall left the install directory' }
+          if (Test-Path (Join-Path $dir 'bin')) { throw 'the uninstall left the command' }
+          if (-not (Test-Path (Join-Path $dir 'keep.txt'))) { throw 'the uninstall removed a file it did not install' }
+          if ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq (Join-Path $dir 'bin') }) { throw 'the uninstall left cluau on the user PATH' }
           if ([Environment]::GetEnvironmentVariable('PATHEXT', 'User') -match '\.CLUAU') { throw 'the uninstall left .CLUAU in PATHEXT' }
 
   release:
     needs: [build, packages, installers, vscode]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-26.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -330,9 +337,10 @@ jobs:
       run:
         shell: bash
         working-directory: editors/vscode
+    # The tokens reach only the step that publishes with each (not npm ci).
     env:
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
-      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
+      HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -351,9 +359,13 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: VS Code Marketplace
-        if: env.VSCE_PAT != ''
+        if: env.HAS_VSCE_PAT == 'true'
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx vsce publish --packagePath "../../dist/cluau-vscode-$TAG.vsix" --pat "$VSCE_PAT"
 
       - name: Open VSX
-        if: env.OVSX_PAT != ''
+        if: env.HAS_OVSX_PAT == 'true'
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: npx ovsx publish "../../dist/cluau-vscode-$TAG.vsix" --pat "$OVSX_PAT"

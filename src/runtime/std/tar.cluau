@@ -10,7 +10,12 @@
 
 const fs = require("@std/fs")
 const path = require("@std/path")
-const compress = require("@std/compress")
+
+// @std/compress, loaded for a gzip-compressed archive only: a build without
+// it still reads and writes plain tar.
+const Compress = function() {
+	return require("@std/compress")
+}
 
 export type Entry = {
 	name: string,
@@ -21,7 +26,9 @@ export type Entry = {
 	modified: number,  // a time, as @std/time has them
 }
 
-type Stored = { Entry: Entry, Offset: number }
+// What an entry is: only files and directories are extracted.
+type Kind = "file" | "directory" | "link" | "other"
+type Stored = { Entry: Entry, Offset: number, Kind: Kind }
 
 const Octal = function(field: string): number {
 	// Base-256 (a size of 8 GiB or more): the first byte's high bit set.
@@ -67,9 +74,13 @@ class Archive {
 
 	function Init(data: string, what: string) {
 		// gzip's first two bytes: unpacked first.
-		self.Data = if (string.sub(data, 1, 2) == "\31\139") compress.gunzip(data) else data
+		self.Data = if (string.sub(data, 1, 2) == "\31\139") Compress().gunzip(data) else data
+		if (#self.Data < 512) {
+			error(`tar: {what} is not a tar archive (it is shorter than a header)`, 4)
+		}
 		let at = 0
 		let longName: string? = nil
+		let longLink: string? = nil
 		let pax: { [string]: string } = {}
 		while (at + 512 <= #self.Data) {
 			const block = string.sub(self.Data, at + 1, at + 512)
@@ -87,16 +98,22 @@ class Archive {
 			const typeflag = string.sub(block, 157, 157)
 			const size = Octal(string.sub(block, 125, 136))
 			const dataAt = at + 512
-			at = dataAt + math.ceil(size / 512) * 512
-			if (at > #self.Data + 511) {
+			if (dataAt + size > #self.Data) {
 				error(`tar: {what} ends inside an entry`, 4)
 			}
-			if (typeflag == "L") {
-				longName = string.match(string.sub(self.Data, dataAt + 1, dataAt + size), "^([^%z]*)")
+			at = dataAt + math.ceil(size / 512) * 512
+			if (typeflag == "L" || typeflag == "K") {
+				// GNU's long name (L) or long link target (K), for the next entry.
+				const long = string.match(string.sub(self.Data, dataAt + 1, dataAt + size), "^([^%z]*)")
+				if (typeflag == "L") {
+					longName = long
+				} else {
+					longLink = long
+				}
 			} else if (typeflag == "x") {
 				pax = Pax(string.sub(self.Data, dataAt + 1, dataAt + size))
-			} else if (typeflag == "g") {
-				// global PAX records: nothing here uses them
+			} else if (typeflag == "g" || typeflag == "V") {
+				// global PAX records and a volume's label: nothing here uses them
 			} else {
 				let name = Field(block, 0, 100)
 				const prefix = if (string.sub(block, 258, 262) == "ustar") Field(block, 345, 155) else ""
@@ -104,21 +121,35 @@ class Archive {
 					name = prefix .. "/" .. name
 				}
 				name = pax["path"] or longName or name
-				const link = Field(block, 157, 100)
+				let kind: Kind = "other"
+				if (typeflag == "5" || typeflag == "D") {
+					kind = "directory"
+				} else if (typeflag == "1" || typeflag == "2") {
+					kind = "link"
+				} else if (typeflag == "0" || typeflag == "\0" || typeflag == "7") {
+					// A name ending in / is a directory (as old archives have them).
+					kind = if (string.sub(name, -1) == "/") "directory" else "file"
+				}
 				table.insert(self.Entries, {
 					Entry = {
 						name = name,
 						size = if (pax["size"] != nil) tonumber(pax["size"]) or size else size,
-						directory = typeflag == "5" || string.sub(name, -1) == "/",
-						link = if (typeflag == "2" || typeflag == "1") (pax["linkpath"] or link) else nil,
+						directory = kind == "directory",
+						link = if (kind == "link") (pax["linkpath"] or longLink or Field(block, 157, 100)) else nil,
 						mode = Octal(string.sub(block, 101, 108)),
 						modified = if (pax["mtime"] != nil) tonumber(pax["mtime"]) or 0 else Octal(string.sub(block, 137, 148)),
 					},
 					Offset = dataAt,
+					Kind = kind,
 				})
 				longName = nil
+				longLink = nil
 				pax = {}
 			}
+		}
+		// What follows the last whole block: padding, or a header cut short.
+		if (at < #self.Data && at + 512 > #self.Data && string.find(string.sub(self.Data, at + 1), "^%z*$") == nil) {
+			error(`tar: {what} ends inside a header (at byte {at})`, 4)
 		}
 	}
 
@@ -142,7 +173,8 @@ class Archive {
 	}
 
 	// Every file and directory under `directory`; an entry whose name would
-	// leave it is refused, and links are left out. Returns the files written.
+	// leave it is refused, and links and special files (devices, FIFOs) are
+	// left out. Returns the files written.
 	function extract(directory: string): number {
 		fs.mkdir(directory)
 		let written = 0
@@ -160,9 +192,9 @@ class Archive {
 			if (string.sub(entry.name, 1, 1) == "/") {
 				error(`archive:extract: '{entry.name}' would be written outside the directory: nothing more extracted`, 2)
 			}
-			if (#parts > 0 && entry.link == nil) {
+			if (#parts > 0 && (stored.Kind == "file" || stored.Kind == "directory")) {
 				const target = path.join(directory, table.unpack(parts))
-				if (entry.directory) {
+				if (stored.Kind == "directory") {
 					fs.mkdir(target)
 				} else {
 					fs.mkdir(path.dirname(target))
@@ -184,40 +216,44 @@ const Octals = function(n: number, width: number): string {
 	return string.format(`%0{width - 1}o`, n) .. "\0"
 }
 
-// A ustar header (and before it, for a long name, a PAX header of its own).
-const Header = function(name: string, size: number, typeflag: string, mode: number, modified: number): string {
-	let prefix = ""
-	let short = name
-	if (#name > 100) {
-		// ustar's prefix holds the start of a long name, split at a slash.
-		const cut = string.find(string.sub(name, 1, 156), "/[^/]*$")
-		if (cut != nil && #name - cut <= 100 && cut - 1 <= 155) {
-			prefix = string.sub(name, 1, cut - 1)
-			short = string.sub(name, cut + 1)
-		}
-	}
+// One 512-byte ustar header block, its checksum filled in.
+const Block = function(name: string, prefix: string, size: number, typeflag: string, mode: number, modified: number): string {
 	const Pad = function(text: string, width: number): string {
 		return string.sub(text, 1, width) .. string.rep("\0", width - math.min(#text, width))
 	}
-	let header = Pad(short, 100) .. Octals(mode, 8) .. Octals(0, 8) .. Octals(0, 8) .. Octals(size, 12) .. Octals(modified, 12) ..
+	const header = Pad(name, 100) .. Octals(mode, 8) .. Octals(0, 8) .. Octals(0, 8) .. Octals(size, 12) .. Octals(modified, 12) ..
 		"        " .. typeflag .. Pad("", 100) .. "ustar\00000" .. Pad("", 32) .. Pad("", 32) .. Octals(0, 8) .. Octals(0, 8) ..
 		Pad(prefix, 155) .. string.rep("\0", 12)
 	let sum = 0
 	for (i = 1, 512) {
 		sum += string.byte(header, i)
 	}
-	header = string.sub(header, 1, 148) .. string.format("%06o", sum) .. "\0 " .. string.sub(header, 157)
-	if (#short > 100 || (#name > 100 && prefix == "")) {
-		// No split fits: the name as a PAX record before the header.
-		// A record's length counts its own digits.
-		const record = " path=" .. name .. "\n"
-		let length = #record + #tostring(#record)
-		length = #record + #tostring(length)
-		const pax = tostring(length) .. record
-		const paxHeader = string.sub(Header("PaxHeader", #pax, "x", 420, modified), 1, 512)
-		return paxHeader .. pax .. string.rep("\0", (512 - #pax % 512) % 512) .. string.sub(header, 1, 512)
+	return string.sub(header, 1, 148) .. string.format("%06o", sum) .. "\0 " .. string.sub(header, 157)
+}
+
+// A ustar header (and before it, for a long name, a PAX header of its own).
+const Header = function(name: string, size: number, typeflag: string, mode: number, modified: number): string {
+	if (#name <= 100) {
+		return Block(name, "", size, typeflag, mode, modified)
 	}
-	return header
+	// ustar's prefix holds the start of a long name, split at a slash: the
+	// first one leaving at most 100 bytes after it (and something there).
+	const body = if (string.sub(name, -1) == "/") string.sub(name, 1, -2) else name
+	let cut = string.find(body, "/", 1, true)
+	while (cut != nil && #name - cut > 100) {
+		cut = string.find(body, "/", cut + 1, true)
+	}
+	if (cut != nil && cut > 1 && cut - 1 <= 155) {
+		return Block(string.sub(name, cut + 1), string.sub(name, 1, cut - 1), size, typeflag, mode, modified)
+	}
+	// No split fits: the name as a PAX record before the header (which has
+	// the name's first 100 bytes). A record's length counts its own digits.
+	const record = " path=" .. name .. "\n"
+	let length = #record + #tostring(#record)
+	length = #record + #tostring(length)
+	const pax = tostring(length) .. record
+	return Block("PaxHeader", "", #pax, "x", 420, modified) .. pax .. string.rep("\0", (512 - #pax % 512) % 512) ..
+		Block(name, "", size, typeflag, mode, modified)
 }
 
 class Writer {
@@ -262,7 +298,7 @@ class Writer {
 		table.insert(self.Parts, string.rep("\0", 1024))
 		let archive = table.concat(self.Parts)
 		if (self.Gzip) {
-			archive = compress.gzip(archive)
+			archive = Compress().gzip(archive)
 		}
 		if (self.Path == "") {
 			return archive

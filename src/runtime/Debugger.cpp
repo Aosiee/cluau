@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <optional>
 
 namespace fs = std::filesystem;
 
@@ -95,6 +97,32 @@ namespace cluau::runtime::detail {
 			}
 		}
 
+		// The number of lines in a file; nullopt when it cannot be read.
+		std::optional<int> LineCount(const std::string& file)
+		{
+			std::ifstream in(fs::u8path(file), std::ios::binary);
+			if (!in)
+				return std::nullopt;
+			int lines = 0;
+			char last = '\n';
+			char buffer[65536];
+			while (in.read(buffer, sizeof(buffer)) || in.gcount() > 0)
+			{
+				const std::streamsize n = in.gcount();
+				lines += (int)std::count(buffer, buffer + n, '\n');
+				last = buffer[n - 1];
+			}
+			return lines + (last != '\n' ? 1 : 0);
+		}
+
+		// Why a breakpoint's line is not in the file ("" when it is).
+		std::string PastEndOf(const std::optional<int>& lines, int line)
+		{
+			if (!lines || line <= *lines)
+				return {};
+			return "the file has " + std::to_string(*lines) + (*lines == 1 ? " line" : " lines") + ": there is no code at line " + std::to_string(line);
+		}
+
 		int ToStringProtected(lua_State* S)
 		{
 			size_t len = 0;
@@ -115,13 +143,25 @@ namespace cluau::runtime::detail {
 		cb->interrupt = InterruptCallback;
 		cb->debugprotectederror = ProtectedErrorCallback;
 		cb->preresume = PreResumeCallback;
+		cb->postresume = PostResumeCallback;
 		cb->debuginterrupt = InterruptedCallback;
 		SetDebugHooks(m_Main, this);
+		lua_checkstack(m_Main, 2);
+		lua_getglobal(m_Main, "coroutine");
+		if (lua_istable(m_Main, -1))
+		{
+			lua_rawgetfield(m_Main, -1, "resume");
+			if (lua_isfunction(m_Main, -1))
+				m_ResumeRef = lua_ref(m_Main, -1);
+			lua_pop(m_Main, 1);
+		}
+		lua_pop(m_Main, 1);
 	}
 
 	Debugger::~Debugger()
 	{
 		EndLineStep();
+		EndEntry();
 		SetDebugHooks(m_Main, nullptr);
 		lua_Callbacks* cb = lua_callbacks(m_Main);
 		cb->userdata = nullptr;
@@ -130,9 +170,12 @@ namespace cluau::runtime::detail {
 		cb->interrupt = nullptr;
 		cb->debugprotectederror = nullptr;
 		cb->preresume = nullptr;
+		cb->postresume = nullptr;
 		cb->debuginterrupt = nullptr;
 		for (const Chunk& chunk : m_Chunks)
 			lua_unref(m_Main, chunk.Ref);
+		if (m_ResumeRef)
+			lua_unref(m_Main, m_ResumeRef);
 	}
 
 	Debugger* Debugger::Of(lua_State* L) { return static_cast<Debugger*>(lua_callbacks(L)->userdata); }
@@ -167,8 +210,24 @@ namespace cluau::runtime::detail {
 	// a coroutine being stepped through keeps its own.
 	void Debugger::PreResumeCallback(lua_State* L)
 	{
-		if (Debugger* d = Of(L); d && L == d->m_StepThread)
-			lua_singlestep(L, 1);
+		if (Debugger* d = Of(L))
+		{
+			d->m_Resuming.push_back(L);
+			if (L == d->m_StepThread)
+				lua_singlestep(L, 1);
+		}
+	}
+
+	void Debugger::PostResumeCallback(lua_State* L)
+	{
+		if (Debugger* d = Of(L))
+			d->OnResumed(L);
+	}
+
+	void DebugWaiting(lua_State* L)
+	{
+		if (Debugger* d = static_cast<Debugger*>(lua_callbacks(L)->userdata))
+			d->Waiting(L);
 	}
 
 	// coroutine.resume breaks its own thread out when the coroutine broke
@@ -231,6 +290,7 @@ namespace cluau::runtime::detail {
 			Arm(canonical, line);
 
 		const bool luau = EndsWith(canonical, ".luau");
+		const std::optional<int> lines = LineCount(canonical);
 		std::vector<Breakpoint> out;
 		for (Breakpoint& b : breakpoints)
 		{
@@ -240,7 +300,8 @@ namespace cluau::runtime::detail {
 			b.Hits = 0;
 			b.ResolvedLine = 0;
 			b.Problem.clear();
-			if (!b.Condition.empty())
+			b.Problem = PastEndOf(lines, b.Line);
+			if (b.Problem.empty() && !b.Condition.empty())
 			{
 				std::string error;
 				std::string bytecode = CompileExpression(b.Condition, luau, error);
@@ -262,6 +323,14 @@ namespace cluau::runtime::detail {
 			if (b.File == canonical)
 				out.push_back(b);
 		return out;
+	}
+
+	void Debugger::MarkPastEnd(const std::string& file, std::vector<Breakpoint>& breakpoints)
+	{
+		const std::optional<int> lines = LineCount(Canonical(file));
+		for (Breakpoint& b : breakpoints)
+			if (b.Problem.empty())
+				b.Problem = PastEndOf(lines, b.Line);
 	}
 
 	void Debugger::SetBreakOnErrors(bool uncaught, bool caught)
@@ -303,6 +372,8 @@ namespace cluau::runtime::detail {
 		lua_pushvalue(L, -1);
 		chunk.Ref = lua_ref(L, -1);
 		lua_pop(L, 1);
+		if (!chunk.File.empty())
+			chunk.Lines = LineCount(chunk.File).value_or(0);
 		m_Chunks.push_back(chunk);
 		if (chunk.File.empty())
 			return;
@@ -335,6 +406,12 @@ namespace cluau::runtime::detail {
 	{
 		const Chunk* chunk = ChunkNamed(name);
 		return chunk && !chunk->File.empty();
+	}
+
+	bool Debugger::PastEnd(const std::string& name, int line) const
+	{
+		const Chunk* chunk = ChunkNamed(name);
+		return chunk && chunk->Lines > 0 && line > chunk->Lines;
 	}
 
 	bool Debugger::IsLuauChunk(const std::string& name) const
@@ -377,10 +454,29 @@ namespace cluau::runtime::detail {
 		if (!chunk || chunk->File.empty())
 			return;
 		const int line = ar.currentline;
-		if (L == m_SkipBreakThread && line == m_SkipBreakLine)
+		if (L == m_SkipBreakThread)
 		{
+			// The BREAK the thread resumes at runs first: another line's
+			// means that one was not run again.
 			m_SkipBreakThread = nullptr;
-			return;
+			if (line == m_SkipBreakLine)
+				return;
+		}
+		if (L == m_Entry.Thread && L == m_StepThread && line == m_Entry.Line && lua_stackdepth(L) == m_Entry.Depth && lua_checkstack(L, 2))
+		{
+			lua_Debug fn{};
+			bool same = false;
+			if (lua_getinfo(L, 0, "f", &fn))
+			{
+				lua_getref(L, m_Entry.Function);
+				same = lua_rawequal(L, -1, -2) != 0;
+				lua_pop(L, 2);
+			}
+			if (same)
+			{
+				Pause(L, { PauseReason::Step, 0, {} }, true, true);
+				return;
+			}
 		}
 		if (m_LineStep.Active && L == m_LineStep.Thread && LineStepStops(L, line))
 		{
@@ -436,23 +532,28 @@ namespace cluau::runtime::detail {
 			Pause(L, { PauseReason::Entry, 0, {} }, false, true);
 			return;
 		}
-		if (L != m_StepThread)
+		if (!m_StepThread)
+			return;
+		// Another thread single-steps when the stepped thread resumed it
+		// (it inherits the mode): a step into stops in it too (a coroutine
+		// resumed, a function coroutine.wrap made, called).
+		if (L != m_StepThread && m_StepKind != StepKind::Into)
 			return;
 		lua_Debug ar{};
 		if (!lua_getinfo(L, 0, "sl", &ar) || !IsLuaFrame(ar))
 			return;
 		const int depth = lua_stackdepth(L);
 		const int line = ar.currentline;
-		bool stop = false;
+		bool stop = L != m_StepThread;
 		switch (m_StepKind)
 		{
-		case StepKind::Into: stop = depth != m_StepDepth || line != m_StepLine; break;
+		case StepKind::Into: stop = stop || depth != m_StepDepth || line != m_StepLine; break;
 		case StepKind::Over: stop = depth < m_StepDepth || (depth == m_StepDepth && line != m_StepLine); break;
 		case StepKind::Out: stop = depth < m_StepDepth; break;
 		}
 		// Through the standard modules and the runtime's own code, to the
-		// script's next line.
-		if (!stop || !IsUserChunk(ChunkOf(ar)))
+		// script's next line (not the end of a file, its implicit return).
+		if (!stop || !IsUserChunk(ChunkOf(ar)) || PastEnd(ChunkOf(ar), line))
 			return;
 		m_SkipBreakThread = nullptr;
 		Pause(L, { PauseReason::Step, 0, {} }, false, true);
@@ -483,6 +584,95 @@ namespace cluau::runtime::detail {
 		Pause(L, { PauseReason::Pause, 0, {} }, true, false);
 	}
 
+	void Debugger::Waiting(lua_State* L)
+	{
+		if (m_Paused || m_Evaluating)
+			return;
+		if (m_Callbacks.Poll)
+			m_Callbacks.Poll();
+		if (m_Stopping)
+		{
+			lua_rawcheckstack(L, 1);
+			luaL_error(L, "the debugger stopped the script");
+		}
+	}
+
+	lua_State* Debugger::ResumerOf(lua_State* co, bool* byResume)
+	{
+		std::vector<lua_State*> candidates;
+		if (!m_Resuming.empty())
+			candidates.push_back(m_Resuming.back());
+		// A resumer broken out of the VM with the coroutine (it is resumed after it).
+		for (const auto& [parent, child] : m_BrokenChild)
+			if (child == co)
+				candidates.push_back(parent);
+		for (lua_State* R : candidates)
+		{
+			lua_Debug ar{};
+			if (R == co || !lua_checkstack(R, 3) || !lua_getinfo(R, 0, "sf", &ar))
+				continue;
+			bool resume = false, wrap = false;
+			if (lua_iscfunction(R, -1))
+			{
+				if (m_ResumeRef)
+				{
+					lua_getref(R, m_ResumeRef);
+					resume = lua_rawequal(R, -1, -2) != 0;
+					lua_pop(R, 1);
+				}
+				// coroutine.wrap's function holds its coroutine.
+				if (!resume && lua_getupvalue(R, -1, 1))
+				{
+					wrap = lua_tothread(R, -1) == co;
+					lua_pop(R, 1);
+				}
+			}
+			lua_pop(R, 1);
+			lua_Debug caller{};
+			if ((resume || wrap) && lua_getinfo(R, 1, "s", &caller) && IsLuaFrame(caller) && IsUserChunk(ChunkOf(caller)))
+			{
+				if (byResume)
+					*byResume = resume;
+				return R;
+			}
+		}
+		return nullptr;
+	}
+
+	// The coroutine stopped running: it yielded, returned or failed.
+	void Debugger::OnResumed(lua_State* co)
+	{
+		if (!m_Resuming.empty() && m_Resuming.back() == co)
+			m_Resuming.pop_back();
+		const int status = lua_status(co);
+		if (m_Paused || m_Evaluating || m_Stopping || status == LUA_BREAK)
+			return;
+		// coroutine.resume catches the coroutine's error: a caught error
+		// (coroutine.wrap's call raises it again, where it is caught or not).
+		bool byResume = false;
+		if (status != LUA_OK && status != LUA_YIELD && m_BreakOnCaught && ResumerOf(co, &byResume) && byResume)
+		{
+			if (co == m_StepThread)
+				m_StepThread = nullptr;
+			std::string message =
+				lua_isstring(co, -1) ? lua_tostring(co, -1) : std::string("(an error value of type ") + luaL_typename(co, -1) + ")";
+			Pause(co, { PauseReason::CaughtError, 0, std::move(message) }, false, false);
+			return;
+		}
+		// The coroutine stepped through left before the step stopped: the
+		// step goes on where it was resumed, at that function's next line.
+		if (co != m_StepThread)
+			return;
+		m_StepThread = nullptr;
+		lua_singlestep(co, 0);
+		if (lua_State* resumer = ResumerOf(co))
+		{
+			lua_Debug ar{};
+			const int line = lua_getinfo(resumer, 1, "l", &ar) ? ar.currentline : 0;
+			StartLineStep(resumer, line, 1, true);
+		}
+	}
+
 	void Debugger::OnProtectedError(lua_State* L)
 	{
 		if (!m_BreakOnCaught || m_Paused || m_Evaluating || m_Stopping)
@@ -501,9 +691,12 @@ namespace cluau::runtime::detail {
 	void Debugger::Pause(lua_State* L, PauseInfo pause, bool fromBreak, bool stepping)
 	{
 		const bool wasStepping = stepping || L == m_StepThread;
-		if (L == m_StepThread)
-			m_StepThread = nullptr;
+		// A pause in another thread (a coroutine stepped into) ends the step.
+		if (m_StepThread && L != m_StepThread)
+			lua_singlestep(m_StepThread, 0);
+		m_StepThread = nullptr;
 		EndLineStep();
+		EndEntry();
 		m_Scratch = lua_newthread(m_Main);
 		m_ScratchRef = lua_ref(m_Main, -1);
 		lua_pop(m_Main, 1);
@@ -536,6 +729,8 @@ namespace cluau::runtime::detail {
 			m_StepDepth = lua_stackdepth(L);
 			m_StepLine = line;
 			lua_singlestep(L, 1);
+			if (stepping && m_StepKind == StepKind::Into && !lua_isyieldable(L))
+				ArmEntry(L, line, !fromBreak);
 			if (!stepping)
 			{
 				// Single-step mode starts as the thread re-enters the VM.
@@ -562,7 +757,7 @@ namespace cluau::runtime::detail {
 		}
 	}
 
-	void Debugger::StartLineStep(lua_State* L, int line)
+	void Debugger::StartLineStep(lua_State* L, int line, int level, bool here)
 	{
 		LineStep& step = m_LineStep;
 		step = LineStep{};
@@ -570,8 +765,11 @@ namespace cluau::runtime::detail {
 		step.Thread = L;
 		step.Kind = m_StepKind;
 		step.Line = line;
-		step.Depth = lua_stackdepth(L);
 		lua_checkstack(L, 2);
+		lua_Debug frame{};
+		while (lua_getinfo(L, level, "s", &frame) && !IsLuaFrame(frame))
+			level++;
+		step.Depth = lua_stackdepth(L) - level;
 		// Every line of `level`'s function: lua_breakpoint arms the next line
 		// with code at or after the one asked, and says which.
 		auto armAll = [&](int level, int& ref) {
@@ -586,16 +784,20 @@ namespace cluau::runtime::detail {
 					armed.first = ref;
 			lua_pop(L, 1);
 		};
-		if (step.Kind != StepKind::Out)
-			armAll(0, step.Function);
+		if (step.Kind != StepKind::Out || here)
+		{
+			armAll(level, step.Function);
+			for (const auto& [ref, armed] : step.Armed)
+				step.FirstLine = step.FirstLine ? std::min(step.FirstLine, armed) : armed;
+		}
 		// The Lua function it returns to (past the C call), for the step
 		// that leaves the function.
 		lua_Debug ar{};
-		for (int level = 1; lua_getinfo(L, level, "s", &ar); level++)
+		for (int caller = level + 1; lua_getinfo(L, caller, "s", &ar); caller++)
 			if (IsLuaFrame(ar))
 			{
-				step.CallerDepth = step.Depth - level;
-				armAll(level, step.Caller);
+				step.CallerDepth = step.Depth - (caller - level);
+				armAll(caller, step.Caller);
 				break;
 			}
 	}
@@ -615,10 +817,53 @@ namespace cluau::runtime::detail {
 			return same;
 		};
 		const int depth = lua_stackdepth(L);
-		const bool stop = (is(step.Function) && depth <= step.Depth && (line != step.Line || depth < step.Depth)) ||
+		// A step into stops at the function's next call too (a callback C
+		// calls again starts at its first line).
+		const bool again = step.Kind == StepKind::Into && line == step.FirstLine && depth == step.Depth;
+		const bool stop = (is(step.Function) && depth <= step.Depth && (line != step.Line || depth < step.Depth || again)) ||
 						  (is(step.Caller) && depth <= step.CallerDepth);
 		lua_pop(L, 1);
 		return stop;
+	}
+
+	void Debugger::ArmEntry(lua_State* L, int line, bool atInstruction)
+	{
+		lua_Debug ar{};
+		if (!lua_checkstack(L, 2) || !lua_getinfo(L, 0, "fa", &ar))
+			return;
+		const int first = lua_breakpoint(L, -1, 1, 1);
+		if (first <= 0)
+		{
+			lua_pop(L, 1);
+			return;
+		}
+		m_Entry.Thread = L;
+		m_Entry.Function = lua_ref(L, -1);
+		m_Entry.Line = first;
+		m_Entry.Depth = lua_stackdepth(L);
+		lua_pop(L, 1);
+		// Paused before that line's first instruction (a function's first,
+		// past a vararg function's preamble), the thread runs the BREAK
+		// there now.
+		if (atInstruction && line == first && !ar.isvararg)
+		{
+			m_SkipBreakThread = L;
+			m_SkipBreakLine = line;
+		}
+	}
+
+	void Debugger::EndEntry()
+	{
+		if (!m_Entry.Thread)
+			return;
+		lua_getref(m_Main, m_Entry.Function);
+		if (lua_isfunction(m_Main, -1))
+			lua_breakpoint(m_Main, -1, m_Entry.Line, 0);
+		lua_pop(m_Main, 1);
+		lua_unref(m_Main, m_Entry.Function);
+		m_Entry = Entry{};
+		for (const Breakpoint& b : m_Breakpoints)
+			Arm(b.File, b.Line);
 	}
 
 	// The step's breakpoints come out; the editor's go back where they share a line.

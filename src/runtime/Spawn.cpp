@@ -1,4 +1,5 @@
 #include "Spawn.h"
+#include "Std.h" // InterruptPending
 
 #include <algorithm>
 #include <chrono>
@@ -25,6 +26,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -420,8 +422,27 @@ namespace cluau::runtime::detail {
 		// set up would hold their ends (and delay the other's end of output).
 		std::mutex g_Launching;
 
+		// A write to a child that has gone is an error, not SIGPIPE: ignored
+		// once for the process (a host's own handler is left alone), and put
+		// back to the default in each child.
+		void IgnoreSigpipe()
+		{
+			static std::once_flag once;
+			std::call_once(once, [] {
+				struct sigaction current = {};
+				if (sigaction(SIGPIPE, nullptr, &current) == 0 && current.sa_handler == SIG_DFL)
+					std::signal(SIGPIPE, SIG_IGN);
+			});
+		}
+
 		bool Launch(const SpawnRequest& request, bool pipeInput, bool ownGroup, Started& started, std::string& why)
 		{
+			IgnoreSigpipe();
+			// A child reading the terminal stays in the terminal's group: in a
+			// group of its own its reads would stop it (SIGTTIN), and Ctrl-C
+			// would not reach it.
+			if (!pipeInput && isatty(0))
+				ownGroup = false;
 			std::lock_guard<std::mutex> launching(g_Launching);
 			// The child's environment, made here: after fork the child only
 			// switches to it (other threads may hold the allocator's lock).
@@ -477,6 +498,7 @@ namespace cluau::runtime::detail {
 				// pipe.
 				if (ownGroup)
 					setpgid(0, 0);
+				std::signal(SIGPIPE, SIG_DFL);
 				if (pipeInput)
 					dup2(in[0], 0);
 				if (capture)
@@ -572,11 +594,13 @@ namespace cluau::runtime::detail {
 		};
 
 		// Feed standard input and drain the outputs together (a child that
-		// fills one pipe while the script writes another would wait forever).
-		void (*previous)(int) = std::signal(SIGPIPE, SIG_IGN);
+		// fills one pipe while the script writes another would wait forever):
+		// the input pipe does not block, so a write takes what fits.
 		size_t written = 0;
 		if (child.In >= 0 && request.Input->empty())
 			CloseFd(child.In);
+		if (child.In >= 0)
+			fcntl(child.In, F_SETFL, fcntl(child.In, F_GETFL) | O_NONBLOCK);
 		char buffer[4096];
 		while (child.In >= 0 || child.Out >= 0 || child.Err >= 0)
 		{
@@ -588,7 +612,14 @@ namespace cluau::runtime::detail {
 				fds[n++] = { child.Out, POLLIN, 0 };
 			if (child.Err >= 0)
 				fds[n++] = { child.Err, POLLIN, 0 };
-			const int ready = poll(fds, (nfds_t)n, result.TimedOut ? -1 : Remaining(deadline));
+			// Woken now and then for Ctrl-C (the signal may reach another thread).
+			const int remaining = result.TimedOut ? -1 : Remaining(deadline);
+			const int ready = poll(fds, (nfds_t)n, remaining < 0 || remaining > 100 ? 100 : remaining);
+			if (InterruptPending() && !result.TimedOut)
+			{
+				expire(); // the run is abandoned: the child goes too
+				continue;
+			}
 			if (ready < 0)
 			{
 				if (errno == EINTR)
@@ -597,7 +628,8 @@ namespace cluau::runtime::detail {
 			}
 			if (ready == 0)
 			{
-				expire(); // the pipes close once the child is gone
+				if (remaining >= 0 && Remaining(deadline) == 0)
+					expire(); // the pipes close once the child is gone
 				continue;
 			}
 			for (int k = 0; k < n; k++)
@@ -609,7 +641,8 @@ namespace cluau::runtime::detail {
 					const ssize_t w = write(child.In, request.Input->data() + written, request.Input->size() - written);
 					if (w > 0)
 						written += (size_t)w;
-					if (w < 0 || written == request.Input->size())
+					const bool again = w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
+					if ((w < 0 && !again) || written == request.Input->size())
 						CloseFd(child.In);
 					continue;
 				}
@@ -622,7 +655,6 @@ namespace cluau::runtime::detail {
 					CloseFd(fd);
 			}
 		}
-		std::signal(SIGPIPE, previous);
 		// A child whose output is not piped: wait for it within the limit.
 		if (request.Timeout > 0 && !result.TimedOut)
 		{
@@ -637,7 +669,7 @@ namespace cluau::runtime::detail {
 				}
 				if (done < 0 && errno != EINTR)
 					break;
-				if (Remaining(deadline) == 0)
+				if (Remaining(deadline) == 0 || InterruptPending())
 				{
 					expire();
 					break;
@@ -691,7 +723,6 @@ namespace cluau::runtime::detail {
 			why = "its input is closed";
 			return false;
 		}
-		void (*previous)(int) = std::signal(SIGPIPE, SIG_IGN);
 		size_t at = 0;
 		bool ok = true;
 		while (at < text.size())
@@ -706,7 +737,6 @@ namespace cluau::runtime::detail {
 				break;
 			}
 		}
-		std::signal(SIGPIPE, previous);
 		return ok;
 	}
 

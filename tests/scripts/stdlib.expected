@@ -44,9 +44,21 @@ options:
   -v, --verbose      say more
   -n, --count COUNT  how many (default: 1)
       --tag TAG      a tag
+numbers:	-5 -1.5e3 -.5	->	-5,-1.5e3,-.5	nil	false	false	false
+numbers:	-inf	->		nil	true	true	false
+numbers:	-nan	->	unknown option -a
+numbers:	-w -7	->		-7	false	false	false
+numbers:	--width=nan	->	--width takes a number, not 'nan'
+numbers:	--width=inf	->	--width takes a number, not 'inf'
+numbers:	--width=0x10	->	--width takes a number, not '0x10'
+numbers:	--width= 5	->	--width takes a number, not ' 5'
+numbers:	-ih	->		nil	true	false	true
 csv rows:	3	says "hi", then leaves	"two\nlines"
 csv records:	ada	36	""
 "plain,\"has,comma\",\"has \"\"quote\"\"\"\n1,true,\n"
 "name,age,city\nada,36,\n"
+"ok,n\nfalse,0\n"
+{{age = "36", name = "ada"}}
+near:	true	true	false	false	false	false
 cleaned:	true
 exit: 0

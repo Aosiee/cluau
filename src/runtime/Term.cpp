@@ -140,9 +140,19 @@ namespace cluau::runtime::detail {
 			return nullptr;
 		}
 
+		// The text in the style. A style inside it that ends with the same
+		// code (red in blue, dim in bold) would end this one too: this one
+		// starts again after each.
 		std::string Apply(const std::string& text, const Style& style)
 		{
-			return "\x1b[" + std::to_string(style.On) + "m" + text + "\x1b[" + std::to_string(style.Off) + "m";
+			const std::string on = "\x1b[" + std::to_string(style.On) + "m";
+			const std::string off = "\x1b[" + std::to_string(style.Off) + "m";
+			std::string inner;
+			size_t from = 0;
+			for (size_t at; (at = text.find(off, from)) != std::string::npos; from = at + off.size())
+				inner.append(text, from, at + off.size() - from).append(on);
+			inner.append(text, from, std::string::npos);
+			return on + inner + off;
 		}
 
 		// style(text, ...names): the text in each style named (plain when
@@ -178,7 +188,8 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
-		// The text without its escape sequences (CSI: ESC [ ... final byte).
+		// The text without its escape sequences: CSI (ESC [ ... a final
+		// byte) and OSC (ESC ] ... BEL or ESC and a backslash, such as a link).
 		int TermStrip(lua_State* L)
 		{
 			size_t len = 0;
@@ -191,6 +202,15 @@ namespace cluau::runtime::detail {
 					i += 2;
 					while (i < len && !((unsigned char)text[i] >= 0x40 && (unsigned char)text[i] <= 0x7e))
 						i++;
+					continue;
+				}
+				if (text[i] == '\x1b' && i + 1 < len && text[i + 1] == ']')
+				{
+					i += 2;
+					while (i < len && text[i] != '\a' && !(text[i] == '\x1b' && i + 1 < len && text[i + 1] == '\\'))
+						i++;
+					if (i < len && text[i] == '\x1b')
+						i++; // past the ESC; the loop's i++ takes the backslash
 					continue;
 				}
 				out += text[i];

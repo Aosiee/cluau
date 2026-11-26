@@ -1,6 +1,8 @@
 // The package commands against Git repositories made here: init, add (a tag,
-// the latest tag), install (from the lock), update, list, remove, and a
-// package's own dependency installed beside it.
+// the latest tag, a short commit id), install (from the lock), update, list,
+// remove, and a package's own dependency installed beside it; and what is
+// refused: addresses and refs git would read as options, names that are not
+// names, a package whose cluau.toml cannot be read.
 const fs = require("@std/fs")
 const path = require("@std/path")
 const process = require("@std/process")
@@ -49,7 +51,8 @@ Git({ "init", "-q" }, helpers)
 Git({ "add", "-A" }, helpers)
 Git({ "commit", "-q", "-m", "helpers" }, helpers)
 Git({ "tag", "v0.1.0" }, helpers)
-fs.write(path.join(mathlib, "cluau.toml"), `[package]\nname = "mathlib"\n\n[dependencies]\nhelpers = \{ git = "{helpers}", tag = "v0.1.0" }\n`)
+fs.write(path.join(mathlib, "cluau.toml"), `[package]\nname = "mathlib"\nauthors = [\n\t"Ada", # and\n\t"Grace",\n]\nkeywords = ["math", 'numbers']\nreleased = 2024-01-01\n`
+	.. `description = """\nNumbers, \\\n  quadrupled."""\n\n[dependencies]\nhelpers = \{ git = "{helpers}", tag = "v0.1.0" }\n`)
 fs.write(path.join(mathlib, "init.cluau"),
 	'const helpers = require("helpers")\nfunction Quad(x: number): number {\n\treturn helpers.Twice(helpers.Twice(x))\n}\nreturn { Quad = Quad, Version = "1.0" }\n')
 Git({ "init", "-q" }, mathlib)
@@ -80,5 +83,61 @@ print(Cluau({ "remove", "mathlib" }))
 print(Cluau({ "list" }))
 print(Cluau({ "add", `{mathlib}@no-such-tag` }))
 print(Cluau({ "remove", "nothing" }))
+
+// A commit's short id, pinned as the whole id.
+const short = string.sub(Run({ "git", "rev-parse", "HEAD" }, helpers), 1, 12)
+print(Cluau({ "add", `{helpers}@{short}` }))
+print(Shown(string.match(fs.read(path.join(app, "cluau.toml")), "helpers = [^\n]*") or ""))
+print(Cluau({ "remove", "helpers" }))
+
+// An address with a user in it: the @ of a ref is the one in its path. Git
+// is pointed from these addresses to the repository here.
+process.setEnv("GIT_CONFIG_COUNT", "2")
+process.setEnv("GIT_CONFIG_KEY_0", `url.{mathlib}.insteadOf`)
+process.setEnv("GIT_CONFIG_VALUE_0", "ssh://git@example.invalid/team/mathlib.git")
+process.setEnv("GIT_CONFIG_KEY_1", `url.{helpers}.insteadOf`)
+process.setEnv("GIT_CONFIG_VALUE_1", "https://token@example.invalid/team/helpers")
+print(Cluau({ "add", "https://token@example.invalid/team/helpers" }))
+print(Cluau({ "remove", "helpers" }))
+print(Cluau({ "add", "ssh://git@example.invalid/team/mathlib.git@v1.0.0" }))
+print(Shown(fs.read(path.join(app, "cluau.toml"))))
+print(Cluau({ "remove", "mathlib" }))
+process.setEnv("GIT_CONFIG_COUNT", nil)
+
+// Names: a repository's name made one (my.lib.git is my-lib); --name must be one.
+const dotted = path.join(work, "repos", "my.lib.git")
+fs.mkdir(dotted)
+fs.write(path.join(dotted, "init.cluau"), "return { Dotted = true }\n")
+Git({ "init", "-q" }, dotted)
+Git({ "add", "-A" }, dotted)
+Git({ "commit", "-q", "-m", "dotted" }, dotted)
+print(Cluau({ "add", `{dotted}/` }))
+print(Cluau({ "remove", "my-lib" }))
+print(Cluau({ "add", dotted, "--name", "../../escape" }))
+
+// What git would read as an option is refused, and git is not run.
+const before = fs.read(path.join(app, "cluau.toml"))
+print(Cluau({ "add", "--upload-pack=touch PWNED;git-upload-pack" }))
+print(Cluau({ "add", `{helpers}@--output=PWNED` }))
+fs.write(path.join(app, "cluau.toml"), before .. 'evil = { git = "--upload-pack=touch PWNED;git-upload-pack", tag = "v1.0.0" }\n')
+print(Cluau({ "install" }))
+fs.write(path.join(app, "cluau.toml"), before .. `evil = \{ git = "{helpers}", branch = "--upload-pack=touch PWNED" }\n`)
+print(Cluau({ "install" }))
+fs.write(path.join(app, "cluau.toml"), before .. `".." = \{ git = "{helpers}" }\n`)
+print(Cluau({ "install" }))
+print(fs.exists(path.join(app, "PWNED")), "(no PWNED)")
+fs.write(path.join(app, "cluau.toml"), before)
+
+// A package whose cluau.toml cannot be read: the file is named, and the
+// project's cluau.toml is left as it was.
+const broken = path.join(work, "repos", "broken")
+fs.mkdir(broken)
+fs.write(path.join(broken, "init.cluau"), "return {}\n")
+fs.write(path.join(broken, "cluau.toml"), "[package]\nname = \"broken\"\nversion = \n")
+Git({ "init", "-q" }, broken)
+Git({ "add", "-A" }, broken)
+Git({ "commit", "-q", "-m", "broken" }, broken)
+print(Cluau({ "add", broken }))
+print(fs.read(path.join(app, "cluau.toml")) == before, "(cluau.toml as it was)")
 
 fs.remove(work, true)

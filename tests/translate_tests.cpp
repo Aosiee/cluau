@@ -396,6 +396,7 @@ TEST("format: a continued statement is one level in, once")
 	CHECK_EQ(Formatted("f(\na +\nb)\n"), std::string("f(\n\ta +\n\t\tb)\n"));
 	// A line starting with `-` may start an expression: not a continuation.
 	CHECK_EQ(Formatted("x = 1\n-y()\n"), std::string("x = 1\n-y()\n"));
+	CHECK_EQ(Formatted("return 1\n+ 2\n"), std::string("return 1\n\t+ 2\n"));
 }
 
 TEST("format: whitespace inside strings and comments that span lines stays")
@@ -442,8 +443,16 @@ TEST("language: throw raises a value as it is")
 	// A script raises through the runtime (a catch's `error` may hide Luau's).
 	CHECK_EQ(ScriptTranslation("throw \"bad\"\n").Luau, std::string("__cluau_throw( \"bad\")\n"));
 	CHECK_EQ(ScriptTranslation("throw {\n\tcode = 1,\n}\n").Luau, std::string("__cluau_throw( {\n\tcode = 1,\n})\n"));
-	// A host: Luau's error, with no position added.
-	CHECK_EQ(Luau("throw `x {y}`\n"), std::string("error( `x {y}`, 0)\n"));
+	// A host: Luau's error, with no position added, taken on the first line
+	// before a local named `error` can hide it.
+	CHECK_EQ(Luau("throw `x {y}`\n"), std::string("local __cluau_error = error; __cluau_error( `x {y}`, 0)\n"));
+	const std::string shadowed = Luau("function F(error: string) {\n\ttry {\n\t\tthrow error\n\t} catch (error) {\n\t\tthrow error\n\t}\n}\n");
+	CHECK_EQ(Lines(shadowed), 7);
+	CHECK(shadowed.find("__cluau_error( error, 0)") != std::string::npos);
+	CHECK_EQ(shadowed.find("= error"), (size_t)20); // `error` is read once, on the first line
+	const cluau::TranslateResult mapped = cluau::Translate("x = 1\nthrow x\n");
+	CHECK_EQ(mapped.Map.ToLuau({ 0, 0 }).Col, 29);
+	CHECK_EQ(mapped.Map.FromLuau({ 0, 29 }).Col, 0);
 	// `throw` as a name stays a name.
 	CHECK_EQ(Luau("throw = 1\nthrow.x = 2\n"), std::string("throw = 1\nthrow.x = 2\n"));
 	CHECK(HasError(cluau::Translate("throw\n"), "throw raises a value"));
@@ -521,4 +530,195 @@ TEST("language: abstract classes and methods")
 	CHECK(HasError(ScriptTranslation("class A {\n\tabstract function F()\n}\n"), "so A is too"));
 	CHECK(HasError(ScriptTranslation("abstract class A {\n\tabstract function F() { }\n}\n"), "has no body"));
 	CHECK(HasError(cluau::Translate("abstract class A {\n}\n"), "not abstract"));
+}
+
+TEST("statements: a line after x++, x--, `...` or a type starts a new statement")
+{
+	// The `if` is a statement, not an if-expression after an operator.
+	CHECK(!cluau::Translate("let x = 1\nx++\nif (x > 0) { print(x) }\n").HasErrors());
+	CHECK(!cluau::Translate("let n = 1\nn--\nif (n > 0) { print(n) }\n").HasErrors());
+	CHECK(!cluau::Translate("let best: string?\nif (true) { print(best) }\n").HasErrors());
+	CHECK(!cluau::Translate("type T = Array<number>\nif (true) { print(1) }\n").HasErrors());
+	CHECK(!cluau::Translate("type M<K> = Map<K, Array<number>>\nif (true) { print(1) }\n").HasErrors());
+	CHECK(!cluau::Translate("let m: Map<string, number>, k: number?\nif (true) { print(1) }\n").HasErrors());
+	CHECK(!cluau::Translate("let v = {} :: Array<number>\nif (true) { print(v) }\n").HasErrors());
+	CHECK(!cluau::Translate("function g(...: number) {\n\tlet a = ...\n\tif (a) { print(a) }\n}\n").HasErrors());
+	CHECK_EQ(Luau("x++\nif (x) { }\n"), std::string("x += 1\nif (x) then end\n"));
+	// A `{` starting the next line is a block, and try, throw and break are statements.
+	CHECK_EQ(Luau("let n = 0\nn--\n{ print(n) }\n"), std::string("local n = 0\nn -= 1\ndo print(n) end\n"));
+	CHECK(ScriptTranslation("let n = 0\nn++\ntry {\n\tprint(n)\n} catch (e) { }\n").Luau.find("pcall(") != std::string::npos);
+	CHECK(ScriptTranslation("let s: string?\nthrow \"x\"\n").Luau.find("__cluau_throw( \"x\")") != std::string::npos);
+	CHECK(!ScriptTranslation("while (true) {\n\tlet t: Array<number>\n\tbreak\n}\n").HasErrors());
+	// A `>` that compares still waits for its right side.
+	CHECK_EQ(Luau("let b = a >\n\tif (c) 1 else 2\n"), std::string("local b = a >\n\tif (c) then 1 else 2\n"));
+	// Inside parentheses a `{` on the next line is a table argument.
+	CHECK_EQ(Luau("print(fn\n{ a = 8 })\n"), std::string("print(fn\n{ a = 8 })\n"));
+	CHECK_EQ(ScriptTranslation("let a = true\nthrow if (a)\n\t\"x\"\nelse\n\t\"y\"\n").Luau,
+		std::string("local a = true\n__cluau_throw( if (a) then\n\t\"x\"\nelse\n\t\"y\")\n"));
+}
+
+TEST("classes: field defaults are translated in place, every line on its line")
+{
+	const std::string source =
+		"class C {\n"
+		"\tS: string = \"a    b\"\n"
+		"\tL: string = [[x\n"
+		"y]]\n"
+		"\tT: {number} = {\n"
+		"\t\t1, // one, and\n"
+		"\t\t2,\n"
+		"\t}\n"
+		"\tCb: () -> number = function(): number { return 3 }\n"
+		"\tY: number = 1 ~/ 2 // half\n"
+		"\tfunction F(): number { return 1 }\n"
+		"}\n";
+	const cluau::TranslateResult r = cluau::Translate(source);
+	CHECK(!r.HasErrors());
+	CHECK_EQ(Lines(r.Luau), Lines(source));
+	CHECK(r.Luau.find("\tC.Fields.S = \"a    b\"\n") != std::string::npos);
+	CHECK(r.Luau.find("\tC.Fields.L = [[x\ny]]\n") != std::string::npos);
+	CHECK(r.Luau.find("\tC.Fields.T = {\n\t\t1, -- one, and\n\t\t2,\n\t}\n") != std::string::npos);
+	CHECK(r.Luau.find("\tC.Fields.Cb = function(): number  return 3 end\n") != std::string::npos);
+	CHECK(r.Luau.find("\tC.Fields.Y = 1 // 2 -- half\n") != std::string::npos);
+	// The method after them is on its own line (the 11th).
+	CHECK_EQ(Lines(r.Luau.substr(0, r.Luau.find("\tfunction C.F(self: C): number "))), 10);
+	// The profile gets the default translated.
+	CHECK_EQ(r.Class->Fields[3].Default, std::string("function(): number  return 3 end"));
+	CHECK_EQ(r.Class->Fields[0].Default, std::string("\"a    b\""));
+	// The script profile evaluates each default afresh, around the same tokens.
+	const cluau::TranslateResult s = ScriptTranslation("class D {\n\tQ: {number} = {\n\t\t1,\n\t}\n}\n");
+	CHECK(!s.HasErrors());
+	CHECK(s.Luau.find("\tD.Fields.Q = function() return {\n\t\t1,\n\t} end\n") != std::string::npos);
+}
+
+TEST("classes: a static's function value is a function, comments in a method's parameters")
+{
+	const cluau::TranslateResult r = cluau::Translate("class K {\n\tstatic Make = function(n: number): number { return n }\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("K.Make = function(n: number): number  return n end") != std::string::npos);
+	const cluau::TranslateResult m = cluau::Translate(
+		"class P {\n\tfunction Init(\n\t\tx: number, // the x, really\n\t\ty: number /* the y */\n\t): number /* sum */ {\n\t\treturn x + y\n\t}\n}\n");
+	CHECK(!m.HasErrors());
+	CHECK_EQ(m.Class->Methods[0].Params, std::string("x: number, y: number"));
+	CHECK_EQ(m.Class->Methods[0].ReturnType, std::string("number"));
+	CHECK(m.Luau.find("Init: (self: P, x: number, y: number) -> number, }") != std::string::npos);
+}
+
+TEST("classes: generic methods keep their type parameters")
+{
+	const cluau::TranslateResult r = cluau::Translate("class B {\n\tfunction Id<U>(u: U): U {\n\t\treturn u\n\t}\n}\n");
+	CHECK(r.Luau.find("Id: <U>(self: B, u: U) -> U, }") != std::string::npos);
+	const cluau::TranslateResult s = ScriptTranslation("class B {\n\tfunction Init<T>(x: T) {\n\t}\n}\n");
+	CHECK(s.Luau.find("__call: <T>(unknown, x: T) -> B") != std::string::npos);
+}
+
+TEST("language: a try's return and throw take the whole expression")
+{
+	const cluau::TranslateResult r = ScriptTranslation(
+		"function F(): number {\n\ttry {\n\t\treturn 1\n\t\t\t+ 2\n\t} catch (e) { }\n\treturn 0\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("return 1, table.pack( 1\n\t\t\t+ 2)") != std::string::npos);
+	CHECK(ScriptTranslation("function G(): number {\n\ttry {\n\t\treturn 1\n\t\t\t- 2\n\t} catch (e) { }\n\treturn 0\n}\n")
+			  .Luau.find("table.pack( 1\n\t\t\t- 2)") != std::string::npos);
+	const cluau::TranslateResult i = ScriptTranslation(
+		"function H(a: boolean): number {\n\ttry {\n\t\treturn if (a)\n\t\t\t1\n\t\telse if (!a)\n\t\t\t2\n\t\telse\n\t\t\t3\n\t} catch (e) { }\n\treturn 0\n}\n");
+	CHECK(!i.HasErrors());
+	CHECK(i.Luau.find("else\n\t\t\t3)\n") != std::string::npos);
+	CHECK(ScriptTranslation("try {\n\tthrow \"a\"\n\t\t.. \"b\"\n} catch (e) { }\n").Luau.find("__cluau_throw( \"a\"\n\t\t.. \"b\")") !=
+		std::string::npos);
+	// A cast's type ending in `>` ends the expression with it.
+	CHECK(ScriptTranslation("function J(): {number} {\n\ttry {\n\t\treturn {} :: Array<number>\n\t} catch (e) { }\n\tprint(1)\n\treturn {}\n}\n")
+			  .Luau.find("table.pack( {} :: Array<number>)") != std::string::npos);
+}
+
+TEST("language: try and catch blocks see their function's varargs")
+{
+	const cluau::TranslateResult r = ScriptTranslation(
+		"function F(...: number) {\n\ttry {\n\t\tprint(...)\n\t} catch (e) {\n\t\tprint(e, ...)\n\t}\n\ttry {\n\t\tlet f = function(...: number) { print(...) }\n\t} finally { }\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("pcall(function(...: number): ...any \n\t\tprint(...)\n\tend, ...)") != std::string::npos);
+	CHECK(r.Luau.find("pcall(function (e: unknown, ...: number): ...any \n\t\tprint(e, ...)\n\tend, __try1sig, ...) end") != std::string::npos);
+	// Varargs only a nested function uses, or a type pack, are not the block's.
+	CHECK(r.Luau.find("__try2val: any = pcall(function(): ...any") != std::string::npos);
+	CHECK(ScriptTranslation("function G() {\n\ttry {\n\t\tlet t: (...number) -> () = print\n\t} finally { }\n}\n")
+			  .Luau.find("pcall(function(): ...any") != std::string::npos);
+}
+
+TEST("language: a try inside a finally cannot leave the finally either")
+{
+	CHECK(HasError(ScriptTranslation("function F(): number {\n\ttry {\n\t} finally {\n\t\ttry { return 3 } catch (e) { }\n\t}\n\treturn 4\n}\n"),
+		"cannot return"));
+	CHECK(HasError(ScriptTranslation("while (true) {\n\ttry {\n\t} finally {\n\t\ttry { break } catch (e) { }\n\t}\n}\n"), "cannot break"));
+	CHECK(HasError(ScriptTranslation("while (true) {\n\ttry {\n\t} finally {\n\t\ttry {\n\t\t\ttry { continue } finally { }\n\t\t} catch (e) { }\n\t}\n}\n"),
+		"cannot continue"));
+	// A loop inside the finally is the jump's own.
+	CHECK(!ScriptTranslation("try {\n} finally {\n\tfor (i = 1, 2) {\n\t\ttry { break } catch (e) { }\n\t}\n}\n").HasErrors());
+}
+
+TEST("language: try's block may open on the next line, for takes local")
+{
+	const cluau::TranslateResult r = ScriptTranslation("try\n{\n\terror(\"x\")\n}\ncatch (e)\n{\n\tprint(e)\n}\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("pcall(") != std::string::npos);
+	CHECK_EQ(Luau("for (local i = 1, 2) { f(i) }"), std::string("for   i = 1, 2  do f(i) end"));
+	// A statement after the condition is not the block (a later `{` is not taken for it).
+	const cluau::TranslateResult b = cluau::Translate("if (x) print(\"a\")\nlet t = {}\n");
+	CHECK(HasError(b, "if needs a { } block"));
+	CHECK(!HasError(b, "Expected"));
+	CHECK(!cluau::Translate("if (a) && (b) { }\n").HasErrors());
+}
+
+TEST("comments: line comments that look like long brackets, block comments ending in ]")
+{
+	CHECK_EQ(Luau("//[[ not long\nprint(1)\n//[==[ nor this\n"), std::string("-- [[ not long\nprint(1)\n-- [==[ nor this\n"));
+	CHECK_EQ(Luau("/* see t[1]*/ x()"), std::string("--[=[ see t[1]]=] x()"));
+	CHECK_EQ(Luau("/* x]=*/ x()"), std::string("--[[ x]=]] x()"));
+	// A `//!` after the code starts is an ordinary comment; before it, a mode comment.
+	CHECK(!cluau::Translate("print(1) //! note\n//!! banner\n").HasErrors());
+	CHECK(HasError(cluau::Translate("//!nonstrict\nprint(1)\n"), "no mode comments"));
+}
+
+TEST("strings: nested interpolations, CRLF after a backslash")
+{
+	CHECK_EQ(Luau("print(`x {`y {a != 1 && !b}`} {`}`}`)\n"), std::string("print(`x {`y {a ~= 1  and  not b}`} {`}`}`)\n"));
+	const cluau::TranslateResult r = cluau::Translate("let s = \"a\\\r\nb\"\r\nprint(s)\r\n");
+	CHECK(!r.HasErrors());
+	CHECK_EQ(Lines(r.Luau), 3);
+	// Nesting deeper than any program needs is reported, not a crash.
+	std::string deep = "print(";
+	for (int i = 0; i < 100000; i++)
+		deep += "`{";
+	deep += "1";
+	for (int i = 0; i < 100000; i++)
+		deep += "}`";
+	deep += ")\n";
+	CHECK(HasError(cluau::Translate(deep), "nest too deeply"));
+	CHECK(cluau::Format(deep).HasErrors());
+}
+
+TEST("enums: a mixed enum's type is its strings and number")
+{
+	const cluau::TranslateResult r = ScriptTranslation("enum M { A = \"x\", B, C = -1 }\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("type M = \"x\" | \"B\" | number") != std::string::npos);
+}
+
+TEST("types: a long chain of function types is read without recursion")
+{
+	std::string chain = "let f: ";
+	for (int i = 0; i < 2000000; i++)
+		chain += "() -> ";
+	chain += "number\nif (true) { print(1) }\n";
+	const cluau::TranslateResult r = cluau::Translate(chain);
+	CHECK(!r.HasErrors());
+}
+
+TEST("format: a generic's closing > ends a line, every line keeps its own line break")
+{
+	CHECK_EQ(Formatted("type T = Array<number>\nlet x = 1\n"), std::string("type T = Array<number>\nlet x = 1\n"));
+	CHECK_EQ(Formatted("let m: Map<string, Array<number>>\nlet x = 1\n"), std::string("let m: Map<string, Array<number>>\nlet x = 1\n"));
+	CHECK_EQ(Formatted("let c = a >\nb\n"), std::string("let c = a >\n\tb\n"));
+	// A CRLF line, and a long string with both kinds inside: each as it was.
+	CHECK_EQ(Formatted("let a = 1\r\nlet s = [[x\ny\r\nz]]\nlet b = 2\n"), std::string("let a = 1\r\nlet s = [[x\ny\r\nz]]\nlet b = 2\n"));
+	CHECK_EQ(Formatted("let a = 1\r\nlet b = 2"), std::string("let a = 1\r\nlet b = 2\r\n"));
 }

@@ -1,0 +1,109 @@
+// Waits that must neither hang nor be cut short: programs fed a large
+// input, tasks reading a program's output line by line, a wait after a
+// task's error, sockets that stop reading, and accepts that race.
+const process = require("@std/process")
+const task = require("@std/task")
+const net = require("@std/net")
+const time = require("@std/time")
+
+// A large input to a program that echoes it: written while its output is
+// read, not all at once first.
+const big = string.rep("x", 1000000)
+const echoed = process.run({ "cat" }, { input = big, timeout = 20 })
+print("large input", #echoed.output, echoed.timedOut)
+
+// A program's output read line by line in a task: each read finishes at
+// once, and none is lost.
+const counter = process.spawn({ "seq", "1", "3000" })
+const reader = task.spawn(function(): number {
+	let lines = 0
+	for (_ in counter:lines()) {
+		lines += 1
+	}
+	return lines
+})
+print("lines read", task.join(reader))
+counter:wait()
+
+// Writing to a program while a task reads what it writes back.
+const cat = process.spawn({ "cat" }, { input = true })
+const echoes = task.spawn(function(): number {
+	let n = 0
+	for (_ in cat:lines()) {
+		n += 1
+	}
+	return n
+})
+cat:write(string.rep("y\n", 200000))
+cat:closeInput()
+print("written and read", task.join(echoes))
+cat:wait()
+
+// A task's error ends the script's wait on a program; later waits still wait.
+task.spawn(function() {
+	task.wait(0.05)
+	error("the task fails", 0)
+})
+const ended, why = pcall(function() {
+	return process.run("sleep 0.3")
+})
+print("wait ended by the task's error", ended, why)
+const waited = task.wait(0.3)
+print("the next wait waits", waited >= 0.25)
+
+// task.wait where a task cannot yield (a sort's comparison) still waits.
+const sorter = task.spawn(function(): string {
+	const t = { 3, 1, 2 }
+	table.sort(t, function(a: number, b: number): boolean {
+		task.wait(0)
+		return a < b
+	})
+	return table.concat(t, ",")
+})
+print("sorted in a task", task.join(sorter))
+
+// A socket write to a peer that never reads gives up at its time limit.
+const server = net.listen("127.0.0.1", 0)
+const silent = net.connect("127.0.0.1", server.port)
+const peer = server:accept()
+silent:setTimeout(0.5)
+const start = time.monotonic()
+const wrote, writeWhy = pcall(function() {
+	silent:write(string.rep("z", 64 * 1024 * 1024))
+})
+print("write timed out", wrote, string.find(tostring(writeWhy), "no answer", 1, true) != nil, time.monotonic() - start < 5)
+silent:close()
+peer:close()
+
+// A line longer than readLine's limit is an error.
+const sender = net.connect("127.0.0.1", server.port)
+const receiver = server:accept()
+sender:write(string.rep("a", 100), "\nshort\n")
+const long, longWhy = pcall(function(): string? {
+	return receiver:readLine(10)
+})
+print("long line", long, string.find(tostring(longWhy), "longer than 10 bytes", 1, true) != nil)
+sender:close()
+receiver:close()
+
+// Two accepts, one client: one takes it, the other reaches its time limit.
+const results: { string } = {}
+const a = task.spawn(function() {
+	const ok = pcall(function() {
+		server:accept({ timeout = 1 })
+	})
+	table.insert(results, if (ok) "accepted" else "timed out")
+})
+const b = task.spawn(function() {
+	const ok = pcall(function() {
+		server:accept({ timeout = 1 })
+	})
+	table.insert(results, if (ok) "accepted" else "timed out")
+})
+const client = net.connect("127.0.0.1", server.port)
+task.join(a)
+task.join(b)
+table.sort(results)
+print("two accepts", table.concat(results, ", "))
+client:close()
+server:close()

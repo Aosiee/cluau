@@ -12,6 +12,7 @@
 #include <pcre2.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -290,6 +291,8 @@ namespace cluau::runtime::detail {
 			RegexBox& re = Check(L, 1);
 			const std::string_view text = Text(L, 2);
 			const int limit = lua_isnoneornil(L, 3) ? -1 : (int)luaL_checkinteger(L, 3);
+			if (limit == 0 || limit < -1)
+				luaL_argerror(L, 3, "the most pieces, from 1");
 			lua_newtable(L);
 			int n = 0;
 			size_t at = 0, piece = 0;
@@ -372,6 +375,15 @@ namespace cluau::runtime::detail {
 			std::string out;
 			for (size_t i = 0; i < len; i++)
 			{
+				// White space too, as \xNN: in extended mode (the x flag) a
+				// literal space would be ignored.
+				if (std::strchr(" \t\n\r\f\v", text[i]) && text[i] != '\0')
+				{
+					char hex[8];
+					std::snprintf(hex, sizeof(hex), "\\x%02X", (unsigned char)text[i]);
+					out += hex;
+					continue;
+				}
 				if (std::strchr("\\^$.|?*+()[]{}-/#", text[i]) && text[i] != '\0')
 					out += '\\';
 				out += text[i];

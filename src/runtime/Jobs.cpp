@@ -1,4 +1,5 @@
 #include "Jobs.h"
+#include "Debugger.h"
 #include "Std.h"
 
 #include "lua.h"
@@ -35,10 +36,12 @@ namespace cluau::runtime::detail {
 			int Completed = 0; // bumps on each finish (wait's wake-up)
 		};
 
+		// Never destroyed: a job's thread is detached and can still be
+		// finishing (and notifying) while the process exits.
 		Jobs& State()
 		{
-			static Jobs jobs;
-			return jobs;
+			static Jobs* jobs = new Jobs;
+			return *jobs;
 		}
 
 		int Start(JobWork work)
@@ -143,6 +146,9 @@ namespace cluau::runtime::detail {
 					RaiseIfInterrupted(L);
 					return 0;
 				}
+				lock.unlock();
+				DebugWaiting(L); // a debugger's requests are read meanwhile
+				lock.lock();
 				if (limited && std::chrono::steady_clock::now() >= until)
 					break;
 			}
@@ -188,9 +194,19 @@ namespace cluau::runtime::detail {
 			lua_pushinteger(L, id);
 			return lua_yield(L, 2);
 		}
-		// The script's own code: the tasks run until the job is done.
+		// The script's own code: the tasks run until the job is done. A
+		// task's error (or a Ctrl-C) can end that wait: the job is dropped
+		// then, or each later wait would find it done and return at once.
 		lua_pushinteger(L, id);
-		lua_call(L, 1, 0);
+		if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+		{
+			{
+				Jobs& jobs = State();
+				std::lock_guard<std::mutex> lock(jobs.Mutex);
+				jobs.All.erase(id); // its thread finishes on its own
+			}
+			lua_error(L);
+		}
 		return Take(L, id);
 	}
 

@@ -12,8 +12,13 @@
 //   ws:close()
 
 const net = require("@std/net")
-const crypto = require("@std/crypto")
 const encoding = require("@std/encoding")
+
+// @std/crypto, loaded by the first connection: a build without it still
+// loads this module (and @std/server, which serves plain HTTP without it).
+const Crypto = function() {
+	return require("@std/crypto")
+}
 
 export type Kind = "text" | "binary"
 export type Message = { kind: Kind, data: string }
@@ -31,10 +36,18 @@ const kBinary = 2
 const kClose = 8
 const kPing = 9
 const kPong = 10
+// The most a message may have, its fragments together.
+const kMaxMessage = 64 * 1024 * 1024
+
+// Whether text is UTF-8 (as a text message must be): no bad sequences, and
+// no UTF-16 surrogates (U+D800 to U+DFFF).
+const IsUtf8 = function(text: string): boolean {
+	return utf8.len(text) != nil && string.find(text, "\237[\160-\191]") == nil
+}
 
 // What the handshake's key answers: base64(SHA-1(key .. the GUID)).
 const Accept = function(key: string): string {
-	return encoding.toBase64(crypto.hash("sha1", key .. kGuid, { raw = true }))
+	return encoding.toBase64(Crypto().hash("sha1", key .. kGuid, { raw = true }))
 }
 
 // Exactly `count` bytes from the socket (nil when it ends first).
@@ -52,11 +65,18 @@ const ReadExact = function(socket: net.Socket, count: number): string? {
 	return table.concat(parts)
 }
 
-// The payload XORed with the 4-byte key (masking and unmasking alike).
+// The payload XORed with the 4-byte key (masking and unmasking alike), four
+// bytes at a time.
 const Mask = function(payload: string, key: string): string {
 	const data = buffer.fromstring(payload)
+	const n = #payload
+	const word = buffer.readu32(buffer.fromstring(key), 0)
+	const whole = n - n % 4
+	for (i = 0, whole - 4, 4) {
+		buffer.writeu32(data, i, bit32.bxor(buffer.readu32(data, i), word))
+	}
 	const k = { string.byte(key, 1, 4) }
-	for (i = 0, #payload - 1) {
+	for (i = whole, n - 1) {
 		buffer.writeu8(data, i, bit32.bxor(buffer.readu8(data, i), k[i % 4 + 1]))
 	}
 	return buffer.tostring(data)
@@ -78,7 +98,7 @@ const Frame = function(opcode: number, payload: string, masked: boolean): string
 	if (!masked) {
 		return header .. payload
 	}
-	const key = crypto.randomBytes(4)
+	const key = Crypto().randomBytes(4)
 	return header .. key .. Mask(payload, key)
 }
 
@@ -113,13 +133,36 @@ class Connection {
 		self:Send(kBinary, if (type(data) == "buffer") buffer.tostring(data) else data :: string)
 	}
 
+	// Sends a ping (its data at most 125 bytes, as a control frame's is).
 	function ping(data: string?) {
-		self:Send(kPing, data or "")
+		const payload = data or ""
+		if (#payload > 125) {
+			error(`websocket: a ping's data is at most 125 bytes, not {#payload}`, 2)
+		}
+		self:Send(kPing, payload)
+	}
+
+	// The other side broke the protocol: the close frame with `code` (1002,
+	// a protocol error; 1007, text that is not UTF-8; 1009, too big), and
+	// the connection ends.
+	function Fault(code: number, reason: string) {
+		if (!self.Closed) {
+			self.Closed = true
+			pcall(function() {
+				self.Socket:write(Frame(kClose, string.pack(">I2", code) .. reason, self.Client))
+			})
+		}
+		self.closeCode = code
+		self.closeReason = reason
+		pcall(function() {
+			self.Socket:close()
+		})
 	}
 
 	// One frame: its opcode, whether it ends a message, its payload (nil
-	// when the connection ended).
-	function ReadFrame(): (number?, boolean, string) {
+	// when the connection ended, cut short or broken). A data frame may have
+	// at most `room` bytes.
+	function ReadFrame(room: number): (number?, boolean, string) {
 		const head = ReadExact(self.Socket, 2)
 		if (head == nil) {
 			return nil, true, ""
@@ -129,19 +172,50 @@ class Connection {
 		const opcode = bit32.band(b0, 15)
 		const masked = bit32.band(b1, 128) != 0
 		let length = bit32.band(b1, 127)
+		if (bit32.band(b0, 112) != 0) {
+			self:Fault(1002, "reserved bits set with no extension")
+			return nil, true, ""
+		}
+		if ((opcode > kBinary && opcode < kClose) || opcode > kPong) {
+			self:Fault(1002, `reserved opcode {opcode}`)
+			return nil, true, ""
+		}
+		// A client masks what it sends; a server does not.
+		if (masked == self.Client) {
+			self:Fault(1002, if (masked) "a masked frame from the server" else "an unmasked frame from the client")
+			return nil, true, ""
+		}
+		if (opcode >= kClose && (length > 125 || !fin)) {
+			self:Fault(1002, "a control frame of more than 125 bytes, or fragmented")
+			return nil, true, ""
+		}
 		if (length == 126) {
-			const extended = ReadExact(self.Socket, 2) or "\0\0"
+			const extended = ReadExact(self.Socket, 2)
+			if (extended == nil) {
+				return nil, true, ""
+			}
 			length = string.unpack(">I2", extended)
 		} else if (length == 127) {
-			const extended = ReadExact(self.Socket, 8) or string.rep("\0", 8)
+			const extended = ReadExact(self.Socket, 8)
+			if (extended == nil) {
+				return nil, true, ""
+			}
 			const high, low = string.unpack(">I4I4", extended)
+			if (high >= 2147483648) {
+				self:Fault(1002, "a frame's length has its top bit set")
+				return nil, true, ""
+			}
 			length = high * 4294967296 + low
 		}
-		if (length > 64 * 1024 * 1024) {
-			error(`websocket: a frame of {length} bytes (more than 64 MiB)`, 3)
+		if (opcode < kClose && length > room) {
+			self:Fault(1009, `a message of more than {kMaxMessage} bytes`)
+			return nil, true, ""
 		}
-		const key = if (masked) ReadExact(self.Socket, 4) or "\0\0\0\0" else ""
-		const payload = ReadExact(self.Socket, length) or ""
+		const key = if (masked) ReadExact(self.Socket, 4) else ""
+		const payload = ReadExact(self.Socket, length)
+		if (key == nil || payload == nil) {
+			return nil, true, ""
+		}
 		return opcode, fin, if (masked) Mask(payload, key) else payload
 	}
 
@@ -151,13 +225,16 @@ class Connection {
 		if (self.Closed) {
 			return nil
 		}
-		let kind: Kind = "text"
+		let kind: Kind? = nil // the message under way, once its first frame came
 		const parts: { string } = {}
+		let size = 0
 		while (true) {
-			const opcode, fin, payload = self:ReadFrame()
+			const opcode, fin, payload = self:ReadFrame(kMaxMessage - size)
 			if (opcode == nil) {
 				self.Closed = true
-				self.Socket:close()
+				pcall(function() {
+					self.Socket:close()
+				})
 				return nil
 			}
 			if (opcode == kPing) {
@@ -165,6 +242,10 @@ class Connection {
 			} else if (opcode == kPong) {
 				// an answer to our ping: nothing to do
 			} else if (opcode == kClose) {
+				if (#payload == 1) {
+					self:Fault(1002, "a close frame of one byte")
+					return nil
+				}
 				if (#payload >= 2) {
 					self.closeCode = string.unpack(">I2", payload)
 					self.closeReason = string.sub(payload, 3)
@@ -178,12 +259,23 @@ class Connection {
 				self.Socket:close()
 				return nil
 			} else {
-				if (opcode == kText || opcode == kBinary) {
+				// A message's first frame is text or binary; the rest continue it.
+				if ((opcode == 0) != (kind != nil)) {
+					self:Fault(1002, if (opcode == 0) "a continuation with no message to continue" else "a new message inside a fragmented one")
+					return nil
+				}
+				if (kind == nil) {
 					kind = if (opcode == kBinary) "binary" else "text"
 				}
 				table.insert(parts, payload)
+				size += #payload
 				if (fin) {
-					return { kind = kind, data = table.concat(parts) }
+					const data = table.concat(parts)
+					if (kind == "text" && !IsUtf8(data)) {
+						self:Fault(1007, "a text message that is not UTF-8")
+						return nil
+					}
+					return { kind = kind :: Kind, data = data }
 				}
 			}
 		}
@@ -204,6 +296,9 @@ class Connection {
 			return
 		}
 		const payload = string.pack(">I2", code or 1000) .. (reason or "")
+		if (#payload > 125) {
+			error("websocket: a close's reason is at most 123 bytes", 2)
+		}
 		pcall(function() {
 			self.Socket:write(Frame(kClose, payload, self.Client))
 		})
@@ -212,7 +307,7 @@ class Connection {
 		self.Socket:setTimeout(2)
 		pcall(function() {
 			while (true) {
-				const opcode = self:ReadFrame()
+				const opcode = self:ReadFrame(kMaxMessage)
 				if (opcode == nil || opcode == kClose) {
 					break
 				}
@@ -258,10 +353,10 @@ const connect = function(url: string, options: ConnectOptions?): Connection {
 	const given = options or {}
 	const host, port, target, tls = ParseUrl(url)
 	const socket = net.connect(host, port, { timeout = given.timeout, tls = tls, caFile = given.caFile, verify = given.verify })
-	const key = encoding.toBase64(crypto.randomBytes(16))
+	const key = encoding.toBase64(Crypto().randomBytes(16))
 	const lines: { string } = {
 		`GET {target} HTTP/1.1`,
-		`Host: {host}{if ((tls && port == 443) || (!tls && port == 80)) "" else ":" .. tostring(port)}`,
+		`Host: {if (string.find(host, ":", 1, true) != nil) `[{host}]` else host}{if ((tls && port == 443) || (!tls && port == 80)) "" else ":" .. tostring(port)}`,
 		"Upgrade: websocket",
 		"Connection: Upgrade",
 		`Sec-WebSocket-Key: {key}`,
@@ -294,8 +389,20 @@ const connect = function(url: string, options: ConnectOptions?): Connection {
 		socket:close()
 		error(`websocket.connect: {url} answered the handshake wrongly`, 2)
 	}
+	// The protocol chosen is one of those offered (none when none were).
+	const chosen = headers["sec-websocket-protocol"]
+	if (chosen != nil) {
+		let offered = false
+		for (_, protocol in given.protocols or {}) {
+			offered = offered || protocol == chosen
+		}
+		if (!offered) {
+			socket:close()
+			error(`websocket.connect: {url} chose the protocol '{chosen}', which was not offered`, 2)
+		}
+	}
 	const ws = Connection(socket, true)
-	ws.protocol = headers["sec-websocket-protocol"] or ""
+	ws.protocol = chosen or ""
 	return ws
 }
 

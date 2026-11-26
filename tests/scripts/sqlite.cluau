@@ -96,3 +96,23 @@ fs.remove(file)
 print(pcall(function() {
 	again:query("SELECT 1")
 }))
+
+// One statement per call (exec runs several); NaN, and closing inside a
+// transaction, are errors.
+const strict = sqlite.open(":memory:")
+strict:exec("CREATE TABLE t (n INTEGER)")
+const two, twoWhy = pcall(function() {
+	strict:run("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)")
+})
+print("two statements", two, string.find(tostring(twoWhy), "more than one statement", 1, true) != nil)
+print("rows kept", (strict:first("SELECT count(*) AS n FROM t") :: any).n) // allow-any: a row's shape
+print("nan", (pcall(function() {
+	strict:run("INSERT INTO t VALUES (?)", 0 / 0)
+})))
+print("big integer", (strict:first("SELECT typeof(?) AS t", 2 ^ 60) :: any).t) // allow-any: a row's shape
+const closing, closingWhy = pcall(function() {
+	strict:transaction(function() {
+		strict:close()
+	})
+})
+print("closed inside", closing, string.find(tostring(closingWhy), "closed inside it", 1, true) != nil)

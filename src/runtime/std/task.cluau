@@ -56,11 +56,28 @@ const counter = { next = 0 }
 // is reported with that task's stack when it is this one (the runtime's).
 const failure: { message: any, thread: thread? } = { message = nil, thread = nil }
 
+// Into `waiting`, kept latest first so the next due is the last: found by
+// halving, so many tasks cost little each.
+const Insert = function(state: State) {
+	let low = 1
+	let high = #waiting + 1
+	while (low < high) {
+		const middle = (low + high) ~/ 2
+		const other = waiting[middle]
+		if (other.wake > state.wake || (other.wake == state.wake && other.order > state.order)) {
+			low = middle + 1
+		} else {
+			high = middle
+		}
+	}
+	table.insert(waiting, low, state)
+}
+
 const Due = function(state: State, wake: number) {
 	counter.next += 1
 	state.wake = wake
 	state.order = counter.next
-	table.insert(waiting, state)
+	Insert(state)
 }
 
 const Finish = function(state: State) {
@@ -127,17 +144,10 @@ const Idle = function(seconds: number?) {
 
 // The first task due (the earliest, then the first made due), taken out.
 const NextDue = function(): State? {
-	let best = 0
-	for (i, state in waiting) {
-		const current = waiting[best]
-		if (best == 0 || state.wake < current.wake || (state.wake == current.wake && state.order < current.order)) {
-			best = i
-		}
-	}
-	if (best == 0) {
+	if (#waiting == 0) {
 		return nil
 	}
-	return table.remove(waiting, best)
+	return table.remove(waiting)
 }
 
 // Runs the waiting tasks as they come due, sleeping between them, until
@@ -148,8 +158,10 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 		const state = NextDue()
 		const now = time.monotonic()
 		if (state == nil) {
-			// Nothing due: the jobs still running, or the deadline.
-			if (jobs.pending() > 0 && (deadline == nil || deadline > now)) {
+			// Nothing due: the jobs still running, or the deadline. A task on
+			// a job that finished since CollectJobs counts too (pending() no
+			// longer does).
+			if ((jobs.pending() > 0 || #onJobs > 0) && (deadline == nil || deadline > now)) {
 				Idle(if (deadline != nil) deadline - now else nil)
 				continue
 			}
@@ -159,7 +171,7 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 			return
 		}
 		if (deadline != nil && state.wake > deadline) {
-			table.insert(waiting, state) // back, in its place in line
+			Insert(state) // back, in its place in line
 			if (deadline > now) {
 				Idle(deadline - now)
 				if (jobs.pending() > 0 || #onJobs > 0) {
@@ -170,7 +182,7 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 		}
 		if (state.wake > now) {
 			// Until it is due, unless a job finishes first.
-			table.insert(waiting, state)
+			Insert(state)
 			Idle(state.wake - now)
 			continue
 		}
@@ -224,12 +236,14 @@ const wait = function(seconds: number?): number {
 	const start = time.monotonic()
 	const due = start + math.max(0, seconds or 0)
 	const state = Current()
-	if (state != nil) {
+	if (state != nil && coroutine.isyieldable()) {
 		Due(state, due)
 		coroutine.yield()
 	} else {
-		// The script's own code (or a coroutine that is not a task): the
-		// tasks due by then run here, and the time left is slept.
+		// The script's own code (or a coroutine that is not a task, or a
+		// task inside a call it cannot yield across, such as a sort's
+		// comparison or a require): the tasks due by then run here, and the
+		// time left is slept.
 		RunUntil(function(): boolean {
 			return false
 		}, due)

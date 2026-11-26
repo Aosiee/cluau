@@ -82,8 +82,39 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# A relative prefix is made absolute: the PATH line must not depend on the
+# directory a shell starts in.
+case "$prefix" in
+/*) ;;
+*) prefix="$(pwd)/$prefix" ;;
+esac
+prefix="${prefix%/}"
 bin_dir="$prefix/bin"
 doc_dir="$prefix/share/doc/cluau"
+
+# Whether a line is the one this installer added for this bin_dir (not
+# another prefix's).
+is_our_line() {
+	case "$1" in
+	*"$marker"*) ;;
+	*) return 1 ;;
+	esac
+	case "$1" in
+	*"\"$bin_dir\""* | *"\"$bin_dir:"*) return 0 ;;
+	esac
+	return 1
+}
+
+# Whether a file has this bin_dir's PATH line.
+has_our_line() {
+	[ -f "$1" ] || return 1
+	while IFS= read -r line || [ -n "$line" ]; do
+		if is_our_line "$line"; then
+			return 0
+		fi
+	done <"$1"
+	return 1
+}
 
 # The startup files a PATH line may be in (the shell's own first).
 startup_files() {
@@ -101,13 +132,18 @@ startup_files() {
 	esac
 }
 
-# Removes the lines this installer added from a file.
+# Removes the line this installer added for bin_dir from a file (another
+# prefix's line stays).
 remove_marked_lines() {
 	file="$1"
-	[ -f "$file" ] || return 0
-	grep -qF "$marker" "$file" || return 0
+	has_our_line "$file" || return 0
 	tmp="$file.cluau-tmp"
-	grep -vF "$marker" "$file" >"$tmp" || true
+	: >"$tmp"
+	while IFS= read -r line || [ -n "$line" ]; do
+		if ! is_our_line "$line"; then
+			printf '%s\n' "$line" >>"$tmp"
+		fi
+	done <"$file"
 	cat "$tmp" >"$file"
 	rm -f "$tmp"
 	say "removed the PATH line from $file"
@@ -127,9 +163,9 @@ if [ "$uninstall" = 1 ]; then
 		remove_marked_lines "$file"
 	done
 	fish_file="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/cluau.fish"
-	if [ -f "$fish_file" ] && grep -qF "$marker" "$fish_file"; then
+	remove_marked_lines "$fish_file"
+	if [ -f "$fish_file" ] && ! grep -q . "$fish_file"; then
 		rm -f "$fish_file"
-		say "removed $fish_file"
 	fi
 	if [ "$removed" = 1 ]; then
 		say "removed cluau from $prefix"
@@ -228,7 +264,7 @@ case ":$PATH:" in
 	if [ "$modify_path" = 1 ]; then
 		file="$(startup_files)"
 		mkdir -p "$(dirname "$file")"
-		if [ -f "$file" ] && grep -qF "$marker" "$file"; then
+		if has_our_line "$file"; then
 			say "$file already adds $bin_dir to PATH: open a new shell to use \`cluau\`"
 		else
 			if [ "${file##*.}" = "fish" ]; then

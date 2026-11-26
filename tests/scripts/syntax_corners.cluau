@@ -1,0 +1,96 @@
+// Statements after x++, a type or `...`; class defaults on their lines;
+// try with continued returns, varargs and an `error` local.
+
+// A line after x++, an optional type, a generic or `...` starts a statement.
+let n = 1
+n++
+if (n > 1) {
+	print("after ++", n)
+}
+let best: string?
+if (best == nil) {
+	print("after ?")
+}
+type Box<T> = { value: T }
+type Numbers = Box<number>
+if (true) {
+	print("after >")
+}
+n--
+{
+	print("block after --", n)
+}
+function Varargs(...: number): number {
+	let first = ...
+	if (first) {
+		print("after ...", first)
+	}
+	try {
+		print("try sees", ...)
+	} catch (e) {
+		print("never", e)
+	}
+	try {
+		throw "x"
+	} catch (e) {
+		print("catch sees", select("#", ...))
+	}
+	return first
+}
+print(Varargs(4, 5))
+
+// A return in a try takes the lines that continue it.
+function Sum(): number {
+	try {
+		return 1
+			+ 2
+	} catch (e) {
+		print("never", e)
+	}
+	return 0
+}
+function Pick(a: boolean): string {
+	try {
+		return if (a) "yes"
+			else "no"
+	} catch (e) {
+		print("never", e)
+	}
+	return ""
+}
+print(Sum(), Pick(true), Pick(false))
+
+// A local named `error` does not change what throw raises.
+function Shadow(error: string): string {
+	try {
+		throw error .. "!"
+	} catch (e) {
+		return `caught {e}`
+	}
+	return ""
+}
+print(Shadow("bad"))
+
+// Field defaults keep their text and their lines; a static's function.
+class Corner {
+	S: string = "a    b"
+	L: string = [[x
+y]]
+	Items: {number} = {
+		1, // one
+		2,
+	}
+	Cb: () -> number = function(): number { return 3 }
+	static Make = function(k: number): number { return k * 2 }
+
+	function Line(): number {
+		return debug.info(1, "l") // allow-any: debug.info is untyped; the line shows the class kept its lines
+	}
+}
+let c = Corner()
+print(c.S, c.L, #c.Items, c.Cb(), Corner.Make(4), c:Line())
+
+//[[ a line comment, not a long one
+print("after //[[")
+/* see t[1]*/ print("after ]")
+print(`nested {`inner {n != 1 && true}`}`)

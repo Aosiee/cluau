@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -193,8 +194,9 @@ namespace cluau::runtime::detail {
 
 		int CryptoRandomBytes(lua_State* L)
 		{
-			const int count = (int)luaL_checkinteger(L, 1);
-			if (count < 0 || count > (1 << 26))
+			const double n = luaL_checknumber(L, 1);
+			const int count = n == std::floor(n) && n >= 0 && n <= (1 << 26) ? (int)n : -1;
+			if (count < 0)
 				luaL_argerror(L, 1, "a number of bytes from 0 to 64 MiB");
 			std::string bytes((size_t)count, '\0');
 			if (count > 0 && !Random(bytes.data(), bytes.size()))

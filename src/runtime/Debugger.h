@@ -21,6 +21,11 @@
 // line of the function and of the Lua function below the C call, and
 // stops at the first of them reached.
 //
+// A coroutine the stepped thread resumes inherits its single-step mode: a
+// step into stops in it. A coroutine stepped through that yields or ends
+// before the step stops hands the step to the function that resumed it
+// (by breakpoints on its lines, as above).
+//
 // Expressions (conditions, log messages, watches, the console) are cluau
 // (or Luau, in a .luau file), compiled as `return (<expression>)` and run
 // in a fresh thread whose environment is the frame's locals, then its
@@ -63,6 +68,11 @@ namespace cluau::runtime::detail {
 	std::string CompileExpression(const std::string& expression, bool luau, std::string& error);
 	// A loaded chunk's source text, by the name errors give it.
 	std::string ChunkSource(lua_State* L, const std::string& name);
+	// The runtime's waits call this as they wake (a wait for @std/task's
+	// tasks or a blocking call wakes every 100 ms): an attached debugger
+	// reads the editor's requests meanwhile (a pause asked for is taken at
+	// the next line that runs), and ends the script when asked to.
+	void DebugWaiting(lua_State* L);
 
 	struct Breakpoint
 	{
@@ -128,6 +138,9 @@ namespace cluau::runtime::detail {
 
 		// Replaces `file`'s breakpoints; returns them with ids and lines.
 		std::vector<Breakpoint> SetBreakpoints(const std::string& file, std::vector<Breakpoint> breakpoints);
+		// Breakpoints set before a script starts: those past the end of the
+		// file (as it is now) have the problem said.
+		static void MarkPastEnd(const std::string& file, std::vector<Breakpoint>& breakpoints);
 		void SetBreakOnErrors(bool uncaught, bool caught);
 		// Pause at the first line of the script.
 		void StopOnEntry();
@@ -148,6 +161,9 @@ namespace cluau::runtime::detail {
 		void Continue();
 		void Step(StepKind kind);
 
+		// A wait in L (DebugWaiting).
+		void Waiting(lua_State* L);
+
 		// ---- DebugHooks --------------------------------------------------
 		void OnLoaded(lua_State* L, const std::string& name, const std::string& file) override;
 		void OnUncaught(lua_State* T, const std::string& message) override;
@@ -162,6 +178,7 @@ namespace cluau::runtime::detail {
 			std::string Name;
 			std::string File; // canonical
 			int Ref = 0;
+			int Lines = 0; // the file's, when it was read (0: not known)
 		};
 		enum class Resume { None, Continue, Step };
 
@@ -171,17 +188,32 @@ namespace cluau::runtime::detail {
 		static void InterruptCallback(lua_State* L, int gc);
 		static void ProtectedErrorCallback(lua_State* L);
 		static void PreResumeCallback(lua_State* L);
+		static void PostResumeCallback(lua_State* L);
 		static void InterruptedCallback(lua_State* L, lua_Debug* ar);
 
 		void OnBreak(lua_State* L);
 		void OnStep(lua_State* L);
 		void OnInterrupt(lua_State* L);
 		void OnProtectedError(lua_State* L);
+		void OnResumed(lua_State* co);
+		// The thread that resumed `co` with coroutine.resume (or the
+		// function coroutine.wrap made) from the script's own code, and
+		// whether it was coroutine.resume; null for another resumer (the
+		// runtime, @std/task's scheduler).
+		lua_State* ResumerOf(lua_State* co, bool* byResume = nullptr);
 
 		void Arm(const std::string& file, int line);
-		// A step where the thread cannot leave the VM: by breakpoints.
-		void StartLineStep(lua_State* L, int line);
+		// A step where the thread cannot leave the VM: by breakpoints, in
+		// the function at `level` (the first Lua frame there or below) and
+		// the Lua function it returns to; `here`: a step out stops in that
+		// function too (it is where a coroutine stepped out of returns).
+		void StartLineStep(lua_State* L, int line, int level = 0, bool here = false);
 		void EndLineStep();
+		// A step into, inside a function C calls (a callback): that
+		// function's first line is armed, so the step stops at its next call.
+		// `atInstruction`: paused before an instruction (not at a BREAK).
+		void ArmEntry(lua_State* L, int line, bool atInstruction);
+		void EndEntry();
 		bool LineStepStops(lua_State* L, int line);
 		// `fromBreak`: at a BREAK (a step breaks the thread out of the VM
 		// and skips that BREAK once on resuming); `stepping`: the thread
@@ -189,6 +221,8 @@ namespace cluau::runtime::detail {
 		void Pause(lua_State* L, PauseInfo pause, bool fromBreak, bool stepping);
 		const Chunk* ChunkNamed(const std::string& name) const;
 		bool IsUserChunk(const std::string& name) const;
+		// The line is past the end of the chunk's file (its implicit return).
+		bool PastEnd(const std::string& name, int line) const;
 		bool IsLuauChunk(const std::string& name) const;
 		bool Hit(Breakpoint& b) const;
 		// `described`: the value kept for the pause (a table expandable).
@@ -212,6 +246,9 @@ namespace cluau::runtime::detail {
 		unsigned m_Ticks = 0;
 		// A thread broken out because the coroutine it resumed broke: the coroutine.
 		std::map<lua_State*, lua_State*> m_BrokenChild;
+		// The threads being resumed, innermost last.
+		std::vector<lua_State*> m_Resuming;
+		int m_ResumeRef = 0; // coroutine.resume (registry ref)
 
 		lua_State* m_Paused = nullptr;
 		PauseInfo m_Pause;
@@ -236,8 +273,16 @@ namespace cluau::runtime::detail {
 			StepKind Kind = StepKind::Over;
 			int Function = 0, Caller = 0; // registry refs (0 for none)
 			int Depth = 0, CallerDepth = 0, Line = 0;
+			int FirstLine = 0; // the function's first line with code (where a call of it starts)
 			std::vector<std::pair<int, int>> Armed; // function ref, line
 		} m_LineStep;
+
+		struct Entry
+		{
+			lua_State* Thread = nullptr;
+			int Function = 0; // registry ref
+			int Line = 0, Depth = 0;
+		} m_Entry;
 	};
 
 } // namespace cluau::runtime::detail

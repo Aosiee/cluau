@@ -23,6 +23,10 @@ namespace cluau {
 
 		constexpr size_t npos = (size_t)-1;
 
+		// A host's translation that throws takes Luau's `error` on its first
+		// line, before a local named `error` can hide it.
+		constexpr std::string_view kRaiseHead = "local __cluau_error = error; ";
+
 		enum class Frame : uint8_t { Paren, Bracket, Table, Block, Class };
 		enum class BlockKind : uint8_t { Plain, If, Else, Loop, Function, Repeat, Method, Try, Catch, Finally };
 
@@ -75,25 +79,6 @@ namespace cluau {
 			return std::string(s.substr(a, b - a));
 		}
 
-		std::string Collapse(std::string_view s)
-		{
-			std::string out;
-			bool space = false;
-			for (char c : s)
-			{
-				if (c == '\n' || c == '\r' || c == '\t' || c == ' ')
-				{
-					space = true;
-					continue;
-				}
-				if (space && !out.empty())
-					out += ' ';
-				space = false;
-				out += c;
-			}
-			return out;
-		}
-
 		void ReplaceAll(std::string& s, std::string_view from, std::string_view to)
 		{
 			for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size()))
@@ -111,9 +96,11 @@ namespace cluau {
 			return nullptr;
 		}
 
+		std::string TranslateInterpolated(std::string_view text, int nesting = 0);
+
 		// An expression's text with cluau's operators and if-expressions
-		// rewritten (field defaults, interpolation segments).
-		std::string TranslateExpressionText(std::string_view text)
+		// rewritten (interpolation segments).
+		std::string TranslateExpressionText(std::string_view text, int nesting)
 		{
 			std::vector<Diagnostic> ignored;
 			std::vector<Token> tokens = detail::Lex(text, ignored);
@@ -169,15 +156,67 @@ namespace cluau {
 						continue;
 					}
 				}
+				if (t.Kind == TokenKind::Interpolated)
+				{
+					out += TranslateInterpolated(t.Text, nesting + 1);
+					continue;
+				}
 				out.append(t.Text);
 			}
 			out.append(text.substr(pos));
 			return out;
 		}
 
-		// `...{expr}...` with each segment's operators rewritten.
-		std::string TranslateInterpolated(std::string_view text)
+		// The end (one past the closing backtick) of the interpolated string
+		// at `at`, its segments' braces and strings skipped.
+		size_t SkipInterpolatedText(std::string_view text, size_t at, int nesting = 0)
 		{
+			size_t j = at + 1;
+			int depth = 0;
+			while (j < text.size())
+			{
+				const char c = text[j];
+				if (depth == 0)
+				{
+					if (c == '\\')
+						j += 2;
+					else if (c == '`')
+						return j + 1;
+					else
+					{
+						depth = c == '{' ? 1 : 0;
+						j++;
+					}
+					continue;
+				}
+				if (c == '"' || c == '\'')
+				{
+					j++;
+					while (j < text.size() && text[j] != c && text[j] != '\n')
+						j += text[j] == '\\' ? 2 : 1;
+					j++;
+					continue;
+				}
+				if (c == '`' && nesting < detail::kMaxInterpolationNesting)
+				{
+					j = SkipInterpolatedText(text, j, nesting + 1);
+					continue;
+				}
+				if (c == '{')
+					depth++;
+				else if (c == '}')
+					depth--;
+				j++;
+			}
+			return text.size();
+		}
+
+		// `...{expr}...` with each segment's operators rewritten.
+		// (Nested deeper than the lexer reads, which reported it: as written.)
+		std::string TranslateInterpolated(std::string_view text, int nesting)
+		{
+			if (nesting >= detail::kMaxInterpolationNesting)
+				return std::string(text);
 			std::string out;
 			size_t i = 0;
 			while (i < text.size())
@@ -195,7 +234,8 @@ namespace cluau {
 					i++;
 					continue;
 				}
-				// The matching brace, skipping quoted strings.
+				// The matching brace, skipping quoted strings and interpolated
+				// strings inside the segment.
 				size_t j = i + 1;
 				int depth = 1;
 				while (j < text.size() && depth > 0)
@@ -208,6 +248,11 @@ namespace cluau {
 						while (j < text.size() && text[j] != q)
 							j += text[j] == '\\' ? 2 : 1;
 					}
+					else if (d == '`')
+					{
+						j = SkipInterpolatedText(text, j, nesting + 1);
+						continue;
+					}
 					else if (d == '{')
 						depth++;
 					else if (d == '}')
@@ -216,7 +261,7 @@ namespace cluau {
 				}
 				const size_t innerEnd = depth == 0 ? j - 1 : j;
 				out += '{';
-				out += TranslateExpressionText(text.substr(i + 1, innerEnd - i - 1));
+				out += TranslateExpressionText(text.substr(i + 1, innerEnd - i - 1), nesting);
 				if (depth == 0)
 					out += '}';
 				i = j;
@@ -253,6 +298,9 @@ namespace cluau {
 				m_ClosedIf.assign(n, 0);
 				m_ClosedRepeat.assign(n, 0);
 				m_ExprIfClose.assign(n, 0);
+				m_TypeEnd.assign(n, 0);
+				m_DropGap.assign(n, 0);
+				m_ThrowAt.assign(n, 0);
 				m_Skip.assign(n, 0);
 				Classify();
 				Emit();
@@ -320,7 +368,7 @@ namespace cluau {
 					else if (t.Is("|") || t.Is("&"))
 						j = SkipSimpleType(Sig(k + 1));
 					else if (t.Is("->"))
-						j = SkipType(k + 1);
+						j = SkipSimpleType(Sig(k + 1)); // the loop takes the rest: a chain of arrows is not nested calls
 					else
 						return j;
 				}
@@ -331,6 +379,12 @@ namespace cluau {
 				const Token& t = m_Toks[j];
 				if (t.Is("(") || t.Is("{"))
 					return MatchClose(j) + 1;
+				if (t.Is("<"))
+				{
+					// A generic function type: `<T>(T) -> T`.
+					const size_t p = Sig(MatchClose(j) + 1);
+					return m_Toks[p].Is("(") ? MatchClose(p) + 1 : j;
+				}
 				if (t.Is("..."))
 				{
 					const size_t k = Sig(j + 1);
@@ -391,6 +445,26 @@ namespace cluau {
 				return std::string(m_Src.substr(m_Toks[from].Begin, m_Toks[last].End - m_Toks[from].Begin));
 			}
 
+			// The code of tokens [from, to) on one line: comments left out, and
+			// one space wherever the source has whitespace or a comment (the
+			// tokens themselves, strings included, are copied as they are).
+			std::string CodeText(size_t from, size_t to) const
+			{
+				std::string out;
+				size_t prevEnd = npos;
+				for (size_t k = from; k < to && k < m_Toks.size(); k++)
+				{
+					const Token& t = m_Toks[k];
+					if (t.IsComment() || t.Kind == TokenKind::Eof)
+						continue;
+					if (prevEnd != npos && t.Begin > prevEnd)
+						out += ' ';
+					out.append(t.Text);
+					prevEnd = t.End;
+				}
+				return out;
+			}
+
 			// Text the translation adds for `i` (all of it generated: the strict
 			// rules do not report in it).
 			void Generate(size_t i, std::string text)
@@ -429,7 +503,10 @@ namespace cluau {
 					return t.Is("and") || t.Is("or");
 				if (t.Kind != TokenKind::Op)
 					return false;
-				static constexpr const char* kOps[] = { ".", ":", "..", "*", "/", "%", "^", "==", "!=", "~=", "<=", ">=", "&&", "||", "~/", "(", "[" };
+				// A statement never starts with a binary operator, so one at a
+				// line's start continues the line before (as Luau reads it).
+				static constexpr const char* kOps[] = { ".", ":", "..", "+", "-", "*", "/", "%", "^", "==", "!=", "~=", "<", "<=", ">", ">=", "&&", "||",
+					"~/", "(", "[" };
 				for (const char* op : kOps)
 					if (t.Text == op)
 						return true;
@@ -448,6 +525,10 @@ namespace cluau {
 					return npos;
 				int depth = 0;
 				size_t last = npos;
+				// If-expressions waiting for their else, and their conditions'
+				// `)`: a branch may start on the next line.
+				int ifs = 0;
+				std::set<size_t> conditionClose;
 				for (;; k = Sig(k + 1))
 				{
 					const Token& t = m_Toks[k];
@@ -455,8 +536,28 @@ namespace cluau {
 						break;
 					if (depth == 0 && (t.Is(";") || t.Is("}") || t.Is(")") || t.Is("]")))
 						break;
-					if (depth == 0 && last != npos && t.Line > m_Toks[last].EndLine && !AwaitsOperand(m_Toks[last]) && !ContinuesLine(t))
+					if (depth == 0 && last != npos && t.Line > m_Toks[last].EndLine && !AwaitsOperand(m_Toks[last]) && !ContinuesLine(t) &&
+						!conditionClose.count(last) && !m_Toks[last].Is("else") && !(t.Is("else") && ifs > 0))
 						break;
+					if (depth == 0 && t.Is("::"))
+					{
+						// A cast's type, which may end in `>` or `?`, is the expression's.
+						const size_t typeEnd = SkipType(k + 1);
+						if (typeEnd > Sig(k + 1))
+						{
+							last = PrevSig(typeEnd);
+							k = last;
+							continue;
+						}
+					}
+					if (depth == 0 && t.Is("if") && m_Toks[Sig(k + 1)].Is("("))
+					{
+						if (!(last != npos && m_Toks[last].Is("else")))
+							ifs++;
+						conditionClose.insert(MatchClose(Sig(k + 1)));
+					}
+					else if (depth == 0 && t.Is("else") && ifs > 0 && !m_Toks[Sig(k + 1)].Is("if"))
+						ifs--;
 					if (t.Is("(") || t.Is("[") || t.Is("{"))
 						depth++;
 					else if (t.Is(")") || t.Is("]") || t.Is("}"))
@@ -508,9 +609,9 @@ namespace cluau {
 					}
 					if (i > m_MethodHeaderEnd)
 						m_MethodHeaderEnd = npos;
-					if (m_StaticEnd != npos && i >= m_StaticEnd)
-						m_StaticEnd = npos;
-					if (InClassBody() && m_MethodHeaderEnd == npos && m_StaticEnd == npos && !t.Is("}") && !t.Is("function") && !t.Is(";"))
+					if (m_ValueEnd != npos && i >= m_ValueEnd)
+						m_ValueEnd = npos;
+					if (InClassBody() && m_MethodHeaderEnd == npos && m_ValueEnd == npos && !t.Is("}") && !t.Is("function") && !t.Is(";"))
 					{
 						ClassItem(i);
 						continue;
@@ -539,13 +640,22 @@ namespace cluau {
 					}
 					if (t.Text.size() > 2 && t.Text[2] == '!')
 					{
-						// A Luau hot comment (--!nonstrict) would change the
-						// mode a host enforces: defused and reported.
-						Error(t, "cluau files have no mode comments (//!...): the host decides the checking mode");
+						// A Luau hot comment (--!nonstrict) before the code would
+						// change the mode a host enforces: reported. Anywhere
+						// else it is an ordinary comment; either way it is
+						// defused.
+						if (m_PrevSig == npos)
+							Error(t, "cluau files have no mode comments (//!...): the host decides the checking mode");
 						m_Repl[i] = "-- " + std::string(t.Text.substr(2));
 						return;
 					}
-					m_Repl[i] = "--" + std::string(t.Text.substr(2));
+					// `//[[ x` must not become `--[[ x`, a long comment that
+					// would run past the line: a space keeps it a line comment.
+					size_t level = 3;
+					while (level < t.Text.size() && t.Text[level] == '=')
+						level++;
+					const bool longBracket = t.Text.size() > 2 && t.Text[2] == '[' && level < t.Text.size() && t.Text[level] == '[';
+					m_Repl[i] = (longBracket ? "-- " : "--") + std::string(t.Text.substr(2));
 					const std::string body = Trim(t.Text.substr(2));
 					if (body.rfind("allow-any", 0) == 0)
 					{
@@ -562,11 +672,13 @@ namespace cluau {
 				std::string_view body = t.Text.substr(2);
 				if (body.size() >= 2 && body.substr(body.size() - 2) == "*/")
 					body.remove_suffix(2);
+				// The closer must first appear where it is put: not in the body,
+				// and not made by the body's last characters with it (`t[1]` + `]]`).
 				int level = 0;
 				for (;; level++)
 				{
 					const std::string closer = "]" + std::string((size_t)level, '=') + "]";
-					if (std::string_view(body).find(closer) == std::string_view::npos)
+					if ((std::string(body) + closer).find(closer) == body.size())
 						break;
 				}
 				const std::string eq((size_t)level, '=');
@@ -622,9 +734,18 @@ namespace cluau {
 				else if ((w == "let" || w == "local" || w == "const") && m_Options.Repl && m_Stack.empty())
 					ReplDeclaration(i);
 				else if (w == "let" || w == "local")
+				{
 					m_Repl[i] = "local";
+					MarkDeclarationTypes(i);
+				}
 				else if (w == "const")
+				{
 					Const(i);
+					MarkDeclarationTypes(i);
+				}
+				else if (w == "type" && m_Toks[Sig(i + 1)].Kind == TokenKind::Name &&
+					(m_Toks[Sig(Sig(i + 1) + 1)].Is("=") || m_Toks[Sig(Sig(i + 1) + 1)].Is("<")))
+					TypeAlias(i);
 				else if (w == "class")
 					Class(i);
 				else if (w == "abstract" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Is("class"))
@@ -638,7 +759,9 @@ namespace cluau {
 					Throw(i);
 				else if (w == "throw" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Line != t.Line)
 					Error(t, "throw raises a value: throw error / throw \"message\"");
-				else if (w == "try" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Is("{") && m_Toks[Sig(i + 1)].Line == t.Line)
+				// (`try` and a `{` on the next line: a name alone is no statement,
+				// so this is the statement too.)
+				else if (w == "try" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Is("{"))
 					Try(i);
 				else if (w == "enum" && IsStatementStart(i) && m_Toks[Sig(i + 1)].Kind == TokenKind::Name && m_Toks[Sig(Sig(i + 1) + 1)].Is("{"))
 					Enum(i);
@@ -681,36 +804,24 @@ namespace cluau {
 				}
 				Generate(i, Raise() + "(");
 				AddAfter(last, m_Options.Script ? ")" : ", 0)");
+				m_ThrowAt[i] = 1;
 			}
 
 			// What raises an error as it is: in a script, the runtime's
-			// __cluau_throw; for a host, Luau's `error` (with level 0), taken by
-			// each try before a `catch (error)` can hide the name.
+			// __cluau_throw; for a host, Luau's `error` (with level 0), taken at
+			// the top of the chunk (Emit) before a local named `error` (a
+			// parameter, `catch (error)`) can hide it.
 			std::string Raise() const
 			{
 				if (m_Options.Script)
 					return "__cluau_throw";
-				const int t = EnclosingTry();
-				return t < 0 ? "error" : TryName(m_Tries[(size_t)t], "raise");
+				m_RaiseUsed = true;
+				return "__cluau_error";
 			}
 
 			std::string RaiseCall(const std::string& value) const
 			{
 				return m_Options.Script ? "__cluau_throw(" + value + ")" : Raise() + "(" + value + ", 0)";
-			}
-
-			// The innermost try, catch or finally block around here (-1: none).
-			int EnclosingTry() const
-			{
-				for (size_t k = m_Stack.size(); k-- > 0;)
-				{
-					const Open& open = m_Stack[k];
-					if (open.Kind == Frame::Block &&
-						(open.Block == BlockKind::Try || open.Block == BlockKind::Catch || open.Block == BlockKind::Finally))
-						if (auto it = m_TryOf.find(open.Token); it != m_TryOf.end())
-							return (int)it->second;
-				}
-				return -1;
 			}
 
 			// `continue = 1`: Luau's `continue` is a name outside a statement of
@@ -801,14 +912,12 @@ namespace cluau {
 				}
 				if (names.empty())
 					Error(m_Toks[nameTok], "enum " + name + " has no members: enum " + name + " { First, Second }");
+				// The string members' union, and `number` for the number members.
 				std::string type;
-				if (numbers && strings.empty())
-					type = "number";
-				else if (numbers)
-					type = "string | number";
-				else
-					for (size_t k = 0; k < strings.size(); k++)
-						type += (k ? " | " : "") + strings[k];
+				for (size_t k = 0; k < strings.size(); k++)
+					type += (k ? " | " : "") + strings[k];
+				if (numbers)
+					type += type.empty() ? "number" : " | number";
 				if (type.empty())
 					type = "never";
 				Generate(i, m_Options.Repl ? "" : "local");
@@ -837,8 +946,59 @@ namespace cluau {
 				int Id = 0;
 				size_t Token = 0;
 				bool Returns = false, Breaks = false, Continues = false;
+				size_t ReturnAt = npos, BreakAt = npos, ContinueAt = npos; // the first of each (in this try or one inside it)
 				bool HasCatch = false, HasFinally = false;
+				bool TryVarargs = false, CatchVarargs = false; // the block uses `...`: its closure passes them on
 			};
+
+			// The type of the `...` of the function around here (`any` when it
+			// declares none, or at the top of the chunk).
+			std::string VarargType() const
+			{
+				for (size_t k = m_Stack.size(); k-- > 0;)
+				{
+					const Open& open = m_Stack[k];
+					if (open.Kind == Frame::Block && (open.Block == BlockKind::Function || open.Block == BlockKind::Method))
+					{
+						auto it = m_VarargType.find(open.Token);
+						return it == m_VarargType.end() ? "any" : it->second;
+					}
+				}
+				return "any";
+			}
+
+			// The block between `open` and `close` uses its function's `...`
+			// as a value (not in a nested function, not as a type pack such
+			// as `...number`).
+			bool UsesVarargs(size_t open, size_t close) const
+			{
+				for (size_t j = open + 1; j < close; j++)
+				{
+					const Token& t = m_Toks[j];
+					if (t.Is("function"))
+					{
+						size_t p = Sig(j + 1);
+						while (p < close && !m_Toks[p].Is("(") && !m_Toks[p].Is("{"))
+							p = Sig(p + 1);
+						if (p < close && m_Toks[p].Is("("))
+						{
+							const size_t brace = FindHeaderBrace(MatchClose(p) + 1);
+							if (brace != npos && brace < close)
+								j = MatchClose(brace);
+						}
+						continue;
+					}
+					if (!t.Is("..."))
+						continue;
+					const Token& next = m_Toks[Sig(j + 1)];
+					const Token& prev = m_Toks[PrevSig(j)];
+					const bool typePack = (next.Kind == TokenKind::Name && next.Begin == t.End) ||
+						(prev.Kind == TokenKind::Name && !IsExpressionWord(prev.Text) && prev.End == t.Begin);
+					if (!typePack)
+						return true;
+				}
+				return false;
+			}
 
 			std::string TryName(const TryState& t, const char* part) const { return "__try" + std::to_string(t.Id) + part; }
 
@@ -849,14 +1009,14 @@ namespace cluau {
 				TryState state;
 				state.Id = (int)m_Tries.size() + 1;
 				state.Token = i;
-				// A host's raise: Luau's `error`, or the enclosing try's (a catch
-				// around this one may hide the name).
-				const std::string raise = m_Options.Script ? std::string() : "local " + TryName(state, "raise") + " = " + Raise() + " ";
 				m_Tries.push_back(state);
 				const TryState& t = m_Tries.back();
-				Generate(i, "do " + raise + "local " + TryName(t, "ok") + ": boolean, " + TryName(t, "sig") + ": any, " + TryName(t, "val") +
-					": any = pcall(function(): ...any");
 				const size_t brace = Sig(i + 1);
+				// A block that uses `...` gets the function's: the closure takes
+				// them and pcall passes them (CloseBrace).
+				m_Tries.back().TryVarargs = UsesVarargs(brace, MatchClose(brace));
+				Generate(i, "do local " + TryName(t, "ok") + ": boolean, " + TryName(t, "sig") + ": any, " + TryName(t, "val") +
+					": any = pcall(function(" + (t.TryVarargs ? "...: " + VarargType() : std::string()) + "): ...any");
 				MarkBlock(brace, BlockKind::Try, "");
 				m_TryOf[brace] = m_Tries.size() - 1;
 			}
@@ -886,6 +1046,9 @@ namespace cluau {
 					Error(m_Toks[i], "catch is catch (error) { ... }");
 					return;
 				}
+				t.CatchVarargs = UsesVarargs(brace, MatchClose(brace));
+				if (t.CatchVarargs)
+					Generate(close, ", ...: " + VarargType() + ")");
 				AddAfter(close, ": ...any");
 				MarkBlock(brace, BlockKind::Catch, "");
 				m_TryOf[brace] = index;
@@ -965,6 +1128,7 @@ namespace cluau {
 				if (index < 0)
 					return;
 				m_Tries[(size_t)index].Returns = true;
+				m_Tries[(size_t)index].ReturnAt = std::min(m_Tries[(size_t)index].ReturnAt, i);
 				const size_t last = ExpressionEnd(i);
 				if (last == npos)
 					Generate(i, "return 1, table.pack()");
@@ -992,7 +1156,10 @@ namespace cluau {
 					Error(m_Toks[i], std::string(isBreak ? "break" : "continue") + " is not inside a loop");
 					return;
 				}
-				(isBreak ? m_Tries[(size_t)index].Breaks : m_Tries[(size_t)index].Continues) = true;
+				TryState& state = m_Tries[(size_t)index];
+				(isBreak ? state.Breaks : state.Continues) = true;
+				size_t& at = isBreak ? state.BreakAt : state.ContinueAt;
+				at = std::min(at, i);
 				Generate(i, isBreak ? "return 2" : "return 3");
 			}
 
@@ -1003,16 +1170,26 @@ namespace cluau {
 	std::string TryEnd(const TryState& t, bool last)
 	{
 		const std::string ok = TryName(t, "ok"), sig = TryName(t, "sig"), val = TryName(t, "val");
-		std::string out = " if not " + ok + " then " + (m_Options.Script ? RaiseCall(sig) : TryName(t, "raise") + "(" + sig + ", 0)") + " end";
+		std::string out = " if not " + ok + " then " + RaiseCall(sig) + " end";
 		bool finally = false, loop = false;
-		for (const auto& [wanted, code, word] : { std::tuple{ t.Breaks, 2, "break" }, std::tuple{ t.Continues, 3, "continue" } })
+		for (const auto& [wanted, code, word, at] :
+			{ std::tuple{ t.Breaks, 2, "break", t.BreakAt }, std::tuple{ t.Continues, 3, "continue", t.ContinueAt } })
 		{
 			if (!wanted)
 				continue;
 			const int outer = TryInTheWay(true, finally, loop);
+			if (finally)
+			{
+				// A try inside a finally block: its jump would leave the finally too.
+				Error(m_Toks[at], std::string("a finally block runs on its way out: it cannot ") + word);
+				continue;
+			}
 			if (outer >= 0)
 			{
-				(code == 2 ? m_Tries[(size_t)outer].Breaks : m_Tries[(size_t)outer].Continues) = true;
+				TryState& o = m_Tries[(size_t)outer];
+				(code == 2 ? o.Breaks : o.Continues) = true;
+				size_t& outerAt = code == 2 ? o.BreakAt : o.ContinueAt;
+				outerAt = std::min(outerAt, at);
 				out += " if " + sig + " == " + std::to_string(code) + " then return " + std::to_string(code) + " end";
 			}
 			else
@@ -1021,9 +1198,12 @@ namespace cluau {
 		if (t.Returns)
 		{
 			const int outer = TryInTheWay(false, finally, loop);
-			if (outer >= 0)
+			if (finally)
+				Error(m_Toks[t.ReturnAt], "a finally block runs on its way out: it cannot return");
+			else if (outer >= 0)
 			{
 				m_Tries[(size_t)outer].Returns = true;
+				m_Tries[(size_t)outer].ReturnAt = std::min(m_Tries[(size_t)outer].ReturnAt, t.ReturnAt);
 				out += " if " + sig + " == 1 then return 1, " + val + " end";
 			}
 			else if (last)
@@ -1040,6 +1220,18 @@ namespace cluau {
 				const size_t c = Sig(i + 1);
 				if (parenthesised && !m_Toks[c].Is("("))
 					Error(t, "cluau conditions are parenthesised: " + std::string(t.Text) + " (...) { }");
+				else if (parenthesised)
+				{
+					// `if (x) print(x)`: a statement after the condition, not its
+					// block (which a `{` further on must not be taken for).
+					const Token& after = m_Toks[Sig(MatchClose(c) + 1)];
+					if ((after.Kind == TokenKind::Name && !after.Is("and") && !after.Is("or")) || after.Kind == TokenKind::Number ||
+						after.Kind == TokenKind::String || after.Kind == TokenKind::LongString || after.Kind == TokenKind::Interpolated)
+					{
+						Error(t, std::string(t.Text) + " needs a { } block: " + std::string(t.Text) + " (...) { ... }");
+						return;
+					}
+				}
 				const size_t brace = FindHeaderBrace(c);
 				if (brace == npos)
 				{
@@ -1069,7 +1261,7 @@ namespace cluau {
 				// The parentheses are not Luau: blank them (same width).
 				m_Repl[p] = " ";
 				m_Repl[q] = " ";
-				if (const size_t let = Sig(p + 1); m_Toks[let].Is("let"))
+				if (const size_t let = Sig(p + 1); m_Toks[let].Is("let") || m_Toks[let].Is("local"))
 				{
 					m_Repl[let] = "";
 					m_Skip[let] = 1;
@@ -1118,11 +1310,11 @@ namespace cluau {
 			{
 				if (m_PrevSig == npos || m_OpenedBlock[m_PrevSig] || m_ClosedBlock[m_PrevSig])
 					return false;
-				if (m_ExprIfClose[m_PrevSig])
-					return true; // if (a) if (b) 1 else 2 else 3
+				if (m_ExprIfClose[m_PrevSig] || m_ThrowAt[m_PrevSig])
+					return true; // if (a) if (b) 1 else 2 else 3; throw if (c) a else b
 				const Token& p = m_Toks[m_PrevSig];
 				if (p.Kind == TokenKind::Op)
-					return !(p.Is(")") || p.Is("]") || p.Is("}") || p.Is(";"));
+					return !(p.Is(";") || EndsStatement(m_PrevSig));
 				if (p.Kind == TokenKind::Name)
 					return p.Is("return") || p.Is("and") || p.Is("or") || p.Is("not") || p.Is("in");
 				return false;
@@ -1180,7 +1372,9 @@ namespace cluau {
 				const Token& t = m_Toks[i];
 				if (m_Options.Manifest)
 					Error(t, "manifests are declarations: function definitions are not allowed");
-				const bool method = InClassBody();
+				// A function value in a static's or a field's expression is an
+				// ordinary function, not a method.
+				const bool method = InClassBody() && m_ValueEnd == npos;
 				size_t j = Sig(i + 1);
 				if (method)
 				{
@@ -1233,6 +1427,10 @@ namespace cluau {
 					return;
 				}
 				MarkBlock(k, method ? BlockKind::Method : BlockKind::Function, "");
+				// Its `...: T`, for a try inside that passes them on.
+				for (size_t p = Sig(j + 1); p < close; p = Sig(p + 1))
+					if (m_Toks[p].Is("...") && m_Toks[Sig(p + 1)].Is(":"))
+						m_VarargType[k] = CodeText(Sig(Sig(p + 1) + 1), SkipType(Sig(p + 1) + 1));
 				if (method)
 					m_MethodHeaderEnd = k; // the header's tokens are not class items
 			}
@@ -1260,6 +1458,7 @@ namespace cluau {
 			void ReplDeclaration(size_t i)
 			{
 				m_Repl[i] = "";
+				MarkDeclarationTypes(i);
 				size_t j = Sig(i + 1);
 				if (m_Toks[j].Is("function"))
 					return;
@@ -1333,8 +1532,28 @@ namespace cluau {
 			{
 				size_t Begin = 0;
 				size_t End = 0; // exclusive
+				size_t ValueBegin = npos; // the default's tokens [ValueBegin, ValueEnd)
+				size_t ValueEnd = npos;
 				ClassField Field;
 			};
+
+			// A field default's Luau, for the class profile: the expression
+			// translated on its own, as the main pass translates it in place
+			// (its line breaks and comments kept).
+			std::string TranslateValue(size_t begin, size_t end) const
+			{
+				TranslateOptions options;
+				options.Script = m_Options.Script;
+				options.Manifest = m_Options.Manifest;
+				const std::string prefix = "return ";
+				const TranslateResult r = Translate(prefix + SourceText(begin, end), options);
+				std::string_view luau = r.Luau;
+				if (luau.substr(0, kRaiseHead.size()) == kRaiseHead)
+					luau.remove_prefix(kRaiseHead.size());
+				if (luau.substr(0, prefix.size()) == prefix)
+					luau.remove_prefix(prefix.size());
+				return Trim(luau);
+			}
 
 			void Class(size_t i)
 			{
@@ -1463,18 +1682,24 @@ namespace cluau {
 				for (const ClassMethod& m : info.Methods)
 				{
 					members.Methods.push_back({ m.Name, MethodParamTypes(m.Params),
-						!m.ReturnType.empty() ? m.ReturnType : m.ReturnsValue ? std::string("...any") : std::string("()") });
+						!m.ReturnType.empty() ? m.ReturnType : m.ReturnsValue ? std::string("...any") : std::string("()"), m.Generics });
 					if (m.Name == "Init")
+					{
 						members.CtorParams = members.Methods.back().ParamTypes;
+						members.CtorGenerics = m.Generics;
+					}
 				}
 				if (!members.CtorParams)
 				{
 					if (base.empty())
 						members.CtorParams = std::string();
 					else if (auto inherited = m_CtorParams.find(base); inherited != m_CtorParams.end())
-						members.CtorParams = inherited->second;
+					{
+						members.CtorParams = inherited->second.first;
+						members.CtorGenerics = inherited->second.second;
+					}
 				}
-				m_CtorParams[m_ClassName] = members.CtorParams;
+				m_CtorParams[m_ClassName] = { members.CtorParams, members.CtorGenerics };
 	info.UncheckedConstructor = !members.CtorParams;
 				std::string type;
 				std::string head;
@@ -1488,7 +1713,7 @@ namespace cluau {
 				{
 					type = "export type " + m_ClassName + " = { " + members.Fields;
 					for (const ClassMembers::Method& m : members.Methods)
-						type += m.Name + ": (self: " + m_ClassName + m.ParamTypes + ") -> " + m.ReturnType + ", ";
+						type += m.Name + ": " + m.Generics + "(self: " + m_ClassName + m.ParamTypes + ") -> " + m.ReturnType + ", ";
 					type += "}";
 					head = m_ClassName + " = " + ExpandClass(m_Profile->TableInit, m_ClassName) + "; ";
 				}
@@ -1615,7 +1840,7 @@ namespace cluau {
 					{
 						const size_t typeBegin = Sig(k + 1);
 						const size_t typeEnd = SkipType(typeBegin);
-						span.Field.Type = Collapse(SourceText(typeBegin, typeEnd));
+						span.Field.Type = CodeText(typeBegin, typeEnd);
 						k = Sig(typeEnd);
 					}
 					else
@@ -1641,7 +1866,9 @@ namespace cluau {
 								depth--;
 							v++;
 						}
-						span.Field.Default = Collapse(TranslateExpressionText(SourceText(valueBegin, v)));
+						span.ValueBegin = valueBegin;
+						span.ValueEnd = v;
+						span.Field.Default = TranslateValue(valueBegin, v);
 						k = v;
 					}
 					// Trailing comments stay where they are.
@@ -1704,7 +1931,7 @@ namespace cluau {
 				const size_t close = MatchClose(open);
 				ClassSignal signal;
 				signal.Name = std::string(m_Toks[nameTok].Text);
-				signal.Params = Collapse(SourceText(open + 1, close));
+				signal.Params = CodeText(open + 1, close);
 				signal.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
 				int depth = 0;
 				bool typed = true;
@@ -1763,17 +1990,21 @@ namespace cluau {
 				m.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
 				size_t p = Sig(nameTok + 1);
 				if (m_Toks[p].Is("<"))
-					p = Sig(MatchClose(p) + 1);
+				{
+					const size_t close = MatchClose(p);
+					m.Generics = CodeText(p, close + 1);
+					p = Sig(close + 1);
+				}
 				if (!m_Toks[p].Is("("))
 					return Sig(nameTok + 1);
 				const size_t close = MatchClose(p);
-				m.Params = Collapse(SourceText(p + 1, close));
+				m.Params = CodeText(p + 1, close);
 				size_t last = close;
 				size_t k = Sig(close + 1);
 				if (m_Toks[k].Is(":"))
 				{
 					const size_t typeEnd = SkipType(k + 1);
-					m.ReturnType = Collapse(SourceText(Sig(k + 1), typeEnd));
+					m.ReturnType = CodeText(Sig(k + 1), typeEnd);
 					last = PrevSig(typeEnd);
 					k = Sig(typeEnd);
 				}
@@ -1796,16 +2027,20 @@ namespace cluau {
 				m.At = { { m_Toks[nameTok].Line, m_Toks[nameTok].Col }, { m_Toks[nameTok].EndLine, m_Toks[nameTok].EndCol } };
 				size_t p = Sig(nameTok + 1);
 				if (m_Toks[p].Is("<"))
-					p = Sig(MatchClose(p) + 1);
+				{
+					const size_t close = MatchClose(p);
+					m.Generics = CodeText(p, close + 1);
+					p = Sig(close + 1);
+				}
 				if (!m_Toks[p].Is("("))
 					return Sig(nameTok + 1);
 				const size_t close = MatchClose(p);
-				m.Params = Collapse(SourceText(p + 1, close));
+				m.Params = CodeText(p + 1, close);
 				size_t k = Sig(close + 1);
 				if (m_Toks[k].Is(":"))
 				{
 					const size_t typeEnd = SkipType(k + 1);
-					m.ReturnType = Collapse(SourceText(Sig(k + 1), typeEnd));
+					m.ReturnType = CodeText(Sig(k + 1), typeEnd);
 					k = Sig(typeEnd);
 				}
 				if (!m_Toks[k].Is("{"))
@@ -1879,7 +2114,7 @@ namespace cluau {
 					m_Repl[i] = "";
 					m_Repl[span.Name] = m_ClassName + "." + std::string(m_Toks[span.Name].Text);
 					m_Skip[span.Name] = 1;
-					m_StaticEnd = span.End; // the expression's tokens are ordinary code
+					m_ValueEnd = span.End; // the expression's tokens are ordinary code
 					m_PrevSig = i;
 					return;
 				}
@@ -1895,6 +2130,30 @@ namespace cluau {
 						lowered = m_ClassName + ".Fields." + span.Field.Name + " = " + span.Field.Default;
 					if (!error.empty())
 						Error(m_Toks[i], error);
+					// A lowering that contains the default as it is: the default's
+					// own tokens stay in place and the main pass translates them
+					// (so its lines stay on their lines), with the lowering's text
+					// before and after them.
+					const size_t at = span.Field.Default.empty() ? std::string::npos : lowered.find(span.Field.Default);
+					if (at != std::string::npos && span.ValueBegin != npos)
+					{
+						m_Repl[i] = lowered.substr(0, at);
+						for (size_t k = i + 1; k <= span.ValueBegin; k++)
+						{
+							m_DropGap[k] = 1;
+							if (!m_Toks[k].IsComment() && k < span.ValueBegin)
+							{
+								m_Repl[k] = "";
+								m_Skip[k] = 1;
+							}
+						}
+						AddAfter(PrevSig(span.ValueEnd), lowered.substr(at + span.Field.Default.size()));
+						m_ValueEnd = span.ValueEnd;
+						m_PrevSig = PrevSig(span.ValueBegin);
+						return;
+					}
+					if (lowered.find('\n') != std::string::npos)
+						Error(m_Toks[i], "this host's class profile lowers " + span.Field.Name + " on one line: write its default on one line");
 					m_Repl[i] = lowered;
 					for (size_t k = i + 1; k < span.End; k++)
 						if (!m_Toks[k].IsComment())
@@ -1934,6 +2193,11 @@ namespace cluau {
 					m_Repl[i] = op == "++" ? " += 1" : " -= 1";
 					return;
 				}
+				if (op == "::")
+				{
+					MarkTypeEnd(i + 1);
+					return;
+				}
 				if (op == "(" )
 				{
 					m_Stack.push_back({ Frame::Paren, BlockKind::Plain, i });
@@ -1967,6 +2231,11 @@ namespace cluau {
 
 			bool IsStatementStart(size_t i) const
 			{
+				// Inside brackets or a table constructor nothing starts a
+				// statement (`f(g\n{ a = 1 })` is a call with a table).
+				if (!m_Stack.empty() && (m_Stack.back().Kind == Frame::Paren || m_Stack.back().Kind == Frame::Bracket ||
+					m_Stack.back().Kind == Frame::Table))
+					return false;
 				if (m_PrevSig == npos)
 					return true;
 				const Token& p = m_Toks[m_PrevSig];
@@ -1976,7 +2245,54 @@ namespace cluau {
 					return false;
 				if (p.Line == m_Toks[i].Line)
 					return false;
-				return EndsExpression(p);
+				return EndsStatement(m_PrevSig);
+			}
+
+			// A statement can end at token k: after a value (a name, a literal,
+			// a closing bracket), after `x++` / `x--` or `...`, and after a type
+			// (`let best: string?`, `type T = Array<number>`), whose last token
+			// would otherwise read as an operator still waiting for its operand.
+			bool EndsStatement(size_t k) const
+			{
+				const Token& t = m_Toks[k];
+				return EndsExpression(t) || m_TypeEnd[k] || t.Is("++") || t.Is("--") || t.Is("...") || t.Is("?");
+			}
+
+			// Marks the end of the type that starts at `begin` (see EndsStatement).
+			void MarkTypeEnd(size_t begin)
+			{
+				const size_t first = Sig(begin);
+				const size_t end = SkipType(first);
+				if (end > first)
+					m_TypeEnd[PrevSig(end)] = 1;
+			}
+
+			// `let a: T, b: U`: each annotation's end.
+			void MarkDeclarationTypes(size_t keyword)
+			{
+				size_t j = Sig(keyword + 1);
+				while (m_Toks[j].Kind == TokenKind::Name && !m_Toks[j].Is("function"))
+				{
+					j = Sig(j + 1);
+					if (m_Toks[j].Is(":"))
+					{
+						MarkTypeEnd(j + 1);
+						j = Sig(SkipType(j + 1));
+					}
+					if (!m_Toks[j].Is(","))
+						break;
+					j = Sig(j + 1);
+				}
+			}
+
+			// `type Name<T> = ...`: the alias's type.
+			void TypeAlias(size_t i)
+			{
+				size_t k = Sig(Sig(i + 1) + 1);
+				if (m_Toks[k].Is("<"))
+					k = Sig(MatchClose(k) + 1);
+				if (m_Toks[k].Is("="))
+					MarkTypeEnd(k + 1);
 			}
 
 			void OpenBrace(size_t i)
@@ -2037,9 +2353,10 @@ namespace cluau {
 					const Token& next = m_Toks[Sig(i + 1)];
 					const bool more = (open.Block == BlockKind::Try && (next.Is("catch") || next.Is("finally"))) ||
 						(open.Block == BlockKind::Catch && next.Is("finally"));
-					std::string text = open.Block == BlockKind::Try ? "end)"
-						: open.Block == BlockKind::Catch           ? "end, " + TryName(m_Tries[index], "sig") + ") end"
-																   : "end";
+					const TryState& state = m_Tries[index];
+					std::string text = open.Block == BlockKind::Try ? std::string(state.TryVarargs ? "end, ...)" : "end)")
+						: open.Block == BlockKind::Catch ? "end, " + TryName(state, "sig") + (state.CatchVarargs ? ", ...) end" : ") end")
+						: std::string("end");
 					if (open.Block == BlockKind::Try && !more)
 						Error(m_Toks[m_Tries[index].Token], "try needs a catch or a finally: try { } catch (error) { }");
 					// The statement ends its function: the next token closes the function's block.
@@ -2127,10 +2444,20 @@ namespace cluau {
 						outCol = c == '\n' ? 0 : outCol + 1;
 					out.append(text);
 				};
+				if (m_RaiseUsed)
+				{
+					// Before anything a name could hide it with, on the first line.
+					m_R.Map.AddAnchor(0, 0, 0);
+					m_R.Generated.push_back({ { 0, 0 }, { 0, (int)kRaiseHead.size() } });
+					append(kRaiseHead);
+					m_R.Map.AddAnchor(0, 0, outCol);
+				}
 				for (size_t i = 0; i < m_Toks.size(); i++)
 				{
 					const Token& t = m_Toks[i];
-					append(m_Src.substr(pos, t.Begin - pos));
+					const std::string_view gap = m_Src.substr(pos, t.Begin - pos);
+					if (!m_DropGap[i] || gap.find('\n') != std::string_view::npos)
+						append(gap);
 					pos = t.Begin;
 					if (t.Kind == TokenKind::Eof)
 						break;
@@ -2191,7 +2518,10 @@ namespace cluau {
 			std::vector<uint8_t> m_ClosedIf;
 			std::vector<uint8_t> m_ClosedRepeat;
 			std::vector<uint8_t> m_ExprIfClose; // an if-expression condition's `)`
+			std::vector<uint8_t> m_TypeEnd;     // the last token of a type that can end a statement (`let x: T?`, `type T = A<B>`)
 			std::vector<uint8_t> m_Skip;
+			std::vector<uint8_t> m_DropGap; // the spaces before this token are not copied (a line break always is)
+			std::vector<uint8_t> m_ThrowAt; // a `throw` statement's keyword: its value follows
 			struct ExprIf
 			{
 				size_t Depth = 0; // m_Stack's size at the `if`: its `else` is at the same depth
@@ -2213,7 +2543,7 @@ namespace cluau {
 				size_t End = 0;   // exclusive
 			};
 			std::vector<SignalSpan> m_SignalSpans;
-			size_t m_StaticEnd = npos;
+			size_t m_ValueEnd = npos; // the end of a static's or a field default's expression (ordinary code, not class items)
 			std::map<size_t, std::pair<size_t, size_t>> m_GeneratedAt; // token -> (offset, length) in its replacement
 			struct AbstractSpan
 			{
@@ -2228,15 +2558,17 @@ namespace cluau {
 			std::map<std::string, std::set<std::string>> m_Unimplemented; // a class's abstract methods no class has defined yet
 			std::vector<TryState> m_Tries;
 			std::map<size_t, size_t> m_TryOf; // a try's, catch's or finally's `{` -> its try
+			std::map<size_t, std::string> m_VarargType; // a function's `{` -> the type its `...: T` declares
 			std::map<size_t, std::pair<size_t, BlockKind>> m_TryClosed; // a try's or catch's `}` that a catch / finally follows
 			std::string m_ClassName;
 			std::string m_ClassBase; // the class being translated's base ("" without one)
-			std::map<std::string, std::optional<std::string>> m_CtorParams; // each class's constructor parameters, for its subclasses
+			std::map<std::string, std::pair<std::optional<std::string>, std::string>> m_CtorParams; // each class's constructor parameters (and generics), for its subclasses
 			size_t m_ClassEndToken = npos;
 			bool m_ClassEnded = false;
 			size_t m_LastClassEnd = npos; // script mode: the last class's `}`
 			size_t m_PrevSig = npos;
 			size_t m_MethodHeaderEnd = npos;
+			mutable bool m_RaiseUsed = false; // host mode: the chunk takes Luau's `error` as __cluau_error
 			std::string m_Tail;
 			TranslateResult m_R;
 		};
@@ -2335,7 +2667,7 @@ namespace cluau {
 						abstracts += (abstracts.empty() ? "" : ", ") + std::string("\"") + m.Name + "\"";
 				std::string meta;
 				if (!info.Abstract)
-					meta = "__call: (unknown" + ctor + ") -> $Class";
+					meta = "__call: " + members.CtorGenerics + "(unknown" + ctor + ") -> $Class";
 				if (derived)
 					meta += (meta.empty() ? "" : ", ") + std::string("__index: typeof(") + info.Base + ")";
 				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\"" + (derived ? ", __base = " + info.Base : std::string()) +
@@ -2347,7 +2679,7 @@ namespace cluau {
 				std::string metamethods;
 				for (const ClassMembers::Method& m : members.Methods)
 					if (m.Name.rfind("__", 0) == 0)
-						metamethods += m.Name + ": (self: $Class" + m.ParamTypes + ") -> " + m.ReturnType + ", ";
+						metamethods += m.Name + ": " + m.Generics + "(self: $Class" + m.ParamTypes + ") -> " + m.ReturnType + ", ";
 				// A subclass's instances are its base's and its own.
 				h.Types = "export type $Class = " + (derived ? "typeof(" + info.Base + ".__instance) & " : std::string()) +
 					"typeof(setmetatable({} :: { " + members.Fields + "}, {} :: { __index: typeof($Class), " + metamethods + "}))";
@@ -2367,7 +2699,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.27.0";
+		return "0.28.0";
 	}
 
 } // namespace cluau

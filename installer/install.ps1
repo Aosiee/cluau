@@ -44,15 +44,25 @@ $ProgIdKey = 'HKCU:\Software\Classes\cluau.script'
 function Say([string]$Message) { Write-Host "cluau: $Message" }
 function Fail([string]$Message) { throw "cluau: $Message" }
 
-# The user's PATH entries, without empty ones.
+# The user's PATH entries, without empty ones, read from the registry as
+# written: an entry such as %USERPROFILE%\bin keeps its variable.
 function Get-UserPath {
-    $value = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $key = Get-Item 'HKCU:\Environment'
+    $value = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     if (-not $value) { return @() }
     return @($value -split ';' | Where-Object { $_ -ne '' })
 }
 
 function Set-UserPath([string[]]$Entries) {
-    [Environment]::SetEnvironmentVariable('Path', ($Entries -join ';'), 'User')
+    Set-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -Value ($Entries -join ';') -Type ExpandString
+    # Setting (then clearing) a variable through .NET tells running programs,
+    # Explorer among them, that the environment changed.
+    [Environment]::SetEnvironmentVariable('CLUAU_INSTALLER', '1', 'User')
+    [Environment]::SetEnvironmentVariable('CLUAU_INSTALLER', $null, 'User')
+}
+
+function Test-InPath([string]$Entry, [string]$Dir) {
+    return (Test-SameDir $Entry $Dir) -or (Test-SameDir ([Environment]::ExpandEnvironmentVariables($Entry)) $Dir)
 }
 
 function Test-SameDir([string]$A, [string]$B) {
@@ -86,13 +96,25 @@ function Remove-PathExt {
 }
 
 if ($Uninstall) {
+    # Only what the installer put there goes; the directories go too once
+    # they are empty (the install directory may hold other things).
     $removed = $false
-    if (Test-Path $InstallDir) {
-        Remove-Item -Recurse -Force $InstallDir
+    $Command = Join-Path $BinDir 'cluau.exe'
+    if (Test-Path $Command) {
+        Remove-Item -Force $Command
         $removed = $true
     }
+    if (Test-Path $DocDir) {
+        Remove-Item -Recurse -Force $DocDir
+        $removed = $true
+    }
+    foreach ($dir in $BinDir, $InstallDir) {
+        if ((Test-Path $dir) -and -not (Get-ChildItem -Force $dir | Select-Object -First 1)) {
+            Remove-Item -Force $dir
+        }
+    }
     $entries = Get-UserPath
-    $kept = @($entries | Where-Object { -not (Test-SameDir $_ $BinDir) })
+    $kept = @($entries | Where-Object { -not (Test-InPath $_ $BinDir) })
     if ($kept.Count -ne $entries.Count) {
         Set-UserPath $kept
         Say "removed $BinDir from your PATH"
@@ -191,7 +213,7 @@ if ($AssociateFiles -or $AddToPathExt) {
 }
 if ($AddToPathExt) { Add-PathExt }
 
-if (@(Get-UserPath | Where-Object { Test-SameDir $_ $BinDir }).Count -gt 0) {
+if (@(Get-UserPath | Where-Object { Test-InPath $_ $BinDir }).Count -gt 0) {
     Say "$BinDir is on your PATH: run ``cluau`` to start (in a new terminal)"
 } elseif ($NoModifyPath) {
     Say "$BinDir is not on your PATH: add it to use ``cluau`` by name"

@@ -2,6 +2,133 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.28.0: a full review, fixes and hardening
+
+A review of the whole of cluau, with each fix covered by a test. Some
+behaviour changes on purpose; those are marked.
+
+Language and tools:
+- A statement after a line ending in `x++`, `x--`, an optional type's `?`,
+  a generic's `>` or `...` was read as part of an expression (an `if` on
+  the next line became an if-expression); the converter had the same
+  rule.
+- Class field defaults keep their text: spaces inside strings, multi-line
+  values (and so the lines after them), comments, and function values.
+- `return` and `throw` inside `try` take a value that goes on to the next
+  line; `...` works inside `try` and `catch`; `static Name = function`
+  works; a `try` inside a `finally` cannot leave it; `throw` in a host
+  file no longer calls a local named `error`.
+- Comments: a line comment starting `//[[` no longer swallows the code
+  after it, and a block comment ending in `]` translates; comments inside
+  a method's parameter list are allowed.
+- Nested interpolated strings translate their operators; a string
+  continued with a backslash at a CRLF line end lexes; `try` and its `{`
+  may be on separate lines; `for (local i = ...)` works.
+- Very deep nesting is an error, not a crash.
+- `cluau fmt` keeps each line's own line ending and does not indent after
+  a generic's `>`.
+- `cluau convert`: a call whose table starts on the next line stays a call;
+  `function() do ... end end`, `until` before another statement, and
+  `throw`/`try` used as ordinary names convert correctly.
+- `cluau check` reports requiring a module the build leaves out, and
+  `cluau --help` lists the modules a build has.
+- A UTF-8 byte order mark at the start of a file is skipped.
+
+Language server, debugger and profiler:
+- The language server no longer crashes after a file whose class extends
+  another module's is closed; a "module not found" clears when the file
+  appears; built-in globals are not renamed; references without the
+  declaration drop the declaration, not a use; semantic tokens cover each
+  use of a local; position lookups no longer slow large files down; bad
+  messages get the protocol's error answers.
+- The debugger steps into and out of coroutines, answers the editor while
+  the script waits (breakpoints, pause, terminate), stops on each call of
+  a callback a C function makes, never stops past a file's end, pauses on
+  errors `coroutine.resume` catches, and `test` defaults to on for a
+  `*_test.cluau` program. Terminating is a clean exit.
+- `cluau profile` counts a wait in a standard module under the script's
+  line, names a module's top level, and refuses an unwritable `--folded`
+  file before running.
+
+Runtime and standard library:
+- `process.run` with a large `input` no longer deadlocks, and its timeout
+  holds while it writes; a Ctrl-C ends the program it runs. A program
+  reading the terminal stays in the terminal's process group.
+- SIGPIPE is ignored once for the process (and restored in each program
+  it starts) instead of around each call, which could end cluau when two
+  calls overlapped.
+- `child:write` waits in its own task, so a task reading the child's
+  output keeps running.
+- `@std/task`: a task whose blocking call finished at the wrong moment
+  could be dropped; a wait cut short by another task's error left later
+  waits returning at once; `task.wait` where a task cannot yield (a sort's
+  comparison, `db:transaction`) waits in place; many tasks no longer slow
+  each other down.
+- `@std/net`: sockets no longer block a write past its timeout; two
+  accepts waiting for one client no longer hang; a TLS server's handshake
+  happens on the connection's first read or write, so a slow client holds
+  up only itself (a failed one reads as a connection that ended);
+  `listen` checks the key file; `socket:readLine(limit)` refuses a line
+  longer than `limit` bytes.
+- `@std/server`: request smuggling closed off (Transfer-Encoding with
+  Content-Length, codings other than chunked, malformed lengths and chunk
+  sizes are 400s); a body that ends early never reaches the handler;
+  header lines and heads are limited (431); `Expect: 100-continue` is
+  answered; response headers with CR or LF are refused; a failed accept
+  is retried instead of ending the server; `close()` closes idle
+  keep-alive connections; dotfiles and paths with NUL are not served;
+  `/users/a%2Fb` matches `/users/:id`.
+- `@std/websocket`: a frame cut short ends the connection instead of
+  arriving empty; the protocol's rules are checked (masking, reserved bits
+  and opcodes, control frames, UTF-8 text, the message size); IPv6 hosts
+  keep their brackets; masking is about four times faster.
+- `@std/tar`: names over 100 bytes that cannot be split are written as PAX
+  records (this crashed); GNU long link names are read; devices, FIFOs and
+  other special entries are never extracted; input that is not a tar
+  archive is an error. `@std/tar` and `@std/websocket` load in builds
+  without `@std/compress` or `@std/crypto`.
+- `@std/url`: a `Url` keeps its path as written (`rawPath`), so `%2F`
+  survives a round trip; `resolve` keeps empty path segments and an empty
+  query.
+- Packages: a repository or ref starting with `-` is refused and git is
+  always given `--` before addresses (a crafted dependency could run a
+  command); `cluau add` handles `user@` in addresses; package names are
+  checked; a failed `add` leaves `cluau.toml` as it was; manifests may hold
+  arrays; short commit ids resolve.
+- Behaviour changes: `db:run`, `query`, `first`, `rows` and `prepare`
+  refuse SQL with more than one statement (`db:exec` runs several);
+  `require` loads only `.cluau` and `.luau` files; `json.decode` refuses
+  numbers JSON does not allow (`01`, `1.`); zip entry names match case.
+- Smaller fixes: `json.encode(v, 4)` indents by four spaces; a lone
+  surrogate in JSON keeps the character after it; `time.parse` refuses
+  days a month does not have; `file:read(count)` reads in pieces;
+  `fs.walk` passes over a directory it cannot read; a command argument
+  holding NUL is refused; an uncaught error object's `__tostring` is used;
+  nested `@std/term` styles keep the outer one and `term.strip` removes
+  links; `regex.escape` escapes white space; `split` needs a limit of 1 or
+  more; gunzip passes over zero padding; SQLite stores whole numbers in its
+  integer range as integers and refuses NaN; `csv.encodeRecords` writes
+  `false`; `test.near` fails on NaN; `@std/args` reads `-inf` as flags
+  when they are declared.
+- mbedTLS starts when a script first uses it (`bench/compare.py`
+  compares two builds' start-up time).
+
+Build and installation:
+- Luau is fetched by its release archive's hash, like the other
+  libraries. Each library's option (`CLUAU_HTTP`, `CLUAU_CRYPTO`,
+  `CLUAU_SQLITE`, `CLUAU_REGEX`, `CLUAU_COMPRESS`) is documented, and a
+  build with any of them off passes its own tests and builds only the
+  fuzz targets it can run.
+- The exit-time race between the job threads and the job table (found by
+  ThreadSanitizer) is fixed.
+- `install.ps1 -Uninstall` removes only what it installed (it removed the
+  whole install directory), and the user's `PATH` keeps its `%VARIABLE%`
+  entries. `install.sh` adds and removes the `PATH` line of its own prefix
+  only, and makes a relative `--prefix` absolute.
+- The release workflow runs with read-only access except for the step
+  that publishes, and the marketplace tokens reach only the steps that
+  use them.
+
 ## 0.27.0: @std/term, @std/url and @std/tar
 
 - `@std/term`: whether a stream is a terminal, the terminal's size, and
@@ -21,6 +148,9 @@ Each release's notes. A release's tag message is its section here.
   of the script.
 - `@std/websocket`: WebSocket connections (`ws://`, `wss://`): text and
   binary messages, fragments joined, pings answered, the close handshake.
+- `install.ps1 -AddToPathExt` adds `.CLUAU` to the user's `PATHEXT`, so a
+  script on `PATH` runs by its name alone in cmd.exe and PowerShell
+  (`-Uninstall` takes it out again).
 - Fixes found by running the tests under the sanitizers and by fuzzing
   (the fuzz targets are in `tests/fuzz`):
   - `zip.create(...):finish()` leaked the archive's buffer.

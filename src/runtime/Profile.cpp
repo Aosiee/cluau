@@ -41,8 +41,16 @@ namespace cluau::runtime::detail {
 			size_t Function;
 			std::string Line; // file:line, for a Lua frame
 		};
-		std::vector<Frame> frames; // innermost first
+		struct Raw
+		{
+			bool C = false;
+			bool Std = false;
+			std::string Name, Chunk;
+			int Defined = 0, Line = 0;
+		};
+		std::vector<Raw> raw; // innermost first
 		lua_Debug ar{};
+		bool script = false; // a frame of the script's own
 		for (int level = 0; lua_getinfo(L, level, "sln", &ar); level++)
 		{
 			const bool c = ar.what && std::strcmp(ar.what, "C") == 0;
@@ -52,8 +60,34 @@ namespace cluau::runtime::detail {
 			if (!c && source[0] == '=')
 				continue;
 			const std::string chunk = source[0] == '@' ? source + 1 : source;
-			const std::string name = ar.name && *ar.name ? ar.name : c ? "(C function)" : "(anonymous)";
-			const std::string where = c ? "[C]" : chunk + ":" + std::to_string(ar.linedefined);
+			const bool std = !c && chunk.rfind("@std/", 0) == 0;
+			script = script || (!c && !std);
+			raw.push_back({ c, std, ar.name && *ar.name ? ar.name : "", chunk, ar.linedefined, ar.currentline });
+		}
+		// So do the standard modules written in cluau (@std/task's wait),
+		// as a C function does, under the script's code.
+		if (script)
+			raw.erase(std::remove_if(raw.begin(), raw.end(), [](const Raw& f) { return f.Std; }), raw.end());
+		std::vector<Frame> frames; // innermost first
+		for (size_t i = 0; i < raw.size(); i++)
+		{
+			const Raw& f = raw[i];
+			std::string name = !f.Name.empty() ? f.Name : f.C ? "(C function)" : "(anonymous)";
+			std::string where = f.C ? "[C]" : f.Chunk + ":" + std::to_string(f.Defined);
+			// A file's top level: the outermost Lua frame with no name, or
+			// a module's, which `require` runs.
+			if (!f.C && f.Name.empty())
+			{
+				const bool required = i + 1 < raw.size() && raw[i + 1].C && raw[i + 1].Name == "require";
+				bool outermost = true;
+				for (size_t outer = i + 1; outer < raw.size(); outer++)
+					outermost = outermost && raw[outer].C;
+				if (required || outermost)
+				{
+					name = "(top level)";
+					where = f.Chunk;
+				}
+			}
 			const std::string key = name + " " + where;
 			auto it = m_Index.find(key);
 			if (it == m_Index.end())
@@ -61,28 +95,10 @@ namespace cluau::runtime::detail {
 				it = m_Index.emplace(key, m_Functions.size()).first;
 				m_Functions.push_back({ name, where });
 			}
-			frames.push_back({ it->second, c ? std::string() : chunk + ":" + std::to_string(ar.currentline) });
+			frames.push_back({ it->second, f.C ? std::string() : f.Chunk + ":" + std::to_string(f.Line) });
 		}
 		if (frames.empty())
 			return;
-		// A file's top level: the outermost Lua frame with no name.
-		for (auto it = frames.rbegin(); it != frames.rend(); ++it)
-			if (m_Functions[it->Function].Where != "[C]")
-			{
-				Function& fn = m_Functions[it->Function];
-				if (fn.Name == "(anonymous)")
-				{
-					const std::string key = "(top level) " + fn.Where;
-					auto top = m_Index.find(key);
-					if (top == m_Index.end())
-					{
-						top = m_Index.emplace(key, m_Functions.size()).first;
-						m_Functions.push_back({ "(top level)", fn.Where.substr(0, fn.Where.rfind(':')) });
-					}
-					it->Function = top->second;
-				}
-				break;
-			}
 
 		m_Samples += ticks;
 		m_Functions[frames.front().Function].Self += ticks;

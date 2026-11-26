@@ -20,4 +20,9 @@ error	false	db:query: near "SELEC": syntax error
 file	kept	true
 read-only	false
 false	sqlite.cluau:97: db:query: the database is closed
+two statements	false	true
+rows kept	0
+nan	false
+big integer	integer
+closed inside	false	true
 exit: 0

@@ -22,4 +22,6 @@ false	compress.gzip: options.level is from 0
 false	compress.inflate: the data is not raw deflate
 false	compress.gunzip: the compressed data is damaged
 false	true
+cased	upper	lower	false
+level	false
 exit: 0

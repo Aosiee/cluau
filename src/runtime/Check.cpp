@@ -41,7 +41,8 @@ declare function __cluau_abstract(class: string, method: string): never
 		// `require("@std/<name>")` (the functions are Std.cpp's).
 		const std::map<std::string, std::string>& StdTypes()
 		{
-			static const std::map<std::string, std::string> modules = {
+			static const std::map<std::string, std::string> modules = [] {
+				std::map<std::string, std::string> all = {
 				{ "fs", R"LUAU(
 export type File = {
 	read: (self: File, count: number?) -> string?,
@@ -143,7 +144,7 @@ return m :: {
 				{ "json", R"LUAU(
 local m: any = nil
 return m :: {
-	encode: (value: unknown, pretty: (boolean | string)?) -> string,
+	encode: (value: unknown, pretty: (boolean | number | string)?) -> string,
 	decode: (text: string, options: { null: unknown }?) -> unknown,
 	null: unknown,
 	object: (<T>(value: T) -> T) & (() -> { [string]: unknown }),
@@ -169,7 +170,7 @@ export type Socket = {
 	remoteHost: string,
 	remotePort: number,
 	read: (self: Socket, count: number?) -> string?,
-	readLine: (self: Socket) -> string?,
+	readLine: (self: Socket, limit: number?) -> string?,
 	readAll: (self: Socket) -> string,
 	lines: (self: Socket) -> () -> string?,
 	write: (self: Socket, ...string) -> (),
@@ -380,7 +381,29 @@ return m :: {
 	fromParts: (parts: PartsGiven, options: Options?) -> number,
 }
 )LUAU" },
-			};
+				};
+				// A module this build leaves out is not typed: `cluau check`
+				// reports requiring it, as running the script would.
+				for (const char* name : {
+#ifndef CLUAU_HAS_CRYPTO
+						 "crypto",
+#endif
+#ifndef CLUAU_HAS_COMPRESS
+						 "compress", "zip",
+#endif
+#ifndef CLUAU_HAS_HTTP
+						 "http",
+#endif
+#ifndef CLUAU_HAS_REGEX
+						 "regex",
+#endif
+#ifndef CLUAU_HAS_SQLITE
+						 "sqlite",
+#endif
+						 "" })
+					all.erase(name);
+				return all;
+			}();
 			return modules;
 		}
 
@@ -393,7 +416,11 @@ return m :: {
 				return std::nullopt;
 			std::stringstream buffer;
 			buffer << in.rdbuf();
-			return buffer.str();
+			std::string text = buffer.str();
+			// A UTF-8 byte order mark is not code (the runtime skips it too).
+			if (text.rfind("\xEF\xBB\xBF", 0) == 0)
+				text.erase(0, 3);
+			return text;
 		}
 
 		// The lint warnings `--lint` reports: Luau's, without those the
@@ -583,6 +610,13 @@ return m :: {
 		{
 			std::vector<std::pair<std::string, std::string>> classNames; // printed type, class name
 			for (const auto& [moduleName, translation] : files.Translations)
+			{
+				// A module marked dirty since its check (it changed, or a
+				// module it requires did) can hold types of a module checked
+				// again since, which are freed: only modules checked as they
+				// are now are read.
+				if (frontend.isDirty(moduleName))
+					continue;
 				if (Luau::ModulePtr m = frontend.moduleResolver.getModule(moduleName))
 					for (const ClassInfo& c : translation.Classes)
 						if (auto it = m->exportedTypeBindings.find(c.Name); it != m->exportedTypeBindings.end())
@@ -594,6 +628,7 @@ return m :: {
 							if (printed != c.Name)
 								classNames.emplace_back(Plain(printed), c.Name);
 						}
+			}
 			std::sort(classNames.begin(), classNames.end(), [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
 			return classNames;
 		}
@@ -661,7 +696,17 @@ return m :: {
 		m->Frontend->markDirty(name);
 	}
 
-	void detail::Analysis::MarkDirty(const std::string& name) { m->Frontend->markDirty(name); }
+	void detail::Analysis::MarkDirty(const std::string& name)
+	{
+		m->Frontend->markDirty(name);
+		// A require that named no file may name this one now: the modules
+		// whose requires failed resolve them again.
+		std::set<std::string> unresolved;
+		for (const auto& [at, why] : m->Files.NotFound)
+			unresolved.insert(at.first);
+		for (const std::string& module : unresolved)
+			m->Frontend->markDirty(module);
+	}
 
 	std::optional<std::string> detail::Analysis::TextOf(const std::string& name) const
 	{

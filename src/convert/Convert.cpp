@@ -44,6 +44,104 @@ namespace cluau {
 			return at == std::string_view::npos ? s.size() : at + close.size();
 		}
 
+		// How deeply interpolated strings may nest in one another (the
+		// translator's limit; deeper ones are left as written).
+		constexpr int kMaxNesting = 200;
+
+		// The end (one past the closing backtick) of the interpolated string
+		// at i: its `{}` segments may hold strings, braces and other
+		// interpolated strings.
+		size_t InterpolatedEnd(std::string_view s, size_t i, int nesting = 0)
+		{
+			size_t j = i + 1;
+			int depth = 0;
+			while (j < s.size())
+			{
+				const char c = s[j];
+				if (depth == 0)
+				{
+					if (c == '\\')
+						j += 2;
+					else if (c == '`')
+						return j + 1;
+					else
+					{
+						depth = c == '{' ? 1 : 0;
+						j++;
+					}
+					continue;
+				}
+				if (c == '"' || c == '\'')
+				{
+					j++;
+					while (j < s.size() && s[j] != c && s[j] != '\n')
+						j += s[j] == '\\' ? 2 : 1;
+					j++;
+					continue;
+				}
+				if (c == '`' && nesting < kMaxNesting)
+				{
+					j = InterpolatedEnd(s, j, nesting + 1);
+					continue;
+				}
+				if (c == '{')
+					depth++;
+				else if (c == '}')
+					depth--;
+				j++;
+			}
+			return s.size();
+		}
+
+		// The `{expr}` segments of the interpolated string `text`: each
+		// expression's offset and length.
+		std::vector<std::pair<size_t, size_t>> Segments(std::string_view text)
+		{
+			std::vector<std::pair<size_t, size_t>> out;
+			size_t j = 1;
+			while (j + 1 < text.size())
+			{
+				if (text[j] == '\\')
+				{
+					j += 2;
+					continue;
+				}
+				if (text[j] != '{')
+				{
+					j++;
+					continue;
+				}
+				// The segment's closing brace (strings in it skipped).
+				size_t k = j + 1;
+				int depth = 1;
+				while (k < text.size() && depth > 0)
+				{
+					const char c = text[k];
+					if (c == '"' || c == '\'')
+					{
+						k++;
+						while (k < text.size() && text[k] != c && text[k] != '\n')
+							k += text[k] == '\\' ? 2 : 1;
+					}
+					else if (c == '`')
+					{
+						k = InterpolatedEnd(text, k);
+						continue;
+					}
+					else if (c == '{')
+						depth++;
+					else if (c == '}')
+						depth--;
+					k++;
+				}
+				if (depth != 0)
+					break;
+				out.push_back({ j + 1, k - 1 - (j + 1) });
+				j = k;
+			}
+			return out;
+		}
+
 		std::vector<Tok> Lex(std::string_view s)
 		{
 			static constexpr std::string_view kPunct3[] = { "...", "..=", "//=" };
@@ -91,10 +189,15 @@ namespace cluau {
 					t.K = Kind::String;
 					end = LongEnd(s, i, level);
 				}
-				else if (c == '"' || c == '\'' || c == '`')
+				else if (c == '`')
 				{
 					t.K = Kind::String;
-					while (end < s.size() && s[end] != c && (c == '`' || s[end] != '\n'))
+					end = InterpolatedEnd(s, i);
+				}
+				else if (c == '"' || c == '\'')
+				{
+					t.K = Kind::String;
+					while (end < s.size() && s[end] != c && s[end] != '\n')
 					{
 						if (s[end] != '\\')
 						{
@@ -165,8 +268,10 @@ namespace cluau {
 		class Converter
 		{
 		public:
-			explicit Converter(std::string_view src)
-				: m_Src(src)
+			// `expression`: the source is one expression (an interpolated
+			// string's segment), not a chunk.
+			explicit Converter(std::string_view src, bool expression = false, int nesting = 0)
+				: m_Src(src), m_Expression(expression), m_Nesting(nesting)
 			{
 				for (const Tok& t : Lex(src))
 					(t.K == Kind::Comment ? m_Comments : m_Toks).push_back(t);
@@ -185,6 +290,8 @@ namespace cluau {
 					}
 				}
 				m_Skip.assign(m_Toks.size(), false);
+				m_BodyStart.assign(m_Toks.size(), false);
+				MarkTypeEnds();
 			}
 
 			ConvertResult Run()
@@ -266,10 +373,12 @@ namespace cluau {
 			bool ExpressionContext(size_t i) const
 			{
 				if (i == 0)
-					return false;
+					return m_Expression;
 				const Tok& p = m_Toks[i - 1];
+				if (m_TypeEnd[i - 1] || m_BodyStart[i - 1])
+					return false;
 				if (p.K == Kind::Punct)
-					return !(p.Is(")") || p.Is("]") || p.Is("}") || p.Is(";"));
+					return !(p.Is(")") || p.Is("]") || p.Is("}") || p.Is(";") || p.Is("...") || p.Is("?"));
 				if (p.K == Kind::Name)
 				{
 					static constexpr std::string_view kExpr[] = { "return", "and", "or", "not", "in", "until", "if", "elseif", "while" };
@@ -280,6 +389,109 @@ namespace cluau {
 						return true;
 				}
 				return false;
+			}
+
+			// The ends of the types a statement can end with: a declaration's
+			// annotation, a type alias, a cast. (`local best: string?` then
+			// `if` is a statement, not an if-expression after an operator.)
+			void MarkTypeEnds()
+			{
+				m_TypeEnd.assign(m_Toks.size(), false);
+				auto mark = [&](size_t start) {
+					const size_t end = SkipType(start);
+					if (end != npos && end < m_Toks.size())
+						m_TypeEnd[end] = true;
+					return end;
+				};
+				for (size_t i = 0; i < m_Toks.size(); i++)
+				{
+					const Tok& t = m_Toks[i];
+					const bool member = i > 0 && (At(i - 1).Is(".") || At(i - 1).Is(":"));
+					if (t.Is("::"))
+						mark(i + 1);
+					else if (t.Is("type") && !member && At(i + 1).K == Kind::Name && (At(i + 2).Is("=") || At(i + 2).Is("<")))
+					{
+						size_t k = i + 2;
+						if (At(k).Is("<"))
+							k = SkipAngles(k) + 1;
+						if (At(k).Is("="))
+							mark(k + 1);
+					}
+					else if (t.Is("local") && !At(i + 1).Is("function"))
+					{
+						size_t j = i + 1;
+						while (At(j).K == Kind::Name)
+						{
+							j++;
+							if (At(j).Is(":"))
+							{
+								const size_t end = mark(j + 1);
+								if (end == npos)
+									break;
+								j = end + 1;
+							}
+							if (!At(j).Is(","))
+								break;
+							j++;
+						}
+					}
+				}
+			}
+
+			static bool IsKeyword(std::string_view w)
+			{
+				static constexpr std::string_view kWords[] = { "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
+					"local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while", "continue" };
+				return std::find(std::begin(kWords), std::end(kWords), w) != std::end(kWords);
+			}
+
+			// Token i can be an expression's last token (a value, a closing
+			// bracket, a type a declaration ends with).
+			bool EndsOperand(size_t i) const
+			{
+				const Tok& t = At(i);
+				if (t.K == Kind::Number || t.K == Kind::String || m_TypeEnd[i])
+					return true;
+				if (t.K == Kind::Name)
+					return !IsKeyword(t.Text) || t.Is("end") || t.Is("true") || t.Is("false") || t.Is("nil");
+				return t.Is(")") || t.Is("]") || t.Is("}") || t.Is("...");
+			}
+
+			// A statement can start at token i.
+			bool StatementStart(size_t i) const
+			{
+				if (i == 0)
+					return !m_Expression;
+				const Tok& p = At(i - 1);
+				return p.Is(";") || p.Is("then") || p.Is("do") || p.Is("else") || p.Is("repeat") || p.Is("break") || p.Is("continue") ||
+					m_BodyStart[i - 1] || EndsOperand(i - 1);
+			}
+
+			// The `{expr}` segments of an interpolated string convert as
+			// expressions (their operators and if-expressions take cluau's
+			// spelling, which the translator reads back).
+			void Interpolated(const Tok& t)
+			{
+				if (m_Nesting >= kMaxNesting)
+					return;
+				std::string out;
+				size_t at = 0;
+				bool changed = false;
+				for (const auto& [offset, length] : Segments(t.Text))
+				{
+					const std::string_view segment = t.Text.substr(offset, length);
+					ConvertResult r = Converter(segment, true, m_Nesting + 1).Run();
+					for (const Diagnostic& d : r.Diagnostics)
+						Error(t, d.Message, d.Warning);
+					out.append(t.Text.substr(at, offset - at));
+					out += r.Cluau;
+					changed = changed || r.Cluau != segment;
+					at = offset + length;
+				}
+				if (!changed)
+					return;
+				out.append(t.Text.substr(at));
+				Replace(t, out);
 			}
 
 			// The condition between `CondStart` and `closer` gets parentheses
@@ -305,6 +517,21 @@ namespace cluau {
 						Replace(t, "~/");
 					else if (t.Is("//="))
 						Replace(t, "~/=");
+					else if (t.Is("{") && i > 0 && At(i - 1).Line != t.Line && m_Match[i] != npos && EndsOperand(i - 1) && !m_TypeEnd[i - 1] &&
+						!At(i - 1).Is("..."))
+					{
+						// `f` and `{ ... }` on the next line is Luau's call; in cluau
+						// a `{` starting a line after a finished statement is a
+						// block, so the call gets its parentheses (the `(` on the
+						// callee's line: one starting a line would be ambiguous).
+						Insert(At(i - 1).End, "(");
+						Insert(At(m_Match[i]).End, ")");
+					}
+					return;
+				}
+				if (t.K == Kind::String && t.Text.front() == '`')
+				{
+					Interpolated(t);
 					return;
 				}
 				if (t.K != Kind::Name)
@@ -389,7 +616,7 @@ namespace cluau {
 						// `local f do ... end`: `f {` would read as call sugar.
 						const Tok& prev = At(i - 1);
 						if (i > 0 && prev.Line == t.Line && (prev.K != Kind::Punct || prev.Is(")") || prev.Is("]") || prev.Is("}") || prev.Is("..."))
-							&& !(prev.Is("then") || prev.Is("else") || prev.Is("do") || prev.Is("repeat")))
+							&& !(prev.Is("then") || prev.Is("else") || prev.Is("do") || prev.Is("repeat")) && !m_BodyStart[i - 1])
 						{
 							Replace(t, "; {");
 							return;
@@ -438,7 +665,7 @@ namespace cluau {
 				}
 				else if (w == "let" || w == "const" || w == "class")
 					Error(t, "'" + std::string(w) + "' is a cluau keyword: rename it (left as written)");
-				else if ((w == "throw" || w == "try") && (i == 0 || (!At(i - 1).Is(".") && !At(i - 1).Is(":"))) && At(i + 1).Line == t.Line &&
+				else if ((w == "throw" || w == "try") && StatementStart(i) && At(i + 1).Line == t.Line &&
 					(At(i + 1).Is("{") || (w == "throw" && (At(i + 1).Is("(") || At(i + 1).K == Kind::String))))
 					Error(t, "a call to '" + std::string(w) + "' here reads as cluau's " + std::string(w) +
 						" statement: rename the function (left as written)");
@@ -470,6 +697,7 @@ namespace cluau {
 					if (end != npos)
 						last = end;
 				}
+				m_BodyStart[last] = true;
 				Insert(At(last).End, " {");
 			}
 
@@ -487,33 +715,42 @@ namespace cluau {
 				return m_Toks.size() - 1;
 			}
 
-			// A type annotation starting at i: the index of its last token.
+			// A type annotation starting at i: the index of its last token. A
+			// union, or a chain of function types (`() -> () -> T`), is a loop
+			// rather than nested calls, however long it is.
 			size_t SkipType(size_t i) const
 			{
-				if (At(i).Is("|") || At(i).Is("&"))
-					i++;
-				size_t last = SkipTypeMember(i);
-				while (last != npos && (At(last + 1).Is("|") || At(last + 1).Is("&")))
-					last = SkipTypeMember(last + 2);
-				return last;
+				for (;;)
+				{
+					if (At(i).Is("|") || At(i).Is("&"))
+						i++;
+					if (At(i).Is("<"))
+						i = SkipAngles(i) + 1; // a generic function type
+					if (At(i).Is("..."))
+					{
+						i++; // a type pack: `...number`
+						continue;
+					}
+					const size_t last = SkipTypeMember(i);
+					if (last == npos)
+						return npos;
+					if ((At(i).Is("(") && At(last + 1).Is("->")) || At(last + 1).Is("|") || At(last + 1).Is("&"))
+					{
+						i = last + 2;
+						continue;
+					}
+					return last;
+				}
 			}
 
 			size_t SkipTypeMember(size_t i) const
 			{
 				size_t last = npos;
 				const Tok& t = At(i);
-				if (t.Is("<"))
-					return SkipTypeMember(SkipAngles(i) + 1); // a generic function type
 				if (t.Is("(") && m_Match[i] != npos)
-				{
 					last = m_Match[i];
-					if (At(last + 1).Is("->"))
-						return SkipType(last + 2);
-				}
 				else if (t.Is("{") && m_Match[i] != npos)
 					last = m_Match[i];
-				else if (t.Is("..."))
-					return SkipType(i + 1);
 				else if (t.Is("typeof") && At(i + 1).Is("(") && m_Match[i + 1] != npos)
 					last = m_Match[i + 1];
 				else if (t.K == Kind::String)
@@ -558,7 +795,12 @@ namespace cluau {
 					// `if` it starts is counted as a block inside it).
 					if (depth == 0 && blocks == 0 && j > first)
 					{
-						bool stop = k.Is(";") || k.Line != m_Toks[j - 1].Line;
+						// A name or a number right after a finished operand starts
+						// the next statement (`until n > 2 print(n)`).
+						bool stop = k.Is(";") || k.Line != m_Toks[j - 1].Line ||
+							(((k.K == Kind::Name && !(k.Is("and") || k.Is("or") || k.Is("then") || k.Is("else") || k.Is("elseif"))) ||
+								 k.K == Kind::Number) &&
+								EndsOperand(j - 1));
 						for (std::string_view w : kStop)
 							stop = stop || (k.K == Kind::Name && k.Text == w && !(w == "if" && ExpressionContext(j))
 								&& !((w == "else" || w == "elseif") && ifExprs > 0));
@@ -619,6 +861,10 @@ namespace cluau {
 			}
 
 			std::string_view m_Src;
+			bool m_Expression = false;
+			int m_Nesting = 0; // interpolated strings around this source
+			std::vector<bool> m_TypeEnd;   // the last token of a type a statement can end with (`local x: T?`)
+			std::vector<bool> m_BodyStart; // a function signature's last token (its body follows)
 			std::vector<Tok> m_Toks;
 			std::vector<Tok> m_Comments;
 			std::vector<size_t> m_Match;
@@ -641,18 +887,35 @@ namespace cluau {
 		return Converter(luau).Run();
 	}
 
-	std::string VerifyConversion(std::string_view luau, std::string_view converted)
-	{
-		const TranslateResult back = Translate(converted);
-		for (const Diagnostic& d : back.Diagnostics)
-			if (!d.Warning)
-				return "line " + std::to_string(d.At.Begin.Line + 1) + ": the conversion does not translate: " + d.Message;
-		auto normalised = [](std::string_view text) {
-			std::vector<Tok> out;
-			for (const Tok& t : Lex(text))
+	namespace {
+
+		// The tokens a round trip compares: no comments, parentheses or `;`,
+		// and an interpolated string's segments as their own tokens (the
+		// translator respells the operators in them).
+		void Normalise(std::string_view text, std::vector<Tok>& out, int line = -1, int nesting = 0)
+		{
+			for (Tok t : Lex(text))
 			{
+				if (line >= 0)
+					t.Line = line;
 				if (t.K == Kind::Comment || t.Is("(") || t.Is(")") || t.Is(";"))
 					continue;
+				if (t.K == Kind::String && t.Text.front() == '`' && nesting < kMaxNesting)
+				{
+					size_t at = 0;
+					for (const auto& [offset, length] : Segments(t.Text))
+					{
+						Tok literal = t;
+						literal.Text = t.Text.substr(at, offset - at);
+						out.push_back(literal);
+						Normalise(t.Text.substr(offset, length), out, t.Line, nesting + 1);
+						at = offset + length;
+					}
+					Tok literal = t;
+					literal.Text = t.Text.substr(at);
+					out.push_back(literal);
+					continue;
+				}
 				if (t.Is("not") && !out.empty() && out.back().Is("not"))
 				{
 					out.pop_back();
@@ -667,10 +930,25 @@ namespace cluau {
 				}
 				out.push_back(t);
 			}
-			return out;
-		};
-		const std::vector<Tok> a = normalised(luau);
-		const std::vector<Tok> b = normalised(back.Luau);
+		}
+
+	} // namespace
+
+	std::string VerifyConversion(std::string_view luau, std::string_view converted)
+	{
+		const TranslateResult back = Translate(converted);
+		for (const Diagnostic& d : back.Diagnostics)
+			if (!d.Warning)
+				return "line " + std::to_string(d.At.Begin.Line + 1) + ": the conversion does not translate: " + d.Message;
+		// A host's translation takes Luau's `error` on its first line (for
+		// throw and try): not part of the round trip.
+		std::string_view translated = back.Luau;
+		constexpr std::string_view kRaiseHead = "local __cluau_error = error; ";
+		if (translated.substr(0, kRaiseHead.size()) == kRaiseHead)
+			translated.remove_prefix(kRaiseHead.size());
+		std::vector<Tok> a, b;
+		Normalise(luau, a);
+		Normalise(translated, b);
 		for (size_t i = 0; i < std::max(a.size(), b.size()); i++)
 		{
 			const std::string_view x = i < a.size() ? a[i].Text : "<end>";

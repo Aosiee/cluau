@@ -191,14 +191,27 @@ namespace cluau::runtime::detail {
 			const fs::path dir = P(L, 1);
 			std::error_code ec;
 			std::vector<std::string> files;
-			for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+			// A directory under it that cannot be read is passed over (as
+			// fs.glob does); only the starting one failing is an error.
+			fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+			if (ec)
+				Fail(L, "fs.walk", "cannot walk", dir, ec.message());
+			for (fs::recursive_directory_iterator end; it != end;)
 			{
 				std::error_code fileEc;
 				if (it->is_regular_file(fileEc))
 					files.push_back(S(it->path()));
+				it.increment(ec);
+				if (ec)
+				{
+					ec.clear();
+					if (it == end)
+						break;
+					it.pop(ec);
+					if (ec)
+						break;
+				}
 			}
-			if (ec)
-				Fail(L, "fs.walk", "cannot walk", dir, ec.message());
 			std::sort(files.begin(), files.end());
 			PushStrings(L, files);
 			return 1;
@@ -499,16 +512,25 @@ namespace cluau::runtime::detail {
 				return 1;
 			}
 			const double n = luaL_checknumber(L, 2);
-			if (n < 0)
-				luaL_error(L, "file:read: the count is negative");
-			out.resize((size_t)n);
-			const size_t got = std::fread(out.data(), 1, out.size(), f);
-			if (got == 0 && n > 0)
+			if (!(n >= 0) || n != std::floor(n))
+				luaL_argerror(L, 2, "a whole number of bytes");
+			// Read in pieces: a large count costs only what the file holds.
+			char buffer[8192];
+			const size_t want = n > 9e15 ? (size_t)9e15 : (size_t)n;
+			while (out.size() < want)
+			{
+				const size_t piece = std::min<size_t>(want - out.size(), sizeof(buffer));
+				const size_t got = std::fread(buffer, 1, piece, f);
+				out.append(buffer, got);
+				if (got < piece)
+					break;
+			}
+			if (out.empty() && want > 0)
 			{
 				lua_pushnil(L);
 				return 1;
 			}
-			lua_pushlstring(L, out.data(), got);
+			lua_pushlstring(L, out.data(), out.size());
 			return 1;
 		}
 
@@ -903,8 +925,12 @@ namespace cluau::runtime::detail {
 			SpawnRequest request;
 			if (lua_type(L, 1) == LUA_TSTRING)
 			{
+				size_t len = 0;
+				const char* line = lua_tolstring(L, 1, &len);
+				if (std::memchr(line, 0, len))
+					luaL_error(L, "%s: the command line holds a NUL byte", fn);
 				request.Shell = true;
-				request.Args.push_back(lua_tostring(L, 1));
+				request.Args.push_back(std::string(line, len));
 			}
 			else if (lua_type(L, 1) == LUA_TTABLE)
 			{
@@ -914,7 +940,11 @@ namespace cluau::runtime::detail {
 					lua_rawgeti(L, 1, i);
 					if (!lua_isstring(L, -1))
 						luaL_error(L, "%s: argument %d of the command is a %s, not a string", fn, i, luaL_typename(L, -1));
-					request.Args.push_back(lua_tostring(L, -1));
+					size_t len = 0;
+					const char* arg = lua_tolstring(L, -1, &len);
+					if (std::memchr(arg, 0, len))
+						luaL_error(L, "%s: argument %d of the command holds a NUL byte (a program cannot be given one)", fn, i);
+					request.Args.push_back(std::string(arg, len));
 					lua_pop(L, 1);
 				}
 				if (request.Args.empty())
@@ -1083,19 +1113,28 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// A job: a child that is slow to read (or a task reading its output
+		// meanwhile) must not stop the script.
 		int ChildWrite(lua_State* L)
 		{
-			Child& child = CheckChild(L);
+			std::shared_ptr<Child> child = SharedChild(L, 1);
+			std::string text;
 			const int n = lua_gettop(L);
 			for (int i = 2; i <= n; i++)
 			{
 				size_t len = 0;
-				const char* text = luaL_checklstring(L, i, &len);
-				std::string why;
-				if (!child.Write(std::string(text, len), why))
-					luaL_error(L, "child:write: %s", why.c_str());
+				const char* part = luaL_checklstring(L, i, &len);
+				text.append(part, len);
 			}
-			return 0;
+			return Await(L, [child, text = std::move(text)]() -> JobResult {
+				std::string why;
+				const bool ok = child->Write(text, why);
+				return [ok, why](lua_State* L) {
+					if (!ok)
+						luaL_error(L, "child:write: %s", why.c_str());
+					return 0;
+				};
+			});
 		}
 
 		int ChildCloseInput(lua_State* L)
@@ -1444,6 +1483,14 @@ namespace cluau::runtime::detail {
 			tm.tm_mday = digits(2);
 			if (tm.tm_mon < 0 || tm.tm_mon > 11 || tm.tm_mday < 1 || tm.tm_mday > 31)
 				fail("the month or the day is out of range");
+			{
+				// The day exists in that month (February 29th in leap years only).
+				const int year = tm.tm_year + 1900;
+				const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+				const int days[] = { 31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+				if (tm.tm_mday > days[tm.tm_mon])
+					fail("the day is not in that month");
+			}
 			double fraction = 0;
 			bool hasTime = false, hasOffset = false;
 			int offset = 0;
@@ -1547,7 +1594,9 @@ namespace cluau::runtime::detail {
 		int Field(lua_State* L, int table, const char* name, int fallback)
 		{
 			lua_getfield(L, table, name);
-			const int value = lua_isnil(L, -1) ? fallback : (int)luaL_checknumber(L, -1);
+			if (!lua_isnil(L, -1) && lua_type(L, -1) != LUA_TNUMBER)
+				luaL_error(L, "time.fromParts: parts.%s is a number (got %s)", name, luaL_typename(L, -1));
+			const int value = lua_isnil(L, -1) ? fallback : (int)lua_tonumber(L, -1);
 			lua_pop(L, 1);
 			return value;
 		}
@@ -1786,8 +1835,16 @@ namespace cluau::runtime::detail {
 		int JsonEncodeFn(lua_State* L)
 		{
 			luaL_checkany(L, 1);
+			// `pretty`: true (two spaces), a number of spaces, or the indent itself.
 			std::string indent;
-			if (lua_isstring(L, 2))
+			if (lua_type(L, 2) == LUA_TNUMBER)
+			{
+				const double spaces = lua_tonumber(L, 2);
+				if (spaces < 0 || spaces > 16 || spaces != std::floor(spaces))
+					luaL_argerror(L, 2, "a number of spaces from 0 to 16");
+				indent.assign((size_t)spaces, ' ');
+			}
+			else if (lua_type(L, 2) == LUA_TSTRING)
 				indent = lua_tostring(L, 2);
 			else if (lua_toboolean(L, 2))
 				indent = "  ";
@@ -1894,9 +1951,16 @@ namespace cluau::runtime::detail {
 										   m_Text[m_Pos] == 'E' || m_Text[m_Pos] == '+' || m_Text[m_Pos] == '-'))
 					m_Pos++;
 				const std::string text(m_Text + start, m_Pos - start);
+				// JSON's own form: no leading zero (01), and digits on both sides
+				// of a point (1., .5); strtod alone takes more.
+				const size_t digits = text[0] == '-' ? 1 : 0;
+				const size_t point = text.find_first_of(".eE");
+				const bool leadingZero = text.size() > digits + 1 && text[digits] == '0' && std::isdigit((unsigned char)text[digits + 1]);
+				const bool badPoint = point != std::string::npos && text[point] == '.' &&
+					(point == digits || point + 1 >= text.size() || !std::isdigit((unsigned char)text[point + 1]));
 				char* end = nullptr;
 				const double d = std::strtod(text.c_str(), &end);
-				if (end != text.c_str() + text.size())
+				if (end != text.c_str() + text.size() || leadingZero || badPoint || text.size() == digits || !std::isdigit((unsigned char)text[digits]))
 				{
 					m_Pos = start;
 					Error("malformed number");
@@ -1985,10 +2049,13 @@ namespace cluau::runtime::detail {
 						unsigned cp = Hex4();
 						if (cp >= 0xD800 && cp <= 0xDBFF && m_Len - m_Pos >= 6 && m_Text[m_Pos] == '\\' && m_Text[m_Pos + 1] == 'u')
 						{
+							const size_t at = m_Pos;
 							m_Pos += 2;
 							const unsigned low = Hex4();
 							if (low >= 0xDC00 && low <= 0xDFFF)
 								cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+							else
+								m_Pos = at; // not its pair: the next escape is read on its own
 						}
 						Utf8(cp, out);
 						break;
@@ -2265,10 +2332,16 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_SQLITE
 										 + ", @std/sqlite"
 #endif
-										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv";
+										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv, @std/test";
 		return names.c_str();
 	}
 
 	void SetExitHook(void (*hook)(int code)) { g_ExitHook = hook; }
 
 } // namespace cluau::runtime::detail
+
+namespace cluau::runtime {
+
+	const char* StandardModules() { return detail::StdNames(); }
+
+} // namespace cluau::runtime

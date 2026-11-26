@@ -35,14 +35,14 @@ namespace cluau {
 
 		// Starts a line that continues the one before: a member access, a
 		// method call, or a binary operator (not one that can begin an
-		// expression, such as `-` or `!`).
+		// expression, such as `-` or `!`; Luau has no unary `+`).
 		bool ContinuesLine(const Token& t)
 		{
 			if (t.Kind == TokenKind::Name)
 				return t.Is("and") || t.Is("or");
 			if (t.Kind != TokenKind::Op)
 				return false;
-			static constexpr const char* kOps[] = { ".", ":", "..", "*", "/", "%", "^", "==", "!=", "~=", "<=", ">=", "&&", "||", "~/" };
+			static constexpr const char* kOps[] = { ".", ":", "..", "+", "*", "/", "%", "^", "==", "!=", "~=", "<=", ">=", "&&", "||", "~/" };
 			for (const char* op : kOps)
 				if (t.Text == op)
 					return true;
@@ -66,20 +66,31 @@ namespace cluau {
 			return result;
 		}
 
-		// The lines, and the line break the file uses.
-		const bool crlf = source.find("\r\n") != std::string_view::npos;
+		// The lines, and each one's line break: every line keeps its own
+		// (a CRLF in a long string is part of the string), and a last line
+		// that had none gets the one most lines use.
 		std::vector<std::string_view> lines;
+		std::vector<uint8_t> crlf;
+		size_t crlfCount = 0;
 		for (size_t start = 0;;)
 		{
 			const size_t nl = source.find('\n', start);
 			std::string_view line = source.substr(start, nl == std::string_view::npos ? std::string_view::npos : nl - start);
-			if (!line.empty() && line.back() == '\r')
+			const bool cr = nl != std::string_view::npos && !line.empty() && line.back() == '\r';
+			if (cr)
+			{
 				line.remove_suffix(1);
+				crlfCount++;
+			}
 			lines.push_back(line);
+			crlf.push_back(cr ? 1 : 0);
 			if (nl == std::string_view::npos)
 				break;
 			start = nl + 1;
 		}
+		const bool mostlyCrlf = crlfCount * 2 > lines.size() - 1;
+		if (source.find('\n') == std::string_view::npos || source.back() != '\n')
+			crlf.back() = mostlyCrlf ? 1 : 0;
 
 		// Each line's tokens, and whether a token spanning lines covers its
 		// start (left as written) or its end (its trailing text is the token's).
@@ -99,6 +110,40 @@ namespace cluau {
 					insideAtStart[l + 1] = 1;
 			}
 		}
+
+		// The `>` tokens that close a generic's `<` (`Array<number>`): a
+		// line ending in one is finished, not waiting for a comparison's
+		// right side. A generic's `<` follows its name with no space; a `>`
+		// closes the latest one at its bracket depth.
+		std::vector<uint8_t> genericClose(tokens.size(), 0);
+		{
+			std::vector<std::pair<size_t, int>> angles; // an open `<`'s token and bracket depth
+			int depth = 0;
+			const Token* prev = nullptr;
+			for (size_t k = 0; k < tokens.size(); k++)
+			{
+				const Token& t = tokens[k];
+				if (t.IsComment())
+					continue;
+				if (IsOpener(t))
+					depth++;
+				else if (IsCloser(t))
+				{
+					depth--;
+					while (!angles.empty() && angles.back().second > depth)
+						angles.pop_back();
+				}
+				else if (t.Is("<") && prev && prev->Kind == TokenKind::Name && prev->End == t.Begin)
+					angles.push_back({ k, depth });
+				else if (t.Is(">") && !angles.empty() && angles.back().second == depth)
+				{
+					angles.pop_back();
+					genericClose[k] = 1;
+				}
+				prev = &t;
+			}
+		}
+		auto awaitsOperand = [&](const Token* t) { return t && AwaitsOperand(*t) && !genericClose[(size_t)(t - tokens.data())]; };
 
 		struct Open
 		{
@@ -138,7 +183,7 @@ namespace cluau {
 					// A continued statement: one level more, unless a bracket the
 					// line before opened already gives it one.
 					else if (lead && !lead->IsComment() && !(!stack.empty() && stack.back().Line == previousLine && previousLast) &&
-						((previousLast && AwaitsOperand(*previousLast)) || ContinuesLine(*lead) ||
+						(awaitsOperand(previousLast) || ContinuesLine(*lead) ||
 							(lead->Is("else") && previousLast && !previousLast->Is("}"))))
 						level += 1;
 					std::string line;
@@ -179,11 +224,10 @@ namespace cluau {
 		// No blank lines after the last, one line break at the end.
 		while (!out.empty() && out.back().empty())
 			out.pop_back();
-		const char* nl = crlf ? "\r\n" : "\n";
-		for (const std::string& line : out)
+		for (size_t l = 0; l < out.size(); l++)
 		{
-			result.Text += line;
-			result.Text += nl;
+			result.Text += out[l];
+			result.Text += crlf[l] ? "\r\n" : "\n";
 		}
 		result.Changed = result.Text != source;
 		return result;

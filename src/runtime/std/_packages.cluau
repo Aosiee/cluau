@@ -14,15 +14,24 @@ const kLock = "cluau.lock"
 const kModules = "cluau_modules"
 const kMarker = ".cluau-commit"
 
-type Value = string | number | boolean | { [string]: Value }
+type Value = string | number | boolean | { [string]: Value } | { Value }
 type Table = { [string]: Value }
 
 // A dependency as cluau.toml gives it, and as cluau.lock pins it.
 type Dependency = { name: string, git: string, ref: string, kind: string }
 type Locked = { name: string, git: string, ref: string, commit: string, via: string }
 
+// What a failure puts back before cluau exits (cluau.toml as it was before
+// an add that did not complete).
+let undo: (() -> ())? = nil
+
 function Fail(message: string): never {
 	io.writeError(`cluau: {message}\n`)
+	if (undo != nil) {
+		const restore = undo
+		undo = nil
+		pcall(restore)
+	}
 	return process.exit(1)
 }
 
@@ -32,17 +41,38 @@ function Say(message: string) {
 
 // ---- TOML (the part of it cluau.toml uses) --------------------------------
 
+// The error a value that goes on past its line raises: the next line is
+// added and the value read again.
+const kUnfinished = "an unfinished value"
+
 function ParseString(text: string, at: number): (string, number) {
 	const quote = string.sub(text, at, at)
+	// """...""" and '''...''': a string that may run over several lines (a
+	// line break straight after the opening quotes is not part of it).
+	const triple = string.sub(text, at, at + 2) == string.rep(quote, 3)
 	const out: { string } = {}
-	let i = at + 1
+	let i = at + (if (triple) 3 else 1)
+	if (triple && string.sub(text, i, i) == "\n") {
+		i += 1
+	}
 	while (i <= #text) {
 		const c = string.sub(text, i, i)
-		if (c == quote) {
+		if (triple && string.sub(text, i, i + 2) == string.rep(quote, 3)) {
+			return table.concat(out), i + 3
+		}
+		if (!triple && c == quote) {
 			return table.concat(out), i + 1
+		}
+		if (!triple && c == "\n") {
+			break
 		}
 		if (c == "\\" && quote == "\"") {
 			const e = string.sub(text, i + 1, i + 1)
+			if (triple && string.find(e, "^%s") != nil) {
+				// A backslash ending a line: the line break and the spaces after it go.
+				i = string.find(text, "[^%s]", i + 1) or #text + 1
+				continue
+			}
 			const escapes: { [string]: string } = { n = "\n", t = "\t", r = "\r", ["\\"] = "\\", ["\""] = "\"" }
 			table.insert(out, escapes[e] or e)
 			i += 2
@@ -51,7 +81,7 @@ function ParseString(text: string, at: number): (string, number) {
 			i += 1
 		}
 	}
-	error("an unterminated string", 0)
+	error(if (triple) kUnfinished else "an unterminated string", 0)
 }
 
 function SkipSpace(text: string, at: number): number {
@@ -62,11 +92,52 @@ function SkipSpace(text: string, at: number): number {
 	return i
 }
 
+// Spaces, line breaks and comments (between an array's values).
+function SkipBlank(text: string, at: number): number {
+	let i = at
+	while (i <= #text) {
+		const c = string.sub(text, i, i)
+		if (c == "#") {
+			i = string.find(text, "\n", i, true) or #text + 1
+		} else if (string.find(c, "^%s") == nil) {
+			break
+		} else {
+			i += 1
+		}
+	}
+	return i
+}
+
 function ParseValue(text: string, at: number): (Value, number) {
 	const i = SkipSpace(text, at)
 	const c = string.sub(text, i, i)
 	if (c == "\"" || c == "'") {
 		return ParseString(text, i)
+	}
+	if (c == "[") {
+		const array: { Value } = {}
+		let j = i + 1
+		while (true) {
+			j = SkipBlank(text, j)
+			if (j > #text) {
+				error(kUnfinished, 0)
+			}
+			if (string.sub(text, j, j) == "]") {
+				return array, j + 1
+			}
+			const value, after = ParseValue(text, j)
+			table.insert(array, value)
+			j = SkipBlank(text, after)
+			if (j > #text) {
+				error(kUnfinished, 0)
+			}
+			const d = string.sub(text, j, j)
+			if (d == ",") {
+				j += 1
+			} else if (d != "]") {
+				error("expected ',' or ']' in an array", 0)
+			}
+		}
 	}
 	if (c == "{") {
 		const inline: Table = {}
@@ -97,29 +168,38 @@ function ParseValue(text: string, at: number): (Value, number) {
 			j += 1
 		}
 	}
+	// A date or a time (1979-05-27, 07:32:00, 1979-05-27T07:32:00Z): kept as
+	// its text.
+	const date = string.match(text, "^%d%d%d%d%-%d%d%-%d%d[T ]%d%d:%d%d[%d:%.]*[Z%d:+%-]*", i)
+		or string.match(text, "^%d%d%d%d%-%d%d%-%d%d", i) or string.match(text, "^%d%d:%d%d:%d%d[%d%.]*", i)
+	if (date != nil) {
+		return date, i + #date
+	}
 	const word = string.match(text, "^[%w_%.%-+]+", i)
 	if (word == "true" || word == "false") {
 		return word == "true", i + #word
 	}
-	const number = if (word != nil) tonumber(word) else nil
+	const number = if (word != nil) tonumber((string.gsub(word, "_", ""))) else nil
 	if (word != nil && number != nil) {
 		return number, i + #word
 	}
-	error("expected a value (a string, a number, true, false or { ... })", 0)
+	error("expected a value (a string, a number, true, false, [ ... ] or { ... })", 0)
 }
 
 // The file's tables: { [section] = { key = value } } ("" for keys before
-// any [section]).
+// any [section]). `file` names it in a problem.
 function ParseToml(text: string, file: string): { [string]: Table } {
 	const tables: { [string]: Table } = { [""] = {} }
+	const lines = string.split(text, "\n")
 	let current = ""
-	let number = 0
-	for (line in string.gmatch(text .. "\n", "([^\n]*)\n")) {
-		number += 1
+	let n = 1
+	while (n <= #lines) {
+		const number = n
 		local function problem(message: string): never {
 			return Fail(`{file}:{number}: {message}`)
 		}
-		const stripped = string.gsub(line, "\r$", "")
+		const stripped = string.gsub(lines[n], "\r$", "")
+		n += 1
 		const body = string.match(stripped, "^%s*(.-)%s*$") or ""
 		if (body == "" || string.sub(body, 1, 1) == "#") {
 			continue
@@ -130,16 +210,29 @@ function ParseToml(text: string, file: string): { [string]: Table } {
 			tables[current] = tables[current] or {}
 			continue
 		}
-		const key, rest = string.match(body, "^([%w_%-\"]+)%s*=%s*(.*)$")
+		if (string.find(body, "^%[%[") != nil) {
+			// An array of tables ([[name]]): nothing cluau reads.
+			current = "[[]]"
+			tables[current] = {}
+			continue
+		}
+		const key, rest = string.match(body, "^([%w_%-%.\"']+)%s*=%s*(.*)$")
 		if (key == nil || rest == nil) {
 			problem("expected `key = value` or `[section]`")
 		}
-		const name = string.gsub(key, "\"", "")
-		const ok, value, after = pcall(ParseValue, rest, 1)
-		if (!ok) {
-			problem(tostring(value))
+		const name = string.gsub(key, "[\"']", "")
+		// A value may go on over the next lines (an array, a """string""").
+		let source = rest :: string
+		let ok, value, after = pcall(ParseValue, source, 1)
+		while (!ok && value == kUnfinished && n <= #lines) {
+			source = source .. "\n" .. string.gsub(lines[n], "\r$", "")
+			n += 1
+			ok, value, after = pcall(ParseValue, source, 1)
 		}
-		const trailing = string.match(string.sub(rest, after :: number), "^%s*(.-)$") or ""
+		if (!ok) {
+			problem(if (value == kUnfinished) "a value with no end" else tostring(value))
+		}
+		const trailing = string.match(string.sub(source, after :: number), "^%s*(.-)$") or ""
 		if (trailing != "" && string.sub(trailing, 1, 1) != "#") {
 			problem(`unexpected text after the value: {trailing}`)
 		}
@@ -185,26 +278,48 @@ function GitUrl(given: string): string {
 	return given
 }
 
-// The name a repository's package gets: the last part of its address.
+// A name a package may have: letters, digits, - and _ (it is a directory
+// in cluau_modules, a key in cluau.toml and what require() is given).
+function IsName(name: string): boolean {
+	return string.find(name, "^[%w_%-]+$") != nil
+}
+
+// The name a repository's package gets: the last part of its address, with
+// what a name may not hold made a -.
 function DefaultName(url: string): string {
-	let last = string.match(url, "([^/\\:]+)$") or url
+	const trimmed = string.gsub(url, "[/\\]+$", "")
+	let last = string.match(trimmed, "([^/\\:]+)$") or trimmed
 	last = string.gsub(last, "%.git$", "")
+	last = string.gsub(last, "[^%w_%-]+", "-")
+	last = string.gsub(string.gsub(last, "^%-+", ""), "%-+$", "")
 	return last
 }
 
-function Dependencies(project: string): { Dependency } {
+// A repository address or a ref that git would read as an option.
+function CheckArgument(what: string, value: string, where: string) {
+	if (string.sub(value, 1, 1) == "-") {
+		Fail(`{where}: {what} '{value}' starts with '-'`)
+	}
+}
+
+// The dependencies a cluau.toml names; `shown` names the file in a problem.
+function Dependencies(project: string, shown: string): { Dependency } {
 	const file = path.join(project, kProject)
-	const tables = ParseToml(fs.read(file), kProject)
+	const tables = ParseToml(fs.read(file), shown)
 	const out: { Dependency } = {}
 	for (name, spec in tables.dependencies or {}) {
+		if (!IsName(name)) {
+			Fail(`{shown}: '{name}' is not a package name (letters, digits, - and _)`)
+		}
 		if (type(spec) != "table") {
-			Fail(`{kProject}: dependencies.{name} is \{ git = "...", tag = "..." }`)
+			Fail(`{shown}: dependencies.{name} is \{ git = "...", tag = "..." }`)
 		}
 		const t = spec :: Table
 		const git = t.git
 		if (type(git) != "string") {
-			Fail(`{kProject}: dependencies.{name} needs git = "<repository>"`)
+			Fail(`{shown}: dependencies.{name} needs git = "<repository>"`)
 		}
+		CheckArgument("the repository", git :: string, `{shown}: dependencies.{name}`)
 		let ref = "HEAD"
 		let kind = "head"
 		for (_, k in { "tag", "branch", "rev" }) {
@@ -213,6 +328,7 @@ function Dependencies(project: string): { Dependency } {
 				kind = k
 			}
 		}
+		CheckArgument(`the {kind}`, ref, `{shown}: dependencies.{name}`)
 		table.insert(out, { name = name, git = git :: string, ref = ref, kind = kind })
 	}
 	table.sort(out, function(a: Dependency, b: Dependency): boolean {
@@ -337,12 +453,36 @@ function IsCommit(ref: string): boolean {
 	return #ref == 40 && string.find(ref, "^%x+$") != nil
 }
 
-// The commit `ref` (a tag, a branch, a commit, or HEAD) names in `url`.
-function Resolve(url: string, ref: string): string {
-	if (IsCommit(ref)) {
-		return ref
+// The start of a commit's id (at least 7 of its digits).
+function IsShortCommit(ref: string): boolean {
+	return #ref >= 7 && #ref < 40 && string.find(ref, "^%x+$") != nil
+}
+
+// The commit a short id names in `url`: its branches and tags fetched into
+// a scratch repository, and the id looked up there.
+function ResolveShort(url: string, ref: string): string? {
+	const scratch = fs.tempFile("cluau-resolve-")
+	fs.remove(scratch)
+	fs.mkdir(scratch)
+	let commit: string? = nil
+	let ok = Git({ "init", "--quiet" }, scratch)
+	if (ok) {
+		ok = Git({ "fetch", "--quiet", "--", url, "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*" }, scratch)
 	}
-	const ok, output = Git({ "ls-remote", url })
+	if (ok) {
+		const found, output = Git({ "rev-parse", "--verify", "--quiet", "--end-of-options", ref .. "^{commit}" }, scratch)
+		const full = string.match(output, "^%x+")
+		if (found && full != nil && IsCommit(full) && string.sub(full, 1, #ref) == string.lower(ref)) {
+			commit = full
+		}
+	}
+	fs.remove(scratch, true)
+	return commit
+}
+
+// The refs `url` has (refs/tags/v1.0, refs/heads/main, HEAD) and their commits.
+function RemoteRefs(url: string): { [string]: string } {
+	const ok, output = Git({ "ls-remote", "--", url })
 	if (!ok) {
 		return Fail(`cannot reach {url}: {output}`)
 	}
@@ -350,9 +490,24 @@ function Resolve(url: string, ref: string): string {
 	for (commit, name in string.gmatch(output, "(%x+)%s+([^\r\n]+)")) {
 		refs[name] = commit
 	}
+	return refs
+}
+
+// The commit `ref` (a tag, a branch, a commit, or HEAD) names in `url`.
+function Resolve(url: string, ref: string): string {
+	if (IsCommit(ref)) {
+		return string.lower(ref)
+	}
+	const refs = RemoteRefs(url)
 	for (_, name in { "refs/tags/" .. ref .. "^{}", "refs/tags/" .. ref, "refs/heads/" .. ref, ref }) {
 		if (refs[name] != nil) {
 			return refs[name]
+		}
+	}
+	if (IsShortCommit(ref)) {
+		const commit = ResolveShort(url, ref)
+		if (commit != nil) {
+			return commit
 		}
 	}
 	return Fail(`{url} has no tag, branch or commit '{ref}'`)
@@ -360,7 +515,7 @@ function Resolve(url: string, ref: string): string {
 
 // The newest tag that reads as a version (v1.2.3), or nil.
 function LatestTag(url: string): string? {
-	const ok, output = Git({ "ls-remote", "--tags", url })
+	const ok, output = Git({ "ls-remote", "--tags", "--", url })
 	if (!ok) {
 		return Fail(`cannot reach {url}: {output}`)
 	}
@@ -388,6 +543,9 @@ function LatestTag(url: string): string? {
 
 // `commit` of `url` into cluau_modules/<name> (unless it is there already).
 function Fetch(project: string, name: string, url: string, commit: string): boolean {
+	if (!IsCommit(commit)) {
+		return Fail(`{kLock}: {name}'s commit '{commit}' is not a commit id`)
+	}
 	const target = path.join(project, kModules, name)
 	const marker = path.join(target, kMarker)
 	if (fs.isFile(marker) && string.match(fs.read(marker), "%x+") == commit) {
@@ -398,14 +556,14 @@ function Fetch(project: string, name: string, url: string, commit: string): bool
 	fs.mkdir(scratch)
 	let ok, problem = Git({ "init", "--quiet" }, scratch)
 	if (ok) {
-		ok, problem = Git({ "fetch", "--quiet", "--depth", "1", url, commit }, scratch)
+		ok, problem = Git({ "fetch", "--quiet", "--depth", "1", "--", url, commit }, scratch)
 		if (!ok) {
 			// A server that does not serve single commits: all of it.
-			ok, problem = Git({ "fetch", "--quiet", url }, scratch)
+			ok, problem = Git({ "fetch", "--quiet", "--", url }, scratch)
 		}
 	}
 	if (ok) {
-		ok, problem = Git({ "-c", "advice.detachedHead=false", "checkout", "--quiet", commit }, scratch)
+		ok, problem = Git({ "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit }, scratch)
 	}
 	if (!ok) {
 		fs.remove(scratch, true)
@@ -426,7 +584,7 @@ function Install(project: string, fresh: { [string]: boolean }) {
 	const lock = ReadLock(project)
 	const chosen: { [string]: Locked } = {}
 	const queue: { { dep: Dependency, via: string } } = {}
-	for (_, dep in Dependencies(project)) {
+	for (_, dep in Dependencies(project, kProject)) {
 		table.insert(queue, { dep = dep, via = "" })
 	}
 	let fetched = 0
@@ -446,7 +604,7 @@ function Install(project: string, fresh: { [string]: boolean }) {
 		}
 		const locked = lock[dep.name]
 		let commit = ""
-		if (locked != nil && locked.git == dep.git && locked.ref == dep.ref && locked.commit != "" && !fresh[dep.name] && !fresh["*"]) {
+		if (locked != nil && locked.git == dep.git && locked.ref == dep.ref && IsCommit(locked.commit) && !fresh[dep.name] && !fresh["*"]) {
 			commit = locked.commit
 		} else {
 			commit = Resolve(dep.git, dep.ref)
@@ -459,7 +617,7 @@ function Install(project: string, fresh: { [string]: boolean }) {
 		// Its own dependencies, beside it.
 		const own = path.join(project, kModules, dep.name)
 		if (fs.isFile(path.join(own, kProject))) {
-			for (_, inner in Dependencies(own)) {
+			for (_, inner in Dependencies(own, `{kModules}/{dep.name}/{kProject}`)) {
 				table.insert(queue, { dep = inner, via = dep.name })
 			}
 		}
@@ -514,40 +672,80 @@ function Add(args: { string }) {
 	if (given == nil) {
 		return Fail("usage: cluau add <repository>[@tag|@branch|@commit] [--name <name>]")
 	}
-	// repository@ref (not the @ of git@host:...).
+	// repository@ref: the @ is looked for in the address's path, past a
+	// user's (git@host:a/b, ssh://git@host/a/b, https://token@host/a/b).
 	let address = given
 	let ref: string? = nil
-	const at = string.match(given, "^.*()@")
-	if (at != nil && at > 1 && !string.find(string.sub(given, 1, at - 1), "^[%w_.-]+$")) {
-		address = string.sub(given, 1, at - 1)
-		ref = string.sub(given, at + 1)
+	let pathAt = 1
+	const authority = string.match(given, "^%a[%w+.-]*://()")
+	if (authority != nil) {
+		pathAt = string.find(given, "/", authority, true) or #given + 1
+	} else {
+		pathAt = string.match(given, "^[%w_.-]+@[%w_.-]+:()") or 1
+	}
+	const at = string.match(string.sub(given, pathAt), "^.*()@")
+	if (at != nil && pathAt + at - 1 > 1) {
+		address = string.sub(given, 1, pathAt + at - 2)
+		ref = string.sub(given, pathAt + at)
+		if (ref == "") {
+			Fail(`'{given}' ends in @ with no tag, branch or commit after it`)
+		}
 	}
 	const url = GitUrl(address)
-	const package = name or DefaultName(url)
-	let spec: string
-	if (ref == nil) {
-		const latest = LatestTag(url)
-		ref = latest or "HEAD"
+	CheckArgument("the repository", url, "cluau add")
+	if (ref != nil) {
+		CheckArgument("the ref", ref, "cluau add")
 	}
-	if (ref == "HEAD") {
+	const package = name or DefaultName(url)
+	if (!IsName(package)) {
+		Fail(if (name != nil) `'{package}' is not a package name (letters, digits, - and _)`
+			else `no package name comes from '{url}': give one with --name`)
+	}
+	if (ref == nil) {
+		ref = LatestTag(url) or "HEAD"
+	}
+	const wanted = ref :: string
+	let spec: string
+	if (wanted == "HEAD") {
 		spec = "{ git = " .. Quote(url) .. " }"
-	} else if (IsCommit(ref :: string)) {
-		spec = "{ git = " .. Quote(url) .. ", rev = " .. Quote(ref :: string) .. " }"
+	} else if (IsCommit(wanted)) {
+		spec = "{ git = " .. Quote(url) .. ", rev = " .. Quote(string.lower(wanted)) .. " }"
 	} else {
-		Resolve(url, ref :: string) // it exists
-		const isTag = string.find(select(2, Git({ "ls-remote", "--tags", url, ref :: string })), "refs/tags/", 1, true) != nil
-		spec = "{ git = " .. Quote(url) .. ", " .. (if (isTag) "tag" else "branch") .. " = " .. Quote(ref :: string) .. " }"
+		const refs = RemoteRefs(url)
+		if (refs["refs/tags/" .. wanted] != nil) {
+			spec = "{ git = " .. Quote(url) .. ", tag = " .. Quote(wanted) .. " }"
+		} else if (refs["refs/heads/" .. wanted] != nil || refs[wanted] != nil) {
+			spec = "{ git = " .. Quote(url) .. ", branch = " .. Quote(wanted) .. " }"
+		} else {
+			// A commit's short id: pinned as the whole id.
+			spec = "{ git = " .. Quote(url) .. ", rev = " .. Quote(Resolve(url, wanted)) .. " }"
+		}
+	}
+	// cluau.toml goes back to what it was if the install fails.
+	const file = path.join(project, kProject)
+	const before = fs.read(file)
+	undo = function() {
+		fs.write(file, before)
+		io.writeError(`cluau: {kProject} is left as it was\n`)
 	}
 	EditDependency(project, package, spec)
-	Say(`added {package} ({url}{if (ref != "HEAD") " " .. tostring(ref) else ""}) to {kProject}`)
-	Install(project, { [package] = true })
+	Say(`added {package} ({url}{if (wanted != "HEAD") " " .. wanted else ""}) to {kProject}`)
+	const installed, problem = pcall(Install, project, { [package] = true })
+	const restore = undo
+	undo = nil
+	if (!installed) {
+		if (restore != nil) {
+			restore()
+		}
+		error(problem, 0)
+	}
 }
 
 function Remove(args: { string }) {
 	const project = RequireProject()
 	const name = args[1] or Fail("usage: cluau remove <name>")
 	let known = false
-	for (_, dep in Dependencies(project)) {
+	for (_, dep in Dependencies(project, kProject)) {
 		known = known || dep.name == name
 	}
 	if (!known) {

@@ -119,6 +119,10 @@ namespace cluau::runtime {
 	// contents (nested tables to a few levels, cycles marked).
 	std::string Repr(lua_State* L, int index);
 
+	// The standard modules this build has, as `require` names them
+	// ("@std/fs, @std/path, ..."): a module an option leaves out is not there.
+	const char* StandardModules();
+
 	// ---- checking (`cluau check`) ---------------------------------------
 
 	struct CheckOptions

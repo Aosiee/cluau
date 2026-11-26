@@ -41,6 +41,10 @@ namespace cluau::detail {
 		bool IsComment() const { return Kind == TokenKind::LineComment || Kind == TokenKind::BlockComment; }
 	};
 
+	// How deeply interpolated strings may nest in one another's `{}`
+	// segments (far more than code needs; Luau's parser refuses much less).
+	constexpr int kMaxInterpolationNesting = 200;
+
 	// The tokens, ending with one Eof token. Lexical errors (an unterminated
 	// string or comment, a stray character) are reported and lexed through.
 	std::vector<Token> Lex(std::string_view source, std::vector<Diagnostic>& diagnostics);

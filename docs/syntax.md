@@ -31,8 +31,12 @@ strings and string interpolation, `#`, `..`, 1-based arrays, `nil`,
   statement. Anywhere else it is a table constructor, as in Luau.
 - Luau's call sugar stays: `f "text"` and `f { ... }` are calls. A `{` on
   the same line right after an expression is a table argument. A `{` that
-  starts a line after a finished statement is a block.
-- `local` is accepted as a synonym for `let`.
+  starts a line after a finished statement is a block; inside parentheses,
+  brackets or a table constructor a `{` is always a table.
+- A statement ends where its last value or type does: after `x++`, after
+  `...`, and after a type such as `let best: string?` or
+  `type T = Array<number>`, the next line starts a new statement.
+- `local` is accepted as a synonym for `let` (also in `for (local i = 1, n)`).
 - Luau's block words (`then`, `end`, `elseif`, `repeat`, `until`) are not
   used; writing one is an error.
 
@@ -94,8 +98,10 @@ function Load(file: string): Config? {
   (after `finally`), `break` and `continue` act on the loop around the
   statement. A `finally` block cannot return, break or continue.
 - `throw value` raises `value` as it is: a re-raised error keeps its
-  message and position. It works anywhere, and inside `catch (error)`,
-  where the name `error` is the caught value rather than Luau's function.
+  message and position. It works anywhere, including inside
+  `catch (error)`, where the name `error` is the caught value rather than
+  Luau's function, and wherever else a local named `error` hides it.
+- `try` and `catch` blocks see their function's `...`.
 - `try`, `catch`, `finally` and `throw` are keywords only where they start
   those statements; elsewhere they are ordinary names.
 
@@ -118,7 +124,9 @@ let c: Color = Color.Red
   may be a string or a number instead.
 - The enum's type is the union of its string members (`"Red" | "Green" |
   "Blue"`), so a name that is not a member is a type error; an enum of
-  numbers is `number` (Luau has no number literal types).
+  numbers is `number` (Luau has no number literal types), and one with
+  both is its strings' union and `number` (`enum M { A = "x", B, C = -1 }`
+  is `"x" | "B" | number`).
 - The enum is a frozen table: `for (name, value in Status) { }` lists its
   members, and assigning to it is an error.
 - Members are separated by commas or line breaks.
@@ -131,6 +139,10 @@ let c: Color = Color.Red
 | `/* block */` | `--[[ block ]]` |
 
 `--` is the decrement operator, never a comment.
+
+A `//!` comment before the file's code would be a Luau mode comment
+(`--!nonstrict`): it is an error, since the host decides the checking mode.
+Anywhere else `//!` is an ordinary comment.
 
 ## Classes
 
@@ -162,7 +174,9 @@ class Player {
 ```
 
 - A field is `Name: Type [= default]`, one per line. Attributes before it
-  (`@export`, ...) are passed to the host's class profile.
+  (`@export`, ...) are passed to the host's class profile. The default is
+  translated like any other expression (a `function (...) { ... }` value
+  included) and may continue on the next lines while a bracket is open.
 - A method is a `function` in the class body. Its `self` is the class type,
   added for you.
 - The class type has exactly the declared fields and methods (plus the
@@ -233,7 +247,10 @@ cluau spelling (`--` comments become `//`, `--[[ ]]` becomes `/* */`), and
 stays a module table.
 
 An if-expression becomes cluau's (`if a then b elseif c then d else e`
--> `if (a) b else if (c) d else e`). An identifier that is a cluau keyword
+-> `if (a) b else if (c) d else e`), in an interpolated string's `{}`
+segments too. A call whose table argument starts the next line (`f` then
+`{ x = 1 }`) gets its parentheses (`f(` then `{ x = 1 })`), since in cluau
+that `{` would open a block. An identifier that is a cluau keyword
 (`let`, `const`, `class`) has no cluau form and is reported, left as
 written; so is a call to a function named `throw` or `try` at a
 statement's start (`throw(x)` would read as cluau's `throw`).

@@ -134,10 +134,11 @@ function ok(value: unknown, message: string?) {
 	}
 }
 
-// Two numbers within `tolerance` (1e-9 by default) of each other.
+// Two numbers within `tolerance` (1e-9 by default) of each other. NaN is
+// near nothing, and a NaN tolerance fails.
 function near(actual: number, expected: number, tolerance: number?, message: string?) {
 	const within = tolerance or 1e-9
-	if (math.abs(actual - expected) > within) {
+	if (!(math.abs(actual - expected) <= within)) {
 		Fail(`{if (message != nil) message .. ": " else ""}expected {expected} (within {within}), got {actual}`, 2)
 	}
 }

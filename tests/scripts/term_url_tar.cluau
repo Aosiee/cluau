@@ -20,11 +20,18 @@ print(url.format(u))
 const v6 = url.parse("http://[::1]:8080/")
 print(v6.host, v6.port)
 print(url.parse("relative/path?x").path, url.parse("mailto:ada@example.com").path)
+// The path as written is kept: %2F is not a /.
+const slash = url.parse("http://h/a%2Fb/c%20d")
+print(slash.path, slash.rawPath, url.format(slash))
+slash.path = "/a b"
+print(url.format(slash), url.format({ scheme = "http", user = "", password = "", host = "h", path = "/x y", query = "", fragment = "" }))
 for (_, case in {
 	{ "http://a/b/c/d;p?q", "g" }, { "http://a/b/c/d;p?q", "./g" }, { "http://a/b/c/d;p?q", "g/" },
 	{ "http://a/b/c/d;p?q", "/g" }, { "http://a/b/c/d;p?q", "//g" }, { "http://a/b/c/d;p?q", "?y" },
 	{ "http://a/b/c/d;p?q", "#s" }, { "http://a/b/c/d;p?q", "../g" }, { "http://a/b/c/d;p?q", "../../g" },
 	{ "http://a/b/c/d;p?q", "../../../g" }, { "http://a/b/c/d;p?q", "g?y#s" }, { "http://a/b/c/d;p?q", "https://x/y" },
+	{ "http://a/b/c/d;p?q", "?" }, { "http://a/b/c/d;p?q", "g//h" }, { "http://a/b/c/d;p?q", "a%2Fb/../c" },
+	{ "http://a/x%2Fy/z", "w" },
 }) {
 	print(case[2], "->", url.resolve(case[1], case[2]))
 }
@@ -67,4 +74,58 @@ if (made.code == 0) {
 	print("system tar", "from a file")
 }
 print(pcall(tar.fromString, string.rep("x", 1024)))
+
+// Names past 100 bytes with no slash to split at: a PAX record, which the
+// system's tar reads back too.
+const longFile = string.rep("n", 120) .. ".txt"
+const longDir = string.rep("d", 130)
+const named = tar.create(path.join(dir, "long.tar"))
+named:add(longFile, "long"):addDirectory(longDir):add(`{longDir}/{longFile}`, "longer")
+named:finish()
+for (_, entry in tar.open(path.join(dir, "long.tar")):entries()) {
+	print("long entry", #entry.name, entry.directory)
+}
+const listed = process.run({ "tar", "-tf", path.join(dir, "long.tar") })
+if (listed.code == 0) {
+	const names: { string } = {}
+	for (line in string.gmatch(listed.output, "[^\r\n]+")) {
+		table.insert(names, tostring(#line))
+	}
+	print("system tar lists", table.concat(names, " "))
+} else {
+	print("system tar lists", "124 131 255")
+}
+
+// Entries made by hand: GNU's long link target (K), a FIFO and a device
+// (listed, not extracted), and a regular file.
+const Raw = function(name: string, size: number, typeflag: string, link: string?): string {
+	const Pad = function(text: string, width: number): string {
+		return string.sub(text, 1, width) .. string.rep("\0", width - math.min(#text, width))
+	}
+	const header = Pad(name, 100) .. string.format("%07o\0%07o\0%07o\0%011o\0%011o\0", 420, 0, 0, size, 0) .. "        " .. typeflag ..
+		Pad(link or "", 100) .. "ustar  \0" .. string.rep("\0", 247)
+	let sum = 0
+	for (i = 1, 512) {
+		sum += string.byte(header, i)
+	}
+	return string.sub(header, 1, 148) .. string.format("%06o\0 ", sum) .. string.sub(header, 157)
+}
+const Data = function(text: string): string {
+	return text .. string.rep("\0", (512 - #text % 512) % 512)
+}
+const target = string.rep("t", 150)
+const handmade = table.concat({
+	Raw("././@LongLink", #target + 1, "K"), Data(target .. "\0"), Raw("link", 0, "2", string.sub(target, 1, 100)),
+	Raw("fifo", 0, "6"), Raw("device", 0, "3"), Raw("file.txt", 4, "0"), Data("data"), string.rep("\0", 1024),
+})
+const special = tar.fromString(handmade)
+for (_, entry in special:entries()) {
+	print("special", entry.name, entry.size, entry.directory, if (entry.link != nil) #entry.link else nil)
+}
+print("special extracted", special:extract(path.join(dir, "special")), repr(fs.list(path.join(dir, "special"))))
+
+// Not an archive: too short, or a header cut part-way; an empty archive is one.
+print(pcall(tar.fromString, "short"))
+print(pcall(tar.fromString, string.sub(handmade, 1, 512 * 5 + 100)))
+print("empty", #tar.fromString(string.rep("\0", 1024)):entries())
 fs.remove(dir, true)

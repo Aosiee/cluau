@@ -75,7 +75,7 @@ namespace cluau {
 	{
 		std::string Name;
 		std::string Type;      // the annotation's text ("" when absent)
-		std::string Default;   // the default expression's text, translated ("" when absent)
+		std::string Default;   // the default expression's text, translated, its line breaks kept ("" when absent)
 		std::vector<std::string> Attributes; // "export", "replicated", ... (without '@')
 		Range At;              // the field's name
 	};
@@ -83,6 +83,7 @@ namespace cluau {
 	struct ClassMethod
 	{
 		std::string Name;
+		std::string Generics;   // `function Name<T>(...)`: "<T>" ("" when absent)
 		std::string Params;     // the parameter list's text, translated, without the parentheses
 		std::string ReturnType; // "" when absent
 		bool ReturnsValue = false; // the body has a `return <expression>`
@@ -132,6 +133,7 @@ namespace cluau {
 			std::string Name;
 			std::string ParamTypes; // after `self`: ", x: number, y: number" ("" without parameters)
 			std::string ReturnType; // "()" when it returns nothing
+			std::string Generics;   // "<T>" for a generic method ("" otherwise), before the function type's `(`
 		};
 		std::vector<Method> Methods;
 		// The constructor's parameter types (", x: number", "" for none):
@@ -139,6 +141,7 @@ namespace cluau {
 		// earlier in the file. Empty when the Init comes from a base the
 		// translator cannot see (another module's class).
 		std::optional<std::string> CtorParams;
+		std::string CtorGenerics; // the constructor's generic parameters ("<T>"; "" when it has none)
 	};
 
 	// The class line a Header hook writes: `local $Class = <TableInit>; <Types>`.
@@ -160,7 +163,10 @@ namespace cluau {
 		// The statement a field lowers to (on the field's line). Arguments:
 		// the field and the class name. Returning "" drops the field from
 		// the module table (it is still part of the type). The default
-		// lowering is "$Class.Fields.<Name> = <Default>".
+		// lowering is "$Class.Fields.<Name> = <Default>". A lowering that
+		// contains the Default as it is keeps the default's own tokens in
+		// place (so a default spanning lines keeps them); one that does not
+		// must fit on the field's line.
 		std::function<std::string(const ClassField&, const std::string& className, std::string& error)> LowerField;
 		// A field's Luau type in the class type (null = its declared type),
 		// e.g. a host type spelled differently in Luau.

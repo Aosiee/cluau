@@ -8,6 +8,7 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include <cmath>
 #include <sqlite3.h>
 
 #include <cstring>
@@ -60,10 +61,37 @@ namespace cluau::runtime::detail {
 		sqlite3_stmt* Prepare(lua_State* L, Connection& c, const char* sql, size_t len, const char* fn, const char** rest = nullptr)
 		{
 			sqlite3_stmt* statement = nullptr;
-			if (sqlite3_prepare_v2(c.Db, sql, (int)len, &statement, rest) != SQLITE_OK)
+			const char* tail = nullptr;
+			if (sqlite3_prepare_v2(c.Db, sql, (int)len, &statement, &tail) != SQLITE_OK)
 				Fail(L, c.Db, fn);
-			if (!statement && !rest)
+			if (rest)
+			{
+				*rest = tail;
+				return statement;
+			}
+			if (!statement)
 				luaL_error(L, "%s: the SQL holds no statement", fn);
+			// One statement only: a second would otherwise be left out unseen.
+			const char* end = sql + len;
+			while (tail && tail < end)
+			{
+				sqlite3_stmt* next = nullptr;
+				const char* after = nullptr;
+				if (sqlite3_prepare_v2(c.Db, tail, (int)(end - tail), &next, &after) != SQLITE_OK)
+				{
+					sqlite3_finalize(statement);
+					Fail(L, c.Db, fn);
+				}
+				if (next)
+				{
+					sqlite3_finalize(next);
+					sqlite3_finalize(statement);
+					luaL_error(L, "%s: the SQL holds more than one statement (db:exec runs several)", fn);
+				}
+				if (after == tail)
+					break;
+				tail = after;
+			}
 			return statement;
 		}
 
@@ -76,8 +104,12 @@ namespace cluau::runtime::detail {
 			case LUA_TBOOLEAN: rc = sqlite3_bind_int(statement, slot, lua_toboolean(L, index)); break;
 			case LUA_TNUMBER:
 			{
+				// A whole number in SQLite's integer range is an INTEGER (the
+				// range checked before converting: out of range is undefined).
 				const double n = lua_tonumber(L, index);
-				if (n == (double)(sqlite3_int64)n && n >= -9007199254740992.0 && n <= 9007199254740992.0)
+				if (std::isnan(n))
+					luaL_error(L, "%s: parameter %d is NaN, which SQLite cannot store", fn, slot);
+				if (n == std::floor(n) && n >= -9223372036854775808.0 && n < 9223372036854775808.0)
 					rc = sqlite3_bind_int64(statement, slot, (sqlite3_int64)n);
 				else
 					rc = sqlite3_bind_double(statement, slot, n);
@@ -284,8 +316,10 @@ namespace cluau::runtime::detail {
 		int RowsNext(lua_State* L)
 		{
 			StatementBox* box = static_cast<StatementBox*>(lua_touserdata(L, lua_upvalueindex(1)));
-			if (!box->Statement || !(*box->Owner)->Db)
+			if (!box->Statement)
 				return 0;
+			if (!(*box->Owner)->Db)
+				luaL_error(L, "rows: the database is closed");
 			if (!Step(L, (*box->Owner)->Db, box->Statement, "rows"))
 			{
 				sqlite3_reset(box->Statement);
@@ -329,6 +363,8 @@ namespace cluau::runtime::detail {
 			luaL_checktype(L, 2, LUA_TFUNCTION);
 			const std::string name = "cluau_" + std::to_string(c.Savepoints + 1);
 			auto exec = [&](const std::string& sql) {
+				if (!c.Db)
+					return std::string("the database was closed inside it");
 				char* error = nullptr;
 				const int rc = sqlite3_exec(c.Db, sql.c_str(), nullptr, nullptr, &error);
 				std::string message = rc == SQLITE_OK ? std::string() : error ? error : sqlite3_errmsg(c.Db);

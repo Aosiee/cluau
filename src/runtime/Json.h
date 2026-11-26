@@ -63,7 +63,13 @@ namespace cluau::runtime::detail {
 
 		bool Bool(bool otherwise = false) const { return m_Kind == Kind::Bool ? m_Bool : otherwise; }
 		double Number(double otherwise = 0) const { return m_Kind == Kind::Number ? m_Number : otherwise; }
-		int Int(int otherwise = 0) const { return m_Kind == Kind::Number ? (int)m_Number : otherwise; }
+		// A number past int's range reads as its nearest end (NaN as `otherwise`).
+		int Int(int otherwise = 0) const
+		{
+			if (m_Kind != Kind::Number || m_Number != m_Number)
+				return otherwise;
+			return m_Number >= 2147483647.0 ? 2147483647 : m_Number <= -2147483648.0 ? (-2147483647 - 1) : (int)m_Number;
+		}
 		const std::string& String() const;
 
 		// An object's member (null when absent); an array's item.

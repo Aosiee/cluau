@@ -125,6 +125,11 @@ namespace cluau::detail {
 					{
 						Advance();
 						const bool skipSpace = m_Pos < m_Src.size() && At() == 'z';
+						// A backslash before a line break continues the string
+						// on the next line; a CRLF break is one break, as Luau
+						// reads it.
+						if (At() == '\r' && At(1) == '\n')
+							Advance();
 						if (m_Pos < m_Src.size())
 							Advance();
 						// `\z` skips the whitespace that follows, newlines included.
@@ -142,7 +147,7 @@ namespace cluau::detail {
 			}
 
 			// `...`, with `{expr}` segments that may hold strings and braces.
-			bool SkipInterpolated()
+			bool SkipInterpolated(int nesting = 0)
 			{
 				Advance();
 				int depth = 0;
@@ -175,7 +180,21 @@ namespace cluau::detail {
 					}
 					if (c == '`')
 					{
-						SkipInterpolated();
+						if (nesting + 1 >= kMaxInterpolationNesting)
+						{
+							// Reported once; the rest is read as the segment's text.
+							if (!m_TooDeep)
+							{
+								Token at;
+								at.Line = m_Line;
+								at.Col = Col();
+								Error(at, "interpolated strings nest too deeply (more than " + std::to_string(kMaxInterpolationNesting) + " levels)");
+								m_TooDeep = true;
+							}
+							Advance();
+							continue;
+						}
+						SkipInterpolated(nesting + 1);
 						continue;
 					}
 					if (c == '{')
@@ -289,6 +308,7 @@ namespace cluau::detail {
 			size_t m_Pos = 0;
 			size_t m_LineStart = 0;
 			int m_Line = 0;
+			bool m_TooDeep = false;
 		};
 
 	} // namespace

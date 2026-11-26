@@ -1,0 +1,16 @@
+after ++	2
+after ?
+after >
+block after --	1
+after ...	4
+try sees	4	5
+catch sees	2
+4
+3	yes	no
+caught bad!
+a    b	x
+y	2	3	8	87
+after //[[
+after ]
+nested inner false
+exit: 0

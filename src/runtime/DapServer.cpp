@@ -245,7 +245,9 @@ namespace cluau::runtime::detail {
 		m_StopOnEntry = args["stopOnEntry"].Bool();
 		m_NoDebug = args["noDebug"].Bool();
 		m_Sandbox = args["sandbox"].Bool();
-		m_Test = args["test"].Bool();
+		// A test file's cases run as `cluau test` runs them, unless asked otherwise.
+		const std::string& file = m_Program;
+		m_Test = args["test"].Bool(file.size() > 11 && file.compare(file.size() - 11, 11, "_test.cluau") == 0);
 		m_Filter = args["filter"].String();
 		m_Launched = true;
 		Respond(request, true);
@@ -310,7 +312,11 @@ namespace cluau::runtime::detail {
 		{
 			Runtime::TestCounts counts;
 			const bool ran = m_Runtime->RunTest(name, m_Filter, counts);
+			// After the cases' own output (every output event of it sent).
 			std::fflush(stdout);
+			std::fflush(stderr);
+			if (m_Io.FinishOutput && !m_Ended)
+				m_Io.FinishOutput();
 			std::string summary = std::to_string(counts.Passed) + " passed";
 			if (counts.Failed)
 				summary += ", " + std::to_string(counts.Failed) + " failed";
@@ -342,10 +348,14 @@ namespace cluau::runtime::detail {
 
 	void DapServer::Ended(int code)
 	{
-		if (m_Ended)
-			return;
-		m_Ended = true;
 		m_Finished = true;
+		Report(code);
+	}
+
+	void DapServer::Report(int code)
+	{
+		if (m_Ended.exchange(true))
+			return;
 		if (m_Io.FinishOutput)
 			m_Io.FinishOutput();
 		Json exited = Json::Object();
@@ -356,7 +366,7 @@ namespace cluau::runtime::detail {
 
 	void DapServer::Abandon()
 	{
-		if (!m_Finished.exchange(true))
+		if (!m_Finished.exchange(true) && !m_Ended)
 			Event("terminated");
 	}
 
@@ -367,6 +377,10 @@ namespace cluau::runtime::detail {
 			m_Debugger->Stop();
 		if (m_Paused)
 			m_Resumed = true;
+		// Ended as asked: the script stops at its next safepoint (the error
+		// that stops it is not the script's failure, and is not reported).
+		if (m_Started && !m_Ended)
+			Report(0);
 	}
 
 	// ---- A pause ----------------------------------------------------------------
@@ -525,6 +539,8 @@ namespace cluau::runtime::detail {
 				m_EditorPaths[Debugger::Canonical(file)] = file;
 				breakpoints = m_Debugger->SetBreakpoints(file, breakpoints);
 			}
+			else if (!file.empty())
+				Debugger::MarkPastEnd(file, breakpoints);
 			if (!file.empty())
 				m_Breakpoints[file] = breakpoints;
 			Json list = Json::Array();

@@ -1,7 +1,7 @@
 // The standard library's 0.9 additions: fs.glob, files, buffers and
 // temporary files, process.environment, @std/time (in UTC: the same on every
 // machine), JSON's null and markers, process.run's timeout, process.spawn,
-// @std/args and @std/csv.
+// @std/args, @std/csv and @std/test's near.
 const fs = require("@std/fs")
 const path = require("@std/path")
 const process = require("@std/process")
@@ -9,6 +9,7 @@ const json = require("@std/json")
 const time = require("@std/time")
 const args = require("@std/args")
 const csv = require("@std/csv")
+const test = require("@std/test")
 const io = require("@std/io")
 
 // fs.glob, in a scratch directory of its own.
@@ -116,6 +117,23 @@ for (_, bad in { { "--count=x", "a" }, { "--nope", "a" }, {}, { "-n" } }) {
 	print("args error:", none == nil, problem)
 }
 io.write(cli:help())
+// Negative numbers are arguments unless they start like a declared short
+// flag; a number option takes decimal numbers; -h in a cluster is help.
+const numbers = args.parser({ name = "numbers" })
+numbers:flag("infinite", { short = "i" }):flag("fast", { short = "f" }):flag("nothing", { short = "n" })
+numbers:option("width", { short = "w", number = true })
+numbers:positional("values", { many = true })
+const lists = { { "-5", "-1.5e3", "-.5" }, { "-inf" }, { "-nan" }, { "-w", "-7" }, { "--width=nan" }, { "--width=inf" },
+	{ "--width=0x10" }, { "--width= 5" }, { "-ih" } }
+for (_, list in lists) {
+	const result, problem = numbers:tryParse(list)
+	if (result == nil) {
+		print("numbers:", table.concat(list, " "), "->", problem)
+	} else {
+		print("numbers:", table.concat(list, " "), "->", table.concat(result:list("values"), ","), result:get("width"),
+			result:flag("infinite"), result:flag("nothing"), result.Help)
+	}
+}
 
 // @std/csv.
 const table_ = csv.parse('name,note\nada,"says ""hi"", then leaves"\n"two\nlines",x\n')
@@ -124,6 +142,13 @@ const records = csv.records("name;age\nada;36\nbob;\n", { separator = ";" })
 print("csv records:", records[1].name, records[1].age, repr(records[2].age))
 print(repr(csv.encode({ { "plain", "has,comma", 'has "quote"' }, { 1, true, "" } })))
 print(repr(csv.encodeRecords({ { name = "ada", age = 36 } }, { "name", "age", "city" })))
+print(repr(csv.encodeRecords({ { ok = false, n = 0 } }, { "ok", "n" })))
+print(repr(csv.records("\u{FEFF}name,age\nada,36\n")))
+
+// test.near: NaN is near nothing.
+const nan = 0 / 0
+print("near:", (pcall(test.near, 1, 1 + 1e-12)), (pcall(test.near, 1, 2, 5)), (pcall(test.near, nan, 1)), (pcall(test.near, 1, nan)),
+	(pcall(test.near, nan, nan)), (pcall(test.near, 1, 2, nan)))
 
 fs.remove(dir, true)
 print("cleaned:", !fs.exists(dir))

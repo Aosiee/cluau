@@ -90,3 +90,12 @@ const huge, hugeWhy = pcall(function() {
 	claims:read(entries[1].name)
 })
 print(huge, string.find(tostring(hugeWhy), "the archive is damaged", 1, true) != nil)
+
+// Entry names are matched exactly, case included.
+const cased = zip.create()
+cased:add("README", "upper"):add("readme", "lower")
+const casedArchive = zip.fromString(cased:finish() :: string)
+print("cased", casedArchive:read("README"), casedArchive:read("readme"), (pcall(function() {
+	casedArchive:read("ReadMe")
+})))
+print("level", (pcall(compress.deflate, "x", { level = 5.5 })))

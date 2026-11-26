@@ -33,4 +33,49 @@ removed mathlib from cluau.toml
 no packages (cluau add <repository> adds one)
 cluau: <work>/repos/mathlib has no tag, branch or commit 'no-such-tag'
 cluau: nothing is not a dependency in cluau.toml
+added helpers (<work>/repos/helpers <commit>) to cluau.toml
+  helpers <commit> (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+helpers = { git = "<work>/repos/helpers", rev = "<commit>" }
+removed helpers from cluau.toml
+  removed helpers
+0 package(s) in cluau_modules
+added helpers (https://token@example.invalid/team/helpers v0.1.0) to cluau.toml
+  helpers v0.1.0 (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+removed helpers from cluau.toml
+  removed helpers
+0 package(s) in cluau_modules
+added mathlib (ssh://git@example.invalid/team/mathlib.git v1.0.0) to cluau.toml
+  mathlib v1.0.0 (<commit>)
+  helpers v0.1.0 (<commit>)
+2 package(s) in cluau_modules, 2 fetched
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+mathlib = { git = "ssh://git@example.invalid/team/mathlib.git", tag = "v1.0.0" }
+removed mathlib from cluau.toml
+  removed helpers
+  removed mathlib
+0 package(s) in cluau_modules
+added my-lib (<work>/repos/my.lib.git/) to cluau.toml
+  my-lib (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+removed my-lib from cluau.toml
+  removed my-lib
+0 package(s) in cluau_modules
+cluau: '../../escape' is not a package name (letters, digits, - and _)
+cluau: cluau add: the repository '--upload-pack=touch PWNED;git-upload-pack' starts with '-'
+cluau: cluau add: the ref '--output=PWNED' starts with '-'
+cluau: cluau.toml: dependencies.evil: the repository '--upload-pack=touch PWNED;git-upload-pack' starts with '-'
+cluau: cluau.toml: dependencies.evil: the branch '--upload-pack=touch PWNED' starts with '-'
+cluau: cluau.toml: '..' is not a package name (letters, digits, - and _)
+false	(no PWNED)
+added broken (<work>/repos/broken) to cluau.toml
+  broken (<commit>)
+cluau: cluau_modules/broken/cluau.toml:3: expected a value (a string, a number, true, false, [ ... ] or { ... })
+cluau: cluau.toml is left as it was
+true	(cluau.toml as it was)
 exit: 0

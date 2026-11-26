@@ -65,9 +65,9 @@ for (_, file in fs.walk(process.args[1] or ".")) {
   Luau-to-cluau converter, `include/cluau/convert.h`) has no dependencies.
 - `cluau_runtime` (`include/cluau/runtime.h`, the script runner and checker
   behind the `cluau` tool) runs on Luau's VM, compiler and analysis, which
-  CMake fetches (or `-DCLUAU_LUAU_DIR=<a Luau checkout>`), and `@std/http` on
-  libcurl and mbedTLS, fetched and linked in too (`-DCLUAU_HTTP=OFF` leaves
-  them out).
+  CMake fetches (or `-DCLUAU_LUAU_DIR=<a Luau checkout>`), and on the
+  libraries behind its optional modules, fetched and linked in too (see
+  [Building](#building) for the options that leave them out).
 - `cluau_check` (the strict-typing rules: strict mode, no `any` without a
   line exemption, required annotations) runs over Luau's analysis and builds
   against the host's Luau.
@@ -116,8 +116,8 @@ Each release also has Debian and RPM packages for Linux, which install
 `/usr/bin/cluau` for every user:
 
 ```
-sudo apt install ./cluau_0.27.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
-sudo dnf install --nogpgcheck ./cluau-0.27.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
+sudo apt install ./cluau_0.28.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
+sudo dnf install --nogpgcheck ./cluau-0.28.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
 ```
 
 The packages are not signed yet (`--nogpgcheck` lets dnf install one); the
@@ -127,8 +127,8 @@ release's `SHA256SUMS` lists their checksums.
 
 Each version is a tag (`vX.Y.Z`), and each tag is a
 [release](https://github.com/Aosiee/cluau/releases) with the `cluau` tool
-(scripts, the REPL, check, translate, convert) built for Linux (x86-64),
-macOS (arm64) and Windows (x86-64), its tests run on each, both installers
+(scripts, the REPL, check, translate, convert) built for Linux (x86-64 and arm64),
+macOS (arm64 and x86-64) and Windows (x86-64), its tests run on each, both installers
 tried against the release's own packages on each, and a `SHA256SUMS` file.
 A host that embeds the translator pins a tag and builds from source.
 
@@ -152,7 +152,28 @@ release's archive holds the same tool, to put on `PATH` by hand.
 The build fetches Luau 0.748 for the runtime and the checker (`-DCLUAU_LUAU_VERSION=<tag>` picks another release);
 `-DCLUAU_LUAU_DIR=<dir>` uses a local checkout instead (Luau 0.748 or later), and
 `-DCLUAU_BUILD_RUNTIME=OFF` builds the translator and the tool's translate
-and convert commands with no Luau at all. `ctest` runs the translator's
+and convert commands with no Luau at all.
+
+Each library the standard modules use is fetched at a pinned release (by
+its hash) and linked in, so the tool stays one file. An option leaves one
+out, with the modules on it:
+
+| option | builds | on |
+|---|---|---|
+| `CLUAU_HTTP` | `@std/http` | libcurl, mbedTLS |
+| `CLUAU_CRYPTO` | `@std/crypto` (and the WebSocket handshake in `@std/websocket` and `@std/server`) | mbedTLS |
+| `CLUAU_SQLITE` | `@std/sqlite` | SQLite |
+| `CLUAU_REGEX` | `@std/regex` | PCRE2 |
+| `CLUAU_COMPRESS` | `@std/compress`, `@std/zip` (and gzip in `@std/tar`) | miniz |
+
+Each is on by default; `-DCLUAU_HTTP=OFF` (and so on) turns one off. TLS in
+`@std/net` is built when either `CLUAU_HTTP` or `CLUAU_CRYPTO` is on; with
+both off, mbedTLS is not fetched at all. `cluau --help` lists the modules a
+build has, and `cluau check` reports requiring one it leaves out.
+`-DCLUAU_FUZZ=ON` (with clang, and `CLUAU_BUILD_TESTS`) builds the fuzz
+targets in `tests/fuzz`.
+
+`ctest` runs the translator's
 tests, the script tests (`tests/scripts/*.cluau` against their `.expected`
 output, and `cluau check` on each) and the checker's tests
 (`tests/check/*.cluau` against their `.checked` output), `@std/http`

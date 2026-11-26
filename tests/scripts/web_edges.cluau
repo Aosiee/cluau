@@ -1,0 +1,240 @@
+// @std/server and @std/websocket at the edges of their protocols, with
+// clients made by hand on @std/net: request bodies framed two ways or cut
+// short, Expect: 100-continue, heads that are too long, response headers
+// with line breaks, encoded slashes in a route, hidden files; WebSocket
+// frames that break RFC 6455 (each side's), and the server closing idle
+// connections when it is closed.
+const server = require("@std/server")
+const websocket = require("@std/websocket")
+const net = require("@std/net")
+const task = require("@std/task")
+const fs = require("@std/fs")
+const path = require("@std/path")
+const time = require("@std/time")
+
+const site = path.join(fs.tempDir(), `cluau-web-edges-{math.floor(time.now() * 1000)}`)
+fs.mkdir(path.join(site, ".git"))
+fs.write(path.join(site, "page.txt"), "a page")
+fs.write(path.join(site, ".env"), "SECRET=1")
+fs.write(path.join(site, ".git", "config"), "[core]")
+
+let calls = 0
+const closes: { string } = {}
+const routes = server.router()
+routes:post("/echo", function(request: server.Request): server.Answer {
+	calls += 1
+	return `{#request.body}: {request.body}`
+})
+routes:get("/users/:id", function(request: server.Request): server.Answer {
+	return `user {request.params.id}`
+})
+routes:get("/split", function(request: server.Request): server.Answer {
+	return { headers = { ["x-note"] = "a\r\nSet-Cookie: evil=1" }, body = "split" }
+})
+routes:get("/static/*", server.files(site))
+routes:get("/ws", function(request: server.Request): server.Answer {
+	return server.upgrade(request, function(ws: websocket.WebSocket) {
+		for (message in ws:messages()) {
+			ws:send(message.data)
+		}
+		table.insert(closes, if (ws.closeCode == 0) "ended" else `{ws.closeCode} {ws.closeReason}`)
+	})
+})
+const running = server.serve({ port = 0 }, routes:handler())
+
+// What the server answers `data` with: its first line, and the body.
+const Exchange = function(data: string): string {
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:setTimeout(5)
+	socket:write(data)
+	const ok, answer = pcall(function(): string {
+		return socket:readAll()
+	})
+	socket:close()
+	if (!ok) {
+		return `(no answer: {answer})`
+	}
+	const status = string.match(answer, "^[^\r\n]*") or ""
+	const body = string.match(answer, "\r\n\r\n(.*)$") or ""
+	return `{status} | {body}`
+}
+
+const Post = function(headers: string, body: string): string {
+	return Exchange(`POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{headers}\r\n{body}`)
+}
+
+print("chunked", Post("Transfer-Encoding: chunked\r\n", "5;name=value\r\nhello\r\n6\r\n world\r\n0\r\nTrailer: x\r\n\r\n"))
+print("both", Post("Transfer-Encoding: chunked\r\nContent-Length: 3\r\n", "0\r\n\r\n"))
+print("gzip", Post("Transfer-Encoding: gzip\r\n", ""))
+print("gzip, chunked", Post("Transfer-Encoding: gzip, chunked\r\n", "0\r\n\r\n"))
+for (_, length in { "2.5", "0x2", "-2", "2, 3", " 2 , 2" }) {
+	print(`length '{length}'`, Post(`Content-Length: {length}\r\n`, "hi"))
+}
+print("bad chunk size", Post("Transfer-Encoding: chunked\r\n", "zz\r\nhello\r\n0\r\n\r\n"))
+print("chunk overrun", Post("Transfer-Encoding: chunked\r\n", "2\r\nhiXX\r\n0\r\n\r\n"))
+
+// A body cut short never reaches the handler.
+const before = calls
+for (_, cut in { "Content-Length: 50\r\n\r\nabc", "Transfer-Encoding: chunked\r\n\r\n10\r\nhel", "Transfer-Encoding: chunked\r\n\r\n" }) {
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:write(`POST /echo HTTP/1.1\r\nHost: x\r\n{cut}`)
+	socket:close()
+}
+task.wait(0.3)
+print("cut short, handled", calls - before)
+
+// Expect: 100-continue is answered before the body is sent.
+{
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:setTimeout(5)
+	socket:write("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n")
+	print("expect", socket:readLine(), repr(socket:readLine()))
+	socket:write("hello")
+	print("expect", string.match(socket:readAll(), "^[^\r\n]*"))
+	socket:close()
+}
+print("expect other", Post("Expect: something\r\nContent-Length: 0\r\n", ""))
+
+// Heads that are too long: a line, all the headers, the request line.
+print("long header", Exchange(`GET /users/1 HTTP/1.1\r\nX-Big: {string.rep("a", 70000)}\r\n\r\n`))
+const many: { string } = {}
+for (i = 1, 80) {
+	table.insert(many, `X-Header-{i}: {string.rep("b", 4000)}\r\n`)
+}
+print("many headers", Exchange(`GET /users/1 HTTP/1.1\r\n{table.concat(many)}\r\n`))
+print("long target", Exchange(`GET /{string.rep("u", 70000)} HTTP/1.1\r\n\r\n`))
+
+// A handler cannot split its response with a line break in a header.
+print("split", Exchange("GET /split HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+
+// An encoded slash is part of a route's :name, not a separator.
+print("encoded slash", Exchange("GET /users/a%2Fb HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+for (_, file in { "page.txt", ".env", ".git/config", "page.txt%00.png" }) {
+	print(`static {file}`, Exchange(`GET /static/{file} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`))
+}
+
+// WebSocket frames a client may not send: each closes the connection with
+// the code RFC 6455 gives.
+const Frame = function(first: number, payload: string, masked: boolean): string {
+	const lengthByte = (if (masked) 128 else 0) + #payload
+	return string.char(first, lengthByte) .. (if (masked) "\0\0\0\0" else "") .. payload
+}
+const Upgraded = function(): net.Socket {
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:setTimeout(5)
+	socket:write("GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n",
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+	while ((socket:readLine() or "") != "") {
+		// the 101 and its headers
+	}
+	return socket
+}
+// The server's next frame: its opcode, and a close's code.
+const Answer = function(socket: net.Socket): string {
+	const head = socket:read(2)
+	if (head == nil || #head < 2) {
+		return "(closed)"
+	}
+	const opcode = bit32.band(string.byte(head, 1), 15)
+	const payload = socket:read(bit32.band(string.byte(head, 2), 127)) or ""
+	if (opcode == 8 && #payload >= 2) {
+		return `close {string.byte(payload, 1) * 256 + string.byte(payload, 2)}`
+	}
+	return `opcode {opcode}: {payload}`
+}
+for (_, case in {
+	{ "a text message", Frame(129, "fine", true) },
+	{ "unmasked", Frame(129, "bare", false) },
+	{ "reserved bit", Frame(129 + 64, "rsv", true) },
+	{ "reserved opcode", Frame(128 + 3, "op", true) },
+	{ "orphan continuation", Frame(128, "more", true) },
+	{ "fragmented ping", Frame(9, "p", true) },
+	{ "not UTF-8", Frame(129, "\255\254", true) },
+	{ "a fragmented message", Frame(1, "frag", true) .. Frame(137, "ping", true) .. Frame(128, "ment", true), "twice" },
+}) {
+	const socket = Upgraded()
+	socket:write(case[2])
+	const first = Answer(socket)
+	print("websocket", case[1], first, if (case[3] != nil) Answer(socket) else "")
+	socket:close()
+}
+// A frame cut short ends the connection; it is not a message.
+{
+	const socket = Upgraded()
+	socket:write(string.sub(Frame(129, "0123456789", true), 1, 8))
+	socket:close()
+}
+task.wait(0.3)
+table.sort(closes)
+print("websocket closes", table.concat(closes, ", "))
+
+// A server that sends what a client must refuse: a masked frame, a
+// protocol it was not offered. The client's Host keeps an IPv6 address's
+// brackets.
+const Accepting = function(host: string, extra: string, frames: string): (net.Server, { string }) {
+	const listening = net.listen(host, 0)
+	const seen: { string } = {}
+	task.spawn(function() {
+		const socket = listening:accept()
+		let key = ""
+		while (true) {
+			const line = socket:readLine() or ""
+			if (line == "") {
+				break
+			}
+			key = string.match(line, "^Sec%-WebSocket%-Key: (.+)$") or key
+			if (string.find(line, "^Host:") != nil) {
+				table.insert(seen, (string.gsub(line, ":%d+$", ":<port>")))
+			}
+		}
+		socket:write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {websocket._accept(key)}\r\n{extra}\r\n`, frames)
+		task.wait(0.5)
+		pcall(function() {
+			socket:close()
+		})
+	})
+	return listening, seen
+}
+{
+	const listening = Accepting("127.0.0.1", "", Frame(129, "masked", true))
+	const ws = websocket.connect(`ws://127.0.0.1:{listening.port}/`)
+	print("client, masked frame", ws:receive(), ws.closeCode)
+	listening:close()
+}
+{
+	const listening = Accepting("127.0.0.1", "Sec-WebSocket-Protocol: other\r\n", "")
+	const ok, problem = pcall(websocket.connect, `ws://127.0.0.1:{listening.port}/`, { protocols = { "chat" } })
+	print("client, protocol not offered", ok, string.find(tostring(problem), "not offered", 1, true) != nil)
+	listening:close()
+}
+{
+	const listened, listening, seen = pcall(Accepting, "::1", "", "")
+	if (listened) {
+		const ws = websocket.connect(`ws://[::1]:{listening.port}/`)
+		print("client, IPv6", seen[1])
+		ws:close()
+		listening:close()
+	} else {
+		print("client, IPv6", "Host: [::1]:<port>")
+	}
+}
+print(pcall(function() {
+	const listening = Accepting("127.0.0.1", "", "")
+	const ws = websocket.connect(`ws://127.0.0.1:{listening.port}/`)
+	ws:ping(string.rep("p", 126))
+}))
+
+// close() closes the connections waiting for their next request at once.
+{
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:setTimeout(5)
+	socket:write("GET /users/1 HTTP/1.1\r\nHost: x\r\n\r\n")
+	while ((socket:readLine() or "") != "") {
+		// the answer's head
+	}
+	socket:read(6)
+	const started = time.monotonic()
+	running:close()
+	print("idle connection closed", socket:read(), time.monotonic() - started < 2)
+}
+fs.remove(site, true)

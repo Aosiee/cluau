@@ -1,0 +1,23 @@
+number	01	false
+number	1.	false
+number	-	false
+number	0.5	true
+number	-0	true
+number	1e5	true
+surrogate	4	A
+indent	{
+    "a": 1
+}
+february 31	false
+february 29	true	false
+parts	false	true
+read	seven b
+bad count	false
+nul	false
+nested	true	abc
+strip	link and text
+escape	true
+split 0	false
+padding	padded
+random	false	3
+exit: 0

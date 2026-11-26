@@ -28,22 +28,10 @@ namespace cluau::runtime::detail {
 
 		bool IsCluauPath(const std::string& name) { return !name.empty() && name[0] != '@' && !IsLuauFile(fs::u8path(name)); }
 
-		std::string LineOf(const std::string& text, int line)
-		{
-			size_t start = 0;
-			for (int i = 0; i < line; i++)
-			{
-				start = text.find('\n', start);
-				if (start == std::string::npos)
-					return {};
-				start++;
-			}
-			const size_t end = text.find('\n', start);
-			std::string result = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-			if (!result.empty() && result.back() == '\r')
-				result.pop_back();
-			return result;
-		}
+		std::string LineOf(const SourceText& text, int line) { return std::string(text.Line(line)); }
+
+		// The name a global has when the script does not declare it.
+		constexpr const char* kRuntimeGlobal = "@globals";
 
 		std::string TypeString(Luau::TypeId type)
 		{
@@ -83,9 +71,9 @@ namespace cluau::runtime::detail {
 		}
 
 		// The name stands at (line, col) in the text.
-		bool IdentifierAt(const std::string& text, int line, int col, const std::string& name)
+		bool IdentifierAt(const SourceText& text, int line, int col, const std::string& name)
 		{
-			const std::string lineText = LineOf(text, line);
+			const std::string_view lineText = text.Line(line);
 			if (col < 0 || (size_t)col + name.size() > lineText.size() || lineText.compare((size_t)col, name.size(), name) != 0)
 				return false;
 			const bool before = col == 0 || !IsIdent(lineText[(size_t)col - 1]);
@@ -115,7 +103,7 @@ namespace cluau::runtime::detail {
 		}
 
 		// The comment lines right above a declaration's line.
-		std::string DocAbove(const std::string& text, int declLine)
+		std::string DocAbove(const SourceText& text, int declLine)
 		{
 			std::vector<std::string> lines;
 			for (int l = declLine - 1; l >= 0; l--)
@@ -184,15 +172,53 @@ namespace cluau::runtime::detail {
 
 	} // namespace
 
+	SourceText::SourceText(std::string text)
+		: Text(std::move(text))
+	{
+		Starts.push_back(0);
+		for (size_t i = 0; i < Text.size(); i++)
+			if (Text[i] == '\n')
+				Starts.push_back(i + 1);
+	}
+
+	std::string_view SourceText::Line(int line) const
+	{
+		if (line < 0 || (size_t)line >= Starts.size())
+			return {};
+		const size_t start = Starts[(size_t)line];
+		size_t end = (size_t)line + 1 < Starts.size() ? Starts[(size_t)line + 1] - 1 : Text.size();
+		if (end > start && Text[end - 1] == '\r')
+			end--;
+		return std::string_view(Text).substr(start, end - start);
+	}
+
 	LanguageService::LanguageService(const CheckOptions& options)
 		: m_Analysis(options)
 	{
+	}
+
+	std::shared_ptr<const SourceText> LanguageService::SourceOf(const std::string& name) const
+	{
+		if (auto it = m_Sources.find(name); it != m_Sources.end())
+			return it->second;
+		std::optional<std::string> text = m_Analysis.TextOf(name);
+		std::shared_ptr<const SourceText> source = text ? std::make_shared<const SourceText>(std::move(*text)) : nullptr;
+		m_Sources[name] = source;
+		return source;
+	}
+
+	std::shared_ptr<const SourceText> LanguageService::Source(const std::string& path) const
+	{
+		if (auto it = m_SourcesByPath.find(path); it != m_SourcesByPath.end())
+			return it->second;
+		return m_SourcesByPath[path] = SourceOf(Name(path));
 	}
 
 	std::string LanguageService::Name(const std::string& path) const { return ModuleKey(fs::u8path(path)); }
 
 	void LanguageService::Open(const std::string& path, std::string text)
 	{
+		ForgetTexts();
 		const std::string name = m_Analysis.AddRoot(fs::u8path(path));
 		m_Open[name] = path;
 		m_Analysis.SetBuffer(name, std::move(text));
@@ -200,6 +226,7 @@ namespace cluau::runtime::detail {
 
 	void LanguageService::Change(const std::string& path, std::string text)
 	{
+		ForgetTexts();
 		const std::string name = Name(path);
 		if (!m_Open.count(name))
 			return Open(path, std::move(text));
@@ -208,12 +235,17 @@ namespace cluau::runtime::detail {
 
 	void LanguageService::Close(const std::string& path)
 	{
+		ForgetTexts();
 		const std::string name = Name(path);
 		m_Open.erase(name);
 		m_Analysis.SetBuffer(name, std::nullopt);
 	}
 
-	void LanguageService::Changed(const std::string& path) { m_Analysis.MarkDirty(Name(path)); }
+	void LanguageService::Changed(const std::string& path)
+	{
+		ForgetTexts();
+		m_Analysis.MarkDirty(Name(path));
+	}
 
 	bool LanguageService::IsOpen(const std::string& path) const { return m_Open.count(Name(path)) > 0; }
 
@@ -274,7 +306,7 @@ namespace cluau::runtime::detail {
 		const std::string name = Name(path);
 		if (!Prepare(name))
 			return list;
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!text)
 			return list;
 		const std::string lineText = LineOf(*text, line);
@@ -345,7 +377,7 @@ namespace cluau::runtime::detail {
 		Luau::Frontend& frontend = m_Analysis.Frontend();
 		Luau::ModulePtr module = frontend.moduleResolverForAutocomplete.getModule(name);
 		const Luau::SourceModule* source = frontend.getSourceModule(name);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!source || !module || !text)
 			return std::nullopt;
 		const Luau::Position pos = In(name, line, col);
@@ -432,7 +464,7 @@ namespace cluau::runtime::detail {
 						if (std::optional<std::string> cls = classText(m.Module, member))
 							info.Text = *cls;
 						std::optional<Luau::Location> at = m.Prop->location ? m.Prop->location : m.Prop->typeLocation;
-						std::optional<std::string> declared = m_Analysis.TextOf(m.Module);
+						std::shared_ptr<const SourceText> declared = SourceOf(m.Module);
 						if (at && declared)
 						{
 							Position p{ (int)at->begin.line, (int)at->begin.column };
@@ -502,7 +534,7 @@ namespace cluau::runtime::detail {
 		Luau::Frontend& frontend = m_Analysis.Frontend();
 		Luau::ModulePtr module = frontend.moduleResolverForAutocomplete.getModule(name);
 		const Luau::SourceModule* source = frontend.getSourceModule(name);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!source || !module || !text)
 			return std::nullopt;
 
@@ -627,7 +659,7 @@ namespace cluau::runtime::detail {
 
 	std::optional<Location> LanguageService::Mapped(const std::string& moduleName, const Luau::Location& at, const std::string& symbol) const
 	{
-		const std::optional<std::string> text = m_Analysis.TextOf(moduleName);
+		const std::shared_ptr<const SourceText> text = SourceOf(moduleName);
 		if (!text)
 			return std::nullopt;
 		const Range r = Out(moduleName, at);
@@ -774,29 +806,36 @@ namespace cluau::runtime::detail {
 		return out;
 	}
 
-	std::vector<Location> LanguageService::References(const std::string& path, int line, int col)
+	std::vector<Location> LanguageService::References(const std::string& path, int line, int col, bool* declared)
 	{
 		std::string declaredIn;
-		return ReferencesOf(path, line, col, declaredIn);
+		bool first = false;
+		std::vector<Location> out = ReferencesOf(path, line, col, declaredIn, first);
+		if (declared)
+			*declared = first;
+		return out;
 	}
 
-	std::vector<Location> LanguageService::ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn)
+	std::vector<Location> LanguageService::ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn, bool& declared)
 	{
+		declared = false;
 		std::vector<Location> out;
 		const std::string name = Name(path);
 		if (!Prepare(name))
 			return out;
 		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(name);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!source || !source->root || !text)
 			return out;
 		const Luau::Position pos = In(name, line, col);
 		std::set<std::pair<std::string, std::pair<int, int>>> seen;
 		// Only where the text holds the name (not a translation's own words).
 		auto add = [&](const std::string& module, const std::string& file, const Range& r, const std::string& symbol) {
-			const std::optional<std::string> moduleText = m_Analysis.TextOf(module);
-			if (moduleText && IdentifierAt(*moduleText, r.Begin.Line, r.Begin.Col, symbol) && seen.insert({ module, { r.Begin.Line, r.Begin.Col } }).second)
-				out.push_back({ file, { r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } } });
+			const std::shared_ptr<const SourceText> moduleText = SourceOf(module);
+			if (!moduleText || !IdentifierAt(*moduleText, r.Begin.Line, r.Begin.Col, symbol) || !seen.insert({ module, { r.Begin.Line, r.Begin.Col } }).second)
+				return false;
+			out.push_back({ file, { r.Begin, { r.Begin.Line, r.Begin.Col + (int)symbol.size() } } });
+			return true;
 		};
 
 		Luau::AstLocal* target = nullptr;
@@ -859,19 +898,34 @@ namespace cluau::runtime::detail {
 			LocalUses uses;
 			uses.Target = target;
 			source->root->visit(&uses);
-			add(name, path, Out(name, target->location), symbol);
+			declared = add(name, path, Out(name, target->location), symbol);
 			for (const Luau::Location& at : uses.Found)
 				add(name, path, Out(name, at), symbol);
 			return out;
 		}
 		if (!declaration && global)
 		{
-			// A script's top-level function: a global of its file.
+			// A script's top-level function: a global of its file, declared
+			// where its function statement (or the first assignment) names it.
 			symbol = NameOf(global->name);
 			struct Globals : Luau::AstVisitor
 			{
 				std::string Name;
 				std::vector<Luau::Location> Found;
+				std::optional<Luau::Location> Declared;
+				bool visit(Luau::AstStatFunction* fn) override
+				{
+					if (Luau::AstExprGlobal* g = fn->name->as<Luau::AstExprGlobal>(); g && !Declared && NameOf(g->name) == Name)
+						Declared = g->location;
+					return true;
+				}
+				bool visit(Luau::AstStatAssign* assign) override
+				{
+					for (Luau::AstExpr* target : assign->vars)
+						if (Luau::AstExprGlobal* g = target->as<Luau::AstExprGlobal>(); g && !Declared && NameOf(g->name) == Name)
+							Declared = g->location;
+					return true;
+				}
 				bool visit(Luau::AstExprGlobal* g) override
 				{
 					if (NameOf(g->name) == Name)
@@ -881,6 +935,11 @@ namespace cluau::runtime::detail {
 			} globals;
 			globals.Name = symbol;
 			source->root->visit(&globals);
+			// One the script does not declare is the runtime's (print, string).
+			if (globals.Declared)
+				declared = add(name, path, Out(name, *globals.Declared), symbol);
+			else
+				declaredIn = kRuntimeGlobal;
 			for (const Luau::Location& at : globals.Found)
 				add(name, path, Out(name, at), symbol);
 			return out;
@@ -893,7 +952,7 @@ namespace cluau::runtime::detail {
 		const Location decl = *declaration;
 		declaredIn = decl.Path;
 		if (!decl.Path.empty() && decl.Path[0] != '@')
-			add(decl.Path, PathOf(decl.Path), decl.At, symbol);
+			declared = add(decl.Path, PathOf(decl.Path), decl.At, symbol);
 		struct Members : Luau::AstVisitor
 		{
 			std::string Name;
@@ -908,8 +967,8 @@ namespace cluau::runtime::detail {
 		for (const std::string& file : SearchFiles())
 		{
 			const std::string module = Name(file);
-			const std::optional<std::string> fileText = m_Analysis.TextOf(module);
-			if (!fileText || fileText->find(symbol) == std::string::npos)
+			const std::shared_ptr<const SourceText> fileText = SourceOf(module);
+			if (!fileText || fileText->Text.find(symbol) == std::string::npos)
 				continue;
 			// A file nothing has required yet is checked as a script.
 			const std::vector<std::string>& known = m_Analysis.UserModules();
@@ -942,7 +1001,20 @@ namespace cluau::runtime::detail {
 			return edits;
 		}
 		std::string declaredIn;
-		const std::vector<Location> uses = ReferencesOf(path, line, col, declaredIn);
+		bool declared = false;
+		const std::vector<Location> uses = ReferencesOf(path, line, col, declaredIn, declared);
+		if (declaredIn == kRuntimeGlobal)
+		{
+			const std::shared_ptr<const SourceText> text = Source(path);
+			std::string symbol = "this name";
+			if (!uses.empty() && text)
+			{
+				const Location& use = uses.front();
+				symbol = "'" + std::string(text->Line(use.At.Begin.Line).substr((size_t)use.At.Begin.Col, (size_t)(use.At.End.Col - use.At.Begin.Col))) + "'";
+			}
+			error = symbol + " is a global this script does not declare (one of the runtime's): it cannot be renamed here";
+			return edits;
+		}
 		if (!declaredIn.empty() && declaredIn[0] == '@')
 		{
 			error = "'" + declaredIn + "' declares this name: it cannot be renamed here";
@@ -964,7 +1036,7 @@ namespace cluau::runtime::detail {
 		const std::string name = Name(path);
 		m_Analysis.Frontend().check(name);
 		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(name);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!source || !source->root || !text)
 			return out;
 		const TranslateResult* translation = m_Analysis.Translation(name);
@@ -1066,7 +1138,7 @@ namespace cluau::runtime::detail {
 			return out;
 		Luau::ModulePtr module = m_Analysis.Frontend().moduleResolverForAutocomplete.getModule(name);
 		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(name);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!module || !source || !source->root || !text)
 			return out;
 
@@ -1168,6 +1240,36 @@ namespace cluau::runtime::detail {
 			return close == std::string::npos ? std::string() : message.substr(open + 1, close - open - 1);
 		}
 
+		// Where the line's `//` comment starts (-1 for none): outside its
+		// strings and block comments.
+		int LineCommentAt(const std::string& line)
+		{
+			char quote = 0;
+			for (size_t i = 0; i < line.size(); i++)
+			{
+				const char c = line[i];
+				if (quote)
+				{
+					if (c == '\\')
+						i++;
+					else if (c == quote)
+						quote = 0;
+				}
+				else if (c == '"' || c == '\'' || c == '`')
+					quote = c;
+				else if (c == '/' && i + 1 < line.size() && line[i + 1] == '*')
+				{
+					const size_t close = line.find("*/", i + 2);
+					if (close == std::string::npos)
+						return -1;
+					i = close + 1;
+				}
+				else if (c == '/' && i + 1 < line.size() && line[i + 1] == '/')
+					return (int)i;
+			}
+			return -1;
+		}
+
 		const char* const kStdModules[] = { "fs", "path", "process", "io", "json", "time", "http", "net", "sqlite", "regex", "task", "crypto", "encoding",
 			"compress", "zip", "args", "csv", "test" };
 
@@ -1177,7 +1279,7 @@ namespace cluau::runtime::detail {
 	{
 		std::vector<CodeAction> out;
 		const std::string name = Name(path);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!text)
 			return out;
 		for (const DiagnosticRef& d : diagnostics)
@@ -1185,10 +1287,21 @@ namespace cluau::runtime::detail {
 			const std::string lineText = LineOf(*text, d.At.Begin.Line);
 			if (d.Code == "NoAny")
 			{
-				// The line's exemption, at its end.
+				// The line's exemption, at its end; a line with a comment
+				// already has the exemption start it (an exemption is a line
+				// comment of its own, and a line has one).
 				CodeAction action;
 				action.Title = "Allow any on this line (// allow-any:)";
-				action.Edits[path].push_back({ { { d.At.Begin.Line, (int)lineText.size() }, { d.At.Begin.Line, (int)lineText.size() } }, " // allow-any: reason" });
+				const int comment = LineCommentAt(lineText);
+				if (comment < 0)
+					action.Edits[path].push_back({ { { d.At.Begin.Line, (int)lineText.size() }, { d.At.Begin.Line, (int)lineText.size() } }, " // allow-any: reason" });
+				else
+				{
+					int text = comment + 2;
+					while (text < (int)lineText.size() && (lineText[(size_t)text] == ' ' || lineText[(size_t)text] == '\t'))
+						text++;
+					action.Edits[path].push_back({ { { d.At.Begin.Line, comment }, { d.At.Begin.Line, text } }, "// allow-any: reason - "});
+				}
 				out.push_back(std::move(action));
 				continue;
 			}
@@ -1264,7 +1377,7 @@ namespace cluau::runtime::detail {
 			return out;
 		Luau::ModulePtr module = m_Analysis.Frontend().moduleResolverForAutocomplete.getModule(name);
 		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(name);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!module || !source || !source->root || !text)
 			return out;
 		std::set<std::string> classes;
@@ -1293,14 +1406,15 @@ namespace cluau::runtime::detail {
 				const Luau::TypeId* t = Checked->astTypes.find(e);
 				return t && Luau::get<Luau::FunctionType>(Luau::follow(*t));
 			}
-			void Local(Luau::AstLocal* local, unsigned modifiers, bool function)
+			// A local's name: where it is declared, or `at` (a use).
+			void Local(Luau::AstLocal* local, unsigned modifiers, bool function, const Luau::Location* at = nullptr)
 			{
 				const std::string n = NameOf(local->name);
 				const TokenType type = Classes->count(n) ? TokenType::Class
 					: Parameters.count(local)            ? TokenType::Parameter
 					: function                           ? TokenType::Function
 														 : TokenType::Variable;
-				Items.push_back({ local->location, n, type, modifiers });
+				Items.push_back({ at ? *at : local->location, n, type, modifiers });
 			}
 			bool visit(Luau::AstExprFunction* fn) override
 			{
@@ -1338,7 +1452,7 @@ namespace cluau::runtime::detail {
 			}
 			bool visit(Luau::AstExprLocal* e) override
 			{
-				Local(e->local, 0, IsFunction(e));
+				Local(e->local, 0, IsFunction(e), &e->location);
 				return true;
 			}
 			bool visit(Luau::AstStatFunction* fn) override
@@ -1422,7 +1536,7 @@ namespace cluau::runtime::detail {
 	std::optional<CallItem> LanguageService::CallItemAt(const Location& declaration)
 	{
 		const std::string module = Name(declaration.Path);
-		const std::optional<std::string> text = m_Analysis.TextOf(module);
+		const std::shared_ptr<const SourceText> text = SourceOf(module);
 		if (!text || !Prepare(module))
 			return std::nullopt;
 		const std::string lineText = LineOf(*text, declaration.At.Begin.Line);
@@ -1475,7 +1589,7 @@ namespace cluau::runtime::detail {
 	CallItem LanguageService::Enclosing(const std::string& module, const std::string& file, const Luau::Position& at)
 	{
 		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(module);
-		const std::optional<std::string> text = m_Analysis.TextOf(module);
+		const std::shared_ptr<const SourceText> text = SourceOf(module);
 		CallItem top;
 		top.Name = "(top level)";
 		top.Kind = SymbolKind::Function;
@@ -1558,7 +1672,7 @@ namespace cluau::runtime::detail {
 		if (!Prepare(module))
 			return out;
 		const Luau::SourceModule* source = m_Analysis.Frontend().getSourceModule(module);
-		const std::optional<std::string> text = m_Analysis.TextOf(module);
+		const std::shared_ptr<const SourceText> text = SourceOf(module);
 		if (!source || !text)
 			return out;
 		// The function's body: the function whose name is at the item.
@@ -1624,17 +1738,15 @@ namespace cluau::runtime::detail {
 	{
 		std::vector<TextEdit> edits;
 		const std::string name = Name(path);
-		const std::optional<std::string> text = m_Analysis.TextOf(name);
+		const std::shared_ptr<const SourceText> text = SourceOf(name);
 		if (!text || !IsCluauPath(name))
 			return edits;
 		FormatOptions options;
 		options.Indent = indent;
-		const FormatResult result = cluau::Format(*text, options);
+		const FormatResult result = cluau::Format(text->Text, options);
 		if (result.HasErrors() || !result.Changed)
 			return edits;
-		int lines = 0;
-		for (char c : *text)
-			lines += c == '\n';
+		const int lines = (int)text->Starts.size() - 1;
 		edits.push_back({ { { 0, 0 }, { lines + 1, 0 } }, result.Text });
 		return edits;
 	}

@@ -81,6 +81,8 @@ namespace cluau::runtime::detail {
 		void RunScript();
 		void OnPaused(const PauseInfo& pause);
 		void Ended(int code);
+		// `exited` (with the status) and `terminated`, once.
+		void Report(int code);
 		void Stop();
 
 		Json BreakpointJson(const Breakpoint& b) const;
@@ -107,7 +109,7 @@ namespace cluau::runtime::detail {
 		bool m_Configured = false;
 		bool m_Launched = false;
 		bool m_Started = false;
-		bool m_Ended = false;
+		std::atomic<bool> m_Ended{ false }; // `exited` and `terminated` sent
 		bool m_Disconnected = false;
 		bool m_Stopping = false;
 		std::atomic<bool> m_Finished{ false };

@@ -135,3 +135,50 @@ TEST("convert: if-expressions take the cluau form")
 	CHECK(RoundTrips("while if a then b else c do f() end\nif if a then b else c then g() end\n"));
 	CHECK(RoundTrips("local f = function() return if a then 1 else 2 end\nif x then y = if z then 1 else 2 end\n"));
 }
+
+TEST("convert: a statement after a type, a cast or `...` is a statement")
+{
+	CHECK_EQ(Cluau("local best: string?\nif x then f() end"), std::string("let best: string?\nif (x) { f() }"));
+	CHECK(RoundTrips("local best: string?\nif x then f() end\ntype T = Array<number>\nif x then f() end\n"));
+	CHECK(RoundTrips("local m: Map<string, number>, k: number?\nif x then f() end\nlocal v = y :: Array<number>\nif v then f() end\n"));
+	CHECK(RoundTrips("local function g(...)\n\tlocal a = ...\n\tif a then f() end\nend\n"));
+	// An if-expression after an operator is still one.
+	CHECK_EQ(Cluau("local b = a >\n\tif c then 1 else 2"), std::string("let b = a >\n\tif (c) 1 else 2"));
+}
+
+TEST("convert: call sugar across a line, a do-block in a function, until's end")
+{
+	// `f` then `{ ... }` on the next line is a call; in cluau that `{` would be a block.
+	CHECK_EQ(Cluau("local r = f\n{ x = 1 }"), std::string("let r = f(\n{ x = 1 })"));
+	CHECK(RoundTrips("local r = f\n{ x = 1 }\nlocal s = g \"a\"\n{ 2 }\n"));
+	CHECK_EQ(Cluau("local g = function() do return 2 end end"), std::string("let g = function() { { return 2 } }"));
+	CHECK(RoundTrips("local g = function(): number do return 2 end end\nfunction h() do end end\n"));
+	CHECK_EQ(Cluau("repeat n += 1 until n > 2 print(n)"), std::string("do { n += 1 } while (!(n > 2)); print(n)"));
+	CHECK(RoundTrips("repeat n += 1 until n > 2 print(n)\nrepeat until f \"x\" g()\nrepeat until if a then b else c print(1)\n"));
+}
+
+TEST("convert: throw and try are reported only where a statement starts")
+{
+	CHECK(!cluau::Convert("print(throw(1))\nlocal function throw(x) return x end\nlocal t = try { 1 }\n").HasErrors());
+	CHECK(HasError(cluau::Convert("throw(1)"), "a call to 'throw'"));
+	CHECK(HasError(cluau::Convert("x = 1 throw(1)"), "a call to 'throw'"));
+	CHECK(HasError(cluau::Convert("if a then try { 1 } end"), "a call to 'try'"));
+}
+
+TEST("convert: an interpolated string's segments convert too")
+{
+	CHECK_EQ(Cluau("print(`{if (a) then 1 else 2} {a ~= b and not c}`)"), std::string("print(`{if (a) 1 else 2} {a != b && !c}`)"));
+	CHECK_EQ(Cluau("s = `x {`y {if x then 1 else 2}`}`"), std::string("s = `x {`y {if (x) 1 else 2}`}`"));
+	CHECK(RoundTrips("print(`{if (a) then 1 else 2} {a ~= b and not c} {`{x // 2}`} {\"}\"}`)\nlocal s = `a\\`{1}`\n"));
+}
+
+TEST("convert: a long chain of function types is read without recursion")
+{
+	std::string chain = "local function f(): ";
+	for (int i = 0; i < 2000000; i++)
+		chain += "() -> ";
+	chain += "number end";
+	const cluau::ConvertResult r = cluau::Convert(chain);
+	CHECK(!r.HasErrors());
+	CHECK(r.Cluau.size() > 10 && r.Cluau.substr(r.Cluau.size() - 10) == "number { }");
+}

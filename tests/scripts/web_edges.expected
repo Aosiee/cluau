@@ -1,0 +1,40 @@
+chunked	HTTP/1.1 200 OK | 11: hello world
+both	HTTP/1.1 400 Bad Request | a request has Transfer-Encoding or Content-Length, not both
+gzip	HTTP/1.1 400 Bad Request | a Transfer-Encoding ends with chunked
+gzip, chunked	HTTP/1.1 501 Not Implemented | Transfer-Encoding gzip, chunked (only chunked is understood)
+length '2.5'	HTTP/1.1 400 Bad Request | Content-Length is a number of bytes
+length '0x2'	HTTP/1.1 400 Bad Request | Content-Length is a number of bytes
+length '-2'	HTTP/1.1 400 Bad Request | Content-Length is a number of bytes
+length '2, 3'	HTTP/1.1 400 Bad Request | two different Content-Lengths
+length ' 2 , 2'	HTTP/1.1 200 OK | 2: hi
+bad chunk size	HTTP/1.1 400 Bad Request | a chunk's size is a hexadecimal number
+chunk overrun	HTTP/1.1 400 Bad Request | a chunk does not end with a line break
+cut short, handled	0
+expect	HTTP/1.1 100 Continue	""
+expect	HTTP/1.1 200 OK
+expect other	HTTP/1.1 417 Expectation Failed | Expect: something
+long header	HTTP/1.1 431 Request Header Fields Too Large | a header line of more than 65536 bytes
+many headers	HTTP/1.1 431 Request Header Fields Too Large | headers of more than 262144 bytes
+long target	HTTP/1.1 414 URI Too Long | a request line of more than 65536 bytes
+server: GET /split: server: the x-note header's value has a line break in it
+split	HTTP/1.1 500 Internal Server Error | Internal Server Error
+encoded slash	HTTP/1.1 200 OK | user a/b
+static page.txt	HTTP/1.1 200 OK | a page
+static .env	HTTP/1.1 404 Not Found | Not Found
+static .git/config	HTTP/1.1 404 Not Found | Not Found
+static page.txt%00.png	HTTP/1.1 403 Forbidden | Forbidden
+websocket	a text message	opcode 1: fine	
+websocket	unmasked	close 1002	
+websocket	reserved bit	close 1002	
+websocket	reserved opcode	close 1002	
+websocket	orphan continuation	close 1002	
+websocket	fragmented ping	close 1002	
+websocket	not UTF-8	close 1007	
+websocket	a fragmented message	opcode 10: ping	opcode 1: fragment
+websocket closes	1002 a continuation with no message to continue, 1002 a control frame of more than 125 bytes, or fragmented, 1002 an unmasked frame from the client, 1002 reserved bits set with no extension, 1002 reserved opcode 3, 1007 a text message that is not UTF-8, ended, ended, ended
+client, masked frame	nil	1002
+client, protocol not offered	false	true
+client, IPv6	Host: [::1]:<port>
+false	web_edges.cluau:224: websocket: a ping's data is at most 125 bytes, not 126
+idle connection closed	nil	true
+exit: 0

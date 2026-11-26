@@ -194,6 +194,9 @@ __cluau_meta = {
 			std::stringstream buffer;
 			buffer << in.rdbuf();
 			text = buffer.str();
+			// A UTF-8 byte order mark (some Windows editors save one) is not code.
+			if (text.rfind("\xEF\xBB\xBF", 0) == 0)
+				text.erase(0, 3);
 			return true;
 		}
 
@@ -515,7 +518,27 @@ __cluau_meta = {
 			else if (lua_isstring(T, -1))
 				message = lua_tostring(T, -1);
 			else
+			{
 				message = std::string("(an error value of type ") + luaL_typename(T, -1) + ")";
+				// An error object that says how it is shown (its __tostring
+				// run protected, on the main thread: this one has failed).
+				if (luaL_getmetafield(T, -1, "__tostring"))
+				{
+					lua_pop(T, 1);
+					lua_pushcfunction(
+						L,
+						[](lua_State* S) {
+							luaL_tolstring(S, 1, nullptr);
+							return 1;
+						},
+						"tostring");
+					lua_pushvalue(T, -1);
+					lua_xmove(T, L, 1);
+					if (lua_pcall(L, 1, 1, 0) == LUA_OK && lua_isstring(L, -1))
+						message = lua_tostring(L, -1);
+					lua_pop(L, 1);
+				}
+			}
 			if (Debug)
 				Debug->OnUncaught(T, message);
 			std::fflush(stdout);

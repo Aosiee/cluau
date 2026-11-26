@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <string_view>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -15,25 +16,8 @@ namespace cluau::runtime::detail {
 
 	namespace {
 
-		std::string LineOfText(const std::string& text, int line)
-		{
-			size_t start = 0;
-			for (int i = 0; i < line; i++)
-			{
-				start = text.find('\n', start);
-				if (start == std::string::npos)
-					return {};
-				start++;
-			}
-			const size_t end = text.find('\n', start);
-			std::string out = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-			if (!out.empty() && out.back() == '\r')
-				out.pop_back();
-			return out;
-		}
-
 		// UTF-16 code units <-> bytes on one line.
-		int ByteToUtf16(const std::string& line, int byte)
+		int ByteToUtf16(std::string_view line, int byte)
 		{
 			int units = 0;
 			int i = 0;
@@ -47,7 +31,7 @@ namespace cluau::runtime::detail {
 			return units + std::max(0, byte - (int)line.size());
 		}
 
-		int Utf16ToByte(const std::string& line, int units)
+		int Utf16ToByte(std::string_view line, int units)
 		{
 			int i = 0;
 			while (units > 0 && i < (int)line.size())
@@ -146,8 +130,8 @@ namespace cluau::runtime::detail {
 
 	std::string LspServer::LineAt(const std::string& path, int line) const
 	{
-		std::optional<std::string> text = m_Service.TextOf(path);
-		return text ? LineOfText(*text, line) : std::string();
+		std::shared_ptr<const SourceText> text = m_Service.Source(path);
+		return text ? std::string(text->Line(line)) : std::string();
 	}
 
 	Json LspServer::Position(const std::string& path, cluau::Position at) const
@@ -235,9 +219,23 @@ namespace cluau::runtime::detail {
 	{
 		std::vector<std::string> out;
 		std::optional<Json> parsed = Json::Parse(text);
-		if (!parsed || !(*parsed)["method"].IsString())
+		auto fail = [&](int code, const std::string& message, Json id) {
+			Json error = Json::Object().Set("code", code).Set("message", message);
+			out.push_back(Json::Object().Set("jsonrpc", "2.0").Set("id", std::move(id)).Set("error", std::move(error)).Dump());
 			return out;
+		};
+		if (!parsed)
+			return fail(-32700, "the message is not JSON", nullptr); // ParseError
+		if (!(*parsed)["method"].IsString())
+		{
+			// A response to a request of the server's own needs no answer.
+			if (parsed->IsObject() && parsed->Has("id") && (parsed->Has("result") || parsed->Has("error")))
+				return out;
+			return fail(-32600, "the message is not a request or a notification (it has no method)", (*parsed)["id"]); // InvalidRequest
+		}
 		const Json& request = *parsed;
+		// Texts are read afresh for each message.
+		m_Service.ForgetTexts();
 		const std::string method = request["method"].String();
 		const bool isRequest = request.Has("id");
 		const Json& params = request["params"];
@@ -379,8 +377,9 @@ namespace cluau::runtime::detail {
 			const bool highlight = method == "textDocument/documentHighlight";
 			const bool declaration = highlight || params["context"]["includeDeclaration"].Bool(true);
 			result = Json::Array();
-			const std::vector<Location> uses = m_Service.References(path, line, col);
-			for (size_t i = declaration ? 0 : 1; i < uses.size(); i++)
+			bool declared = false;
+			const std::vector<Location> uses = m_Service.References(path, line, col, &declared);
+			for (size_t i = declaration || !declared ? 0 : 1; i < uses.size(); i++)
 			{
 				// A highlight is the file's own uses.
 				if (highlight && uses[i].Path != path)
@@ -521,7 +520,7 @@ namespace cluau::runtime::detail {
 		else if (method == "textDocument/formatting")
 		{
 			const Json& options = params["options"];
-			const std::string indent = options["insertSpaces"].Bool() ? std::string((size_t)std::max(1, options["tabSize"].Int(4)), ' ') : "\t";
+			const std::string indent = options["insertSpaces"].Bool() ? std::string((size_t)std::clamp(options["tabSize"].Int(4), 1, 16), ' ') : "\t";
 			result = Json::Array();
 			for (const TextEdit& edit : m_Service.Format(path, indent))
 				result.Push(Json::Object()
@@ -550,6 +549,7 @@ namespace cluau::runtime::detail {
 
 	int LspServer::Serve(std::FILE* in, std::FILE* out)
 	{
+		constexpr long kMaxMessage = 256L << 20;
 #ifdef _WIN32
 		_setmode(_fileno(in), _O_BINARY);
 		_setmode(_fileno(out), _O_BINARY);
@@ -588,6 +588,22 @@ namespace cluau::runtime::detail {
 				return m_ShutDown ? 0 : 1;
 			if (length < 0)
 				continue;
+			// A length no editor sends: the stream cannot be followed past it.
+			if (length > kMaxMessage)
+			{
+				const std::string error = Json::Object()
+											  .Set("jsonrpc", "2.0")
+											  .Set("id", nullptr)
+											  .Set("error", Json::Object()
+																.Set("code", -32600)
+																.Set("message", "a message of " + std::to_string(length) +
+																					" bytes is over the language server's limit of 256 MiB"))
+											  .Dump();
+				std::fprintf(out, "Content-Length: %zu\r\n\r\n", error.size());
+				std::fwrite(error.data(), 1, error.size(), out);
+				std::fflush(out);
+				return 1;
+			}
 			std::string body((size_t)length, '\0');
 			if (length > 0 && std::fread(body.data(), 1, (size_t)length, in) != (size_t)length)
 				return 1;

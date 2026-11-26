@@ -92,17 +92,18 @@ namespace {
 		"--no-native interprets the bytecode instead of compiling it to native code. Either goes before the\n"
 		"command (cluau --sandbox -e '...', cluau --sandbox test).\n"
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
-		"script's directory and then CLUAU_PATH) and the standard modules @std/fs, @std/path,\n"
-		"@std/process, @std/io, @std/json, @std/time, @std/http, @std/net,\n"
-		"@std/sqlite, @std/regex, @std/task, @std/crypto, @std/encoding, @std/compress, @std/zip,\n"
-		"@std/tar, @std/server, @std/websocket, @std/term, @std/url, @std/args and @std/csv.\n";
+		"script's directory and then CLUAU_PATH) and the standard modules (@std/<name>).\n";
 
 	bool g_Sandbox = false; // --sandbox
 	bool g_Native = true;   // --no-native turns it off
 
 	int Usage(int status = 2)
 	{
-		std::fputs(kUsage, status == 0 ? stdout : stderr);
+		std::FILE* out = status == 0 ? stdout : stderr;
+		std::fputs(kUsage, out);
+#ifdef CLUAU_HAS_RUNTIME
+		std::fprintf(out, "This build's standard modules: %s.\n", cluau::runtime::StandardModules());
+#endif
 		return status;
 	}
 
@@ -504,6 +505,13 @@ namespace {
 		options.Profile = true;
 		options.ProfileTop = top;
 		options.ProfileFolded = folded;
+		// The file is written at the end: one that cannot be is found now,
+		// before the script runs.
+		if (!folded.empty() && !std::ofstream(std::filesystem::u8path(folded), std::ios::binary))
+		{
+			std::fprintf(stderr, "cluau: cannot write '%s'\n", folded.c_str());
+			return 2;
+		}
 		cluau::runtime::Runtime runtime(options);
 		return runtime.RunFile(argv[at]);
 	}

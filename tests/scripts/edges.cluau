@@ -1,0 +1,59 @@
+// The standard library at its edges: values that are almost right are
+// refused, and the ones that are right are kept whole.
+const json = require("@std/json")
+const time = require("@std/time")
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const term = require("@std/term")
+const regex = require("@std/regex")
+const compress = require("@std/compress")
+const crypto = require("@std/crypto")
+
+// JSON: numbers in JSON's own form only; a lone surrogate keeps what follows.
+for (_, text in { "01", "1.", "-", "0.5", "-0", "1e5" }) {
+	print("number", text, (pcall(json.decode, text)))
+}
+const lone = json.decode(`"\\ud800\\u0041"`) :: string
+print("surrogate", #lone, string.sub(lone, -1))
+print("indent", json.encode({ a = 1 }, 4))
+
+// Dates that do not exist.
+print("february 31", (pcall(time.parse, "2026-02-31")))
+print("february 29", (pcall(time.parse, "2024-02-29")), (pcall(time.parse, "2025-02-29")))
+const named, namedWhy = pcall(time.fromParts, { year = "x" } :: any) // allow-any: a wrong type on purpose
+print("parts", named, string.find(tostring(namedWhy), "parts.year", 1, true) != nil)
+
+// A large count reads only what the file holds.
+const file = path.join(fs.tempDir(), `cluau-edges-{math.floor(time.now() * 1000)}.txt`)
+fs.write(file, "seven b")
+const handle = fs.open(file)
+print("read", handle:read(1e9))
+handle:close()
+print("bad count", (pcall(function() {
+	const h = fs.open(file)
+	h:read(0 / 0)
+})))
+fs.remove(file)
+
+// A command argument cannot hold a NUL byte.
+print("nul", (pcall(process.run, { "echo", "a\0b" })))
+
+// Styles nested in one another keep the outer one (colours forced in a
+// child, since the test's output is a pipe); strip takes links too.
+const styled = process.run({ process.executable, "-e",
+	`const term = require("@std/term") require("@std/io").write(term.red("a" .. term.blue("b") .. "c"))` }, { env = { FORCE_COLOR = "1" } })
+print("nested", string.find(styled.output, "\27[39m\27[31mc", 1, true) != nil, term.strip(styled.output))
+print("strip", term.strip("\27]8;;https://example.com\27\\link\27]8;;\27\\ and \27]0;title\7text"))
+
+// regex.escape matches literally, extended mode too; split needs a piece.
+print("escape", regex.compile(regex.escape("a b.c"), "x"):test("a b.c"))
+print("split 0", (pcall(function() {
+	regex.compile(","):split("a,b", 0)
+})))
+
+// gzip's zero padding after the last member is passed over.
+print("padding", compress.gunzip(compress.gzip("padded") .. string.rep("\0", 16)))
+
+// A count of bytes is a whole number.
+print("random", (pcall(crypto.randomBytes, 2.5)), #crypto.randomBytes(3))

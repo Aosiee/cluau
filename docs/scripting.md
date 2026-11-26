@@ -254,7 +254,9 @@ profile: 1.204 s, 1187 ms sampled
 
 It samples the stack about once a millisecond, at Luau's safepoints
 (calls and loops); time inside a long C call (a sleep, a read, a download)
-goes to the line that made the call. `--top n` shows `n` functions (20 by
+goes to the line that made the call, and so does time in the standard
+modules written in cluau (a `task.wait`). A module's top level is
+`(top level)`, as the script's is. `--top n` shows `n` functions (20 by
 default). `--folded file` writes the samples as folded stacks
 (`outer;inner count` per line), which flame graph tools (`flamegraph.pl`,
 speedscope, Inferno) draw. Native code is profiled as it runs; with
@@ -284,8 +286,9 @@ reported and left alone.
 ## Editors
 
 `cluau lsp` is a language server: an editor starts it and gets, for each
-open `.cluau` file, what `cluau check` reports as you type (for the file
-and the modules it requires), completion with the types of names, members
+open `.cluau` file, what `cluau check` reports for it as you type (checked
+with the modules it requires as the editor has them, or as they are on
+disk; a required module's own problems show once it is open), completion with the types of names, members
 and the standard modules, hover (a name's type and the comment above its
 declaration), signature help, go to definition (locals, functions, class
 members in other modules, `require` paths), references and renaming
@@ -356,12 +359,20 @@ What it does:
   that hit on (`5`), or at `== 5`, `> 5`, `< 5`, `<= 5`, or every fifth hit
   (`% 5`); a log message prints instead of pausing, with each
   `{expression}` replaced by its value. A breakpoint on a line without code
-  moves to the next line that has some.
+  moves to the next line that has some; one past the file's last line is
+  not verified.
 - Pausing on an error that ends the script (on by default), or on every
-  error, including those a `try` catches (*All Errors*).
+  error, including those a `try` or `coroutine.resume` catches (*All
+  Errors*).
 - Stepping over, into and out of calls, including into a module's top
-  level from its `require` and through coroutines; pausing a running
-  script.
+  level from its `require`, and into and out of coroutines: a step into
+  `coroutine.resume` (or a function `coroutine.wrap` made) stops in the
+  coroutine, and a step that leaves it, at a yield or its end, stops where
+  it was resumed. Pausing a running script, and ending it (*Stop*: it ends
+  as asked, not as a failure).
+- Breakpoints, pauses and *Stop* take effect while the script waits in
+  `task.wait` or in a blocking call made with `@std/task` loaded; a pause
+  then stops at the next line that runs.
 - The paused stack: each frame's locals and upvalues, with tables and class
   instances opened field by field (an instance shows its class), and
   expressions (the watch list, hovers, the debug console) evaluated in the
@@ -586,8 +597,9 @@ returns (`true` when it returns nothing); later calls give the same value.
 | `"/abs/name"` | at that path |
 | `"@std/name"` | a standard module |
 
-For each, `name`, `name.cluau`, `name.luau`, `name/init.cluau` and
-`name/init.luau` are tried in that order. A module that requires itself,
+For each, `name` (when it ends in `.cluau` or `.luau`), `name.cluau`,
+`name.luau`, `name/init.cluau` and `name/init.luau` are tried in that
+order; a file of any other kind is not a module. A module that requires itself,
 directly or through others, is an error (`require cycle`).
 
 ```
@@ -633,7 +645,7 @@ pinned = { git = "https://github.com/someone/pinned", rev = "0007d6e4fc04c4a1d5b
 | command | does |
 |---|---|
 | `cluau init [name]` | makes `cluau.toml` (and a `.gitignore` leaving `cluau_modules/` out, when there is none) |
-| `cluau add <repository>[@ref] [--name <name>]` | adds a dependency and installs it. `@ref` is a tag, a branch or a commit; without one, the newest version tag (`v1.2.3`), else the default branch. The name is the repository's last part unless `--name` gives one |
+| `cluau add <repository>[@ref] [--name <name>]` | adds a dependency and installs it. `@ref` is a tag, a branch or a commit (its id, or the first 7 or more digits of it, pinned as the whole id); without one, the newest version tag (`v1.2.3`), else the default branch. The name is the repository's last part (`my.lib.git` is `my-lib`) unless `--name` gives one. When the install fails, `cluau.toml` is left as it was |
 | `cluau install` | fetches every dependency at the commit `cluau.lock` pins (resolving and pinning the new ones), and removes what is no longer wanted |
 | `cluau update [name...]` | resolves the dependencies' tags and branches again (all of them, or those named) and pins the new commits |
 | `cluau remove <name>` | removes a dependency |
@@ -642,11 +654,15 @@ pinned = { git = "https://github.com/someone/pinned", rev = "0007d6e4fc04c4a1d5b
 - A repository is `github.com/owner/name` (an `https://` address), any Git
   URL (`https://`, `ssh://`, `git@host:path`), or a local directory. Git
   fetches them, so `git` must be on `PATH`; private repositories use your
-  Git credentials.
+  Git credentials. The `@ref` of `cluau add` is the last `@` in the
+  address's path, so a user in it (`ssh://git@host/a/b.git@v1`) stays.
+- A package's name is letters, digits, `-` and `_`. An address or a ref
+  starting with `-` is refused, in `cluau.toml` and in `cluau add`.
 - A package is a repository whose `init.cluau` is what `require("name")`
   returns; `require("name/part")` loads `part.cluau` from it.
 - A package's own `cluau.toml` dependencies are installed too, beside it in
-  the same `cluau_modules/`. Two packages that want one name from different
+  the same `cluau_modules/`. Its other keys (`authors = [...]`, a date, a
+  `"""` string) are read and left alone. Two packages that want one name from different
   places or versions is an error naming both.
 - Commit `cluau.toml` and `cluau.lock`; leave `cluau_modules/` out. Anyone
   with the project runs `cluau install` and gets the same commits.
@@ -791,7 +807,7 @@ string?` reads a line (without its newline; `nil` at the end of input);
 ### `@std/json`
 
 `encode(value, pretty?): string` and `decode(text, options?): unknown`.
-`pretty` is `true` (two spaces) or an indent string. Objects' keys are
+`pretty` is `true` (two spaces), a number of spaces, or an indent string. Objects' keys are
 written sorted, so the output is the same every run; a table whose keys are
 `1..n` is an array, and an empty table is `[]`. A value with no JSON form
 (a function, a table that contains itself, NaN) is an error.
@@ -904,7 +920,11 @@ for (_, file in options:list("files")) {
   by its place: one (required unless `optional`), or with `many` every one
   left (none or more; one or more with `required`). After `--`, every
   argument is positional.
-- Short flags combine (`-vq`); `-h` and `--help` print the help.
+- Short flags combine (`-vq`, and `-vh` prints the help as `-h` and
+  `--help` do). An argument like `-5` or `-1.5` is a negative number (a
+  positional argument or a value), unless a short flag of that name is
+  declared; `number` options take decimal numbers only (not `inf`, `nan`
+  or `0x10`).
 - `parse(list?)` reads `process.args` (or `list`). With `--help` it prints
   the help and exits; with a mistake (an unknown option, a missing value, a
   value that is not a number, a missing positional) it prints the mistake
@@ -927,7 +947,7 @@ the case with a message at the assertion's line:
 | `equal(actual, expected, message?)` | equal values; tables are equal when their keys and values are |
 | `notEqual(actual, unexpected, message?)` | anything but `unexpected` |
 | `ok(value, message?)` | a value other than `false` or `nil` |
-| `near(actual, expected, tolerance?, message?)` | numbers within `tolerance` (`1e-9` by default) |
+| `near(actual, expected, tolerance?, message?)` | numbers within `tolerance` (`1e-9` by default); NaN is near nothing |
 | `raises(fn, text?): string` | `fn` raises an error (containing `text`, when given); its message |
 | `fail(message)` | fails the case here |
 
@@ -938,10 +958,10 @@ separator, a quote or a line break is quoted, with `""` for a quote):
 
 | function | is |
 |---|---|
-| `parse(text, options?): {{string}}` | every row's fields |
+| `parse(text, options?): {{string}}` | every row's fields (a byte order mark at the start is left out) |
 | `records(text, options?): {{[string]: string}}` | the rows after the first, keyed by the first row's names |
 | `encode(rows, options?): string` | rows (of text, numbers or booleans) as CSV, each line ending in `\n` |
-| `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order |
+| `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order (`""` for a missing one) |
 
 `options.separator` is another one-character separator (`";"`, `"\t"`).
 
@@ -1007,7 +1027,7 @@ and:
 | method | is |
 |---|---|
 | `read(count?): string?` | what has arrived, up to `count` bytes (64 KiB by default), waiting for at least one; `nil` at the end of the stream |
-| `readLine(): string?` | the next line, without its line break (`\r\n` or `\n`); the last line may have none; `nil` at the end |
+| `readLine(limit?): string?` | the next line, without its line break (`\r\n` or `\n`); the last line may have none; `nil` at the end. With `limit`, a line longer than that many bytes is an error (and stays unread): a server's guard against a client that never ends its line |
 | `lines()` | an iterator over the lines: `for (line in socket:lines()) { }` |
 | `readAll(): string` | the rest of the stream, until the other side closes it |
 | `write(...)` | sends the strings, in order |
@@ -1022,8 +1042,11 @@ the server's certificate against the system's trusted certificates (or
 `options.serverName`); `options.verify = false` skips both, for a server
 of one's own with a certificate nothing trusts. `listen`'s
 `options.tls = { certFile, keyFile }` (PEM files: the certificate chain and
-its key) serves TLS; a client whose handshake fails is let go and the next
-one waited for.
+its key) serves TLS. `accept` returns a connection as soon as it arrives,
+and its handshake is made by the connection's first read or write, so a
+client that is slow to begin holds up only its own task; a connection
+whose handshake fails reads as one that ended (`nil`), and a write to it
+is an error.
 
 ```
 const net = require("@std/net")
@@ -1056,9 +1079,9 @@ answers each request.
 
 | function | is |
 |---|---|
-| `serve(options, handler): Server` | serves `handler` and returns at once; `options.host` (`"127.0.0.1"` by default: this machine only), `options.port` (8080; 0 for any free one), `options.tls` (`{ certFile, keyFile }`), `options.maxBody` (16 MiB), `options.idle` (seconds a connection may wait between requests, 60). The `Server` has `host`, `port` and `close()` |
-| `router(): Router` | routes by method and path: `get`, `post`, `put`, `delete` and `route(method, pattern, handler)` (each returns the router, to chain), and `handler()` for `serve`. A pattern's parts are literal, `:name` (in `request.params.name`) or `*` (the rest, in `request.params["*"]`) |
-| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension); a path that would leave the directory is refused |
+| `serve(options, handler): Server` | serves `handler` and returns at once; `options.host` (`"127.0.0.1"` by default: this machine only), `options.port` (8080; 0 for any free one), `options.tls` (`{ certFile, keyFile }`), `options.maxBody` (16 MiB), `options.idle` (seconds a connection may wait between requests, 60). The `Server` has `host`, `port` and `close()` (which stops taking connections and closes those waiting for a request; a request under way is finished) |
+| `router(): Router` | routes by method and path: `get`, `post`, `put`, `delete` and `route(method, pattern, handler)` (each returns the router, to chain), and `handler()` for `serve`. A pattern's parts are literal, `:name` (in `request.params.name`) or `*` (the rest, in `request.params["*"]`). The path is split at its `/`s before it is decoded, so `/users/a%2Fb` has the one part `a/b` |
+| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension); a path that would leave the directory, or holds a NUL, is refused, and hidden files (a part starting with `.`: `.git`, `.env`) are not found. A symbolic link inside `directory` is followed |
 | `upgrade(request, fn): Answer` | answers a WebSocket request: `fn` gets the connection (a `@std/websocket` `WebSocket`), and the connection ends when `fn` returns |
 
 A `Request` has `method`, `path` (decoded, without the query), `query`
@@ -1066,7 +1089,18 @@ A `Request` has `method`, `path` (decoded, without the query), `query`
 `params`, `remoteHost`, `remotePort` and `target` (as the request line gave
 it). A handler answers with a table (`status`, 200 by default; `headers`;
 `body`, a string or a buffer), a string (200, as text), or `nil` (404). An
-error in a handler is a 500, with the error on stderr.
+error in a handler is a 500, with the error on stderr; so is a response
+header whose name is not a header name or whose value has a line break.
+
+Requests are read strictly, so that the server and anything in front of it
+read the same request: a body is framed by `Content-Length` (digits only,
+the same if repeated) or by `Transfer-Encoding: chunked`, not both and no
+other coding (400; 501 for a coding before `chunked`), and a body that ends
+early never reaches the handler (400, and the connection closes). A line of
+the head may have 64 KiB, and the head 256 KiB (431; 414 for the request
+line). `Expect: 100-continue` is answered with `100 Continue` before the
+body is read. A failed `accept` (out of file descriptors, say) is reported
+on stderr and tried again after a pause.
 
 ```
 const server = require("@std/server")
@@ -1100,7 +1134,17 @@ A `WebSocket` has `send(text)`, `sendBinary(data)`, `ping(data?)`,
 `receive()` (the next message, `{ kind, data }` with `kind` `"text"` or
 `"binary"`, or `nil` once the connection has closed), `messages()` (an
 iterator: `for (message in ws:messages()) { }`), `close(code?, reason?)`,
-and `protocol`, `closeCode` and `closeReason`.
+and `protocol`, `closeCode` and `closeReason`. A ping's data and a close's
+payload are at most 125 bytes.
+
+A frame that breaks RFC 6455 closes the connection with the code it gives
+(and `receive` returns `nil`, with that code in `closeCode`): an unmasked
+frame to a server or a masked one to a client, reserved bits or opcodes, a
+continuation with no message, a control frame over 125 bytes or
+fragmented (1002), a text message that is not UTF-8 (1007), a message of
+more than 64 MiB, its fragments together (1009). A connection that ends in
+the middle of a frame ends without a message. `connect` refuses a server
+that chooses a `Sec-WebSocket-Protocol` it was not offered.
 
 ```
 const websocket = require("@std/websocket")
@@ -1139,9 +1183,9 @@ Web addresses (RFC 3986).
 
 | function | is |
 |---|---|
-| `parse(text): Url` | `{ scheme, user, password, host, port, path, query, fragment }`: the scheme and host in lowercase, the path decoded, `port` `nil` when the address has none |
-| `format(url): string` | the address from its parts |
-| `resolve(base, relative): string` | `relative` read against `base`, as a browser follows a link (`"../c"`, `"?q=1"`, `"//host/x"`) |
+| `parse(text): Url` | `{ scheme, user, password, host, port, path, rawPath, query, fragment }`: the scheme and host in lowercase, `path` decoded and `rawPath` as written (`/a%2Fb` is `path` `/a/b`, `rawPath` `/a%2Fb`), `port` `nil` when the address has none |
+| `format(url): string` | the address from its parts: the path as `rawPath` has it while that decodes to `path` (so `%2F` stays `%2F`), else `path` encoded |
+| `resolve(base, relative): string` | `relative` read against `base`, as a browser follows a link (`"../c"`, `"?q=1"`, `"//host/x"`), on the paths as written |
 | `encode(text, keep?): string` | percent-encoded but for letters, digits and `- . _ ~` (and the characters in `keep`: `"/"` for a path) |
 | `decode(text, plus?): string` | `%XX` back to its byte (and `+` to a space, with `plus`) |
 | `parseQuery(text): {[string]: string}` | a query string's names and values, decoded |
@@ -1217,7 +1261,8 @@ memory and written when it is finished.
 An `Archive` has `entries()` (each `{ name, size, compressedSize,
 directory, modified }`, `modified` a time as `@std/time` has them),
 `read(name)` (an entry's contents), `extract(directory)` (every entry under
-the directory, made when missing; returns the files written) and `close()`.
+the directory, made when missing; returns how many files it wrote) and `close()`.
+Entry names are matched exactly, case included.
 `extract` refuses an entry whose name would put it outside the directory
 (an absolute name, or one through `..`), so an archive from anywhere is
 safe to extract.
@@ -1242,7 +1287,8 @@ archive:extract("unpacked")
 
 ### `@std/tar`
 
-Tar archives (POSIX ustar, with GNU and PAX long names when reading),
+Tar archives (POSIX ustar, with GNU and PAX long names and link targets
+when reading; a name too long for ustar is written as a PAX record),
 plain or gzip-compressed: a `.tar.gz` or `.tgz` is found by its first
 bytes. The same calls as `@std/zip`:
 
@@ -1254,8 +1300,10 @@ bytes. The same calls as `@std/zip`:
 
 An `Archive` has `entries()` (each `{ name, size, directory, link, mode,
 modified }`; `link` is a link's target), `read(name)`, `extract(directory)`
-(refusing an entry that would land outside it; links are left out) and
-`close()`. A `Writer` has `add(name, data, options?)`, `addFile(name, path,
+(refusing an entry that would land outside it; links, devices and FIFOs
+are left out) and `close()`. Data that is not an archive (shorter than a
+header, a header that does not check, an archive cut short) is an error;
+an empty archive has no entries. A `Writer` has `add(name, data, options?)`, `addFile(name, path,
 options?)` (`options.mode`, 0644 by default), `addDirectory(name)` and
 `finish()`.
 
@@ -1374,7 +1422,8 @@ builds against Luau's VM, compiler and analysis: the checkout
 `CLUAU_LUAU_DIR` names, else the Luau release cluau pins, which CMake
 fetches (`CLUAU_LUAU_VERSION` picks another). `@std/http` adds libcurl
 8.23.0 over mbedTLS 3.6.8, fetched and linked in the same way;
-`-DCLUAU_HTTP=OFF` builds without it. `CLUAU_BUILD_RUNTIME` is on for a standalone build
+`-DCLUAU_HTTP=OFF` builds without it (the README's Building section lists
+each module's option). `CLUAU_BUILD_RUNTIME` is on for a standalone build
 and off under `add_subdirectory`, so a host that embeds only the translator
 needs no Luau.
 

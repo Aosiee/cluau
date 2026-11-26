@@ -9,8 +9,10 @@
 #include "Analysis.h"
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Luau {
@@ -20,6 +22,17 @@ namespace Luau {
 }
 
 namespace cluau::runtime::detail {
+
+	// A text and where each of its lines starts, for reading many
+	// positions in it.
+	struct SourceText
+	{
+		explicit SourceText(std::string text);
+		std::string Text;
+		std::vector<size_t> Starts; // each line's first byte
+		// The line without its line break ("" past the last).
+		std::string_view Line(int line) const;
+	};
 
 	enum class CompletionKind { Variable, Function, Method, Property, Keyword, Type, Module, Value };
 
@@ -162,8 +175,10 @@ namespace cluau::runtime::detail {
 		// The uses of the name at the position, its declaration first: a
 		// local's (or a script's top-level function's) in its file; a class
 		// member's or a module's exported key's in every file of the
-		// workspace that uses it.
-		std::vector<Location> References(const std::string& path, int line, int col);
+		// workspace that uses it. `declared` says whether the first is the
+		// declaration (a runtime global's, or a standard module member's,
+		// is not in the workspace).
+		std::vector<Location> References(const std::string& path, int line, int col, bool* declared = nullptr);
 		// The edits renaming the name at the position, by file; `error`
 		// says why there are none.
 		std::map<std::string, std::vector<TextEdit>> Rename(const std::string& path, int line, int col, const std::string& newName, std::string& error);
@@ -192,6 +207,16 @@ namespace cluau::runtime::detail {
 
 		// The text the service holds for a file (its buffer, else the disk).
 		std::optional<std::string> TextOf(const std::string& path) const;
+		// The same, with its lines found (null when there is none). It is
+		// kept until a file opens, changes or closes, or ForgetTexts.
+		std::shared_ptr<const SourceText> Source(const std::string& path) const;
+		// Texts read from the disk are read again (a file may have changed
+		// without a notification).
+		void ForgetTexts() const
+		{
+			m_Sources.clear();
+			m_SourcesByPath.clear();
+		}
 
 	private:
 		std::string Name(const std::string& path) const;
@@ -202,8 +227,12 @@ namespace cluau::runtime::detail {
 		std::optional<Location> Mapped(const std::string& module, const Luau::Location& at, const std::string& symbol) const;
 		// Where the member `index` names is declared.
 		std::optional<Location> MemberDeclaration(const std::string& module, const Luau::AstExprIndexName* index);
-		// References; `declaredIn` is the module declaring a member ("" for a local).
-		std::vector<Location> ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn);
+		// References; `declaredIn` is the module declaring a member ("" for
+		// a local, kRuntimeGlobal for a global the script does not declare);
+		// `declared`: the first is the declaration.
+		std::vector<Location> ReferencesOf(const std::string& path, int line, int col, std::string& declaredIn, bool& declared);
+		// A module's text, with its lines (by module name).
+		std::shared_ptr<const SourceText> SourceOf(const std::string& name) const;
 		// A function's item from where it is declared (nullopt when what is
 		// declared there is not a function).
 		std::optional<CallItem> CallItemAt(const Location& declaration);
@@ -217,6 +246,8 @@ namespace cluau::runtime::detail {
 		bool Prepare(const std::string& name);
 
 		Analysis m_Analysis;
+		mutable std::map<std::string, std::shared_ptr<const SourceText>> m_Sources;       // by module name
+		mutable std::map<std::string, std::shared_ptr<const SourceText>> m_SourcesByPath; // by the path asked for
 		std::map<std::string, std::string> m_Open; // module name -> the path the editor gave
 		std::vector<std::string> m_Workspace;
 	};
