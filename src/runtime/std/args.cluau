@@ -99,6 +99,9 @@ class Parser {
 	}
 
 	function add(spec: Spec): Parser {
+		if (spec.Name == "help" && spec.Kind != "positional") {
+			error("args: --help is the parser's own (it prints the help)", 3)
+		}
 		for (_, other in self.Specs) {
 			if (other.Name == spec.Name) {
 				error(`args: '{spec.Name}' is declared twice`, 3)
@@ -108,6 +111,9 @@ class Parser {
 			}
 			if (spec.Kind == "positional" && other.Kind == "positional" && other.Many) {
 				error(`args: '{spec.Name}' comes after '{other.Name}', which takes every remaining argument`, 3)
+			}
+			if (spec.Kind == "positional" && spec.Required && other.Kind == "positional" && !other.Required) {
+				error(`args: '{spec.Name}' is required but comes after '{other.Name}', which is optional`, 3)
 			}
 		}
 		if (spec.Short != nil && #spec.Short != 1) {
@@ -127,6 +133,9 @@ class Parser {
 	// --name value, --name=value or -s value.
 	function option(name: string, options: OptionOptions?): Parser {
 		const o: OptionOptions = options or {}
+		if (o.number == true && o.default != nil && !IsDecimal(o.default)) {
+			error(`args: --{name} takes a number, but its default is '{o.default}'`, 2)
+		}
 		return self:add({ Kind = "option", Name = name, Short = o.short, Help = o.help or "", Default = o.default,
 			Value = o.value or string.upper(name), Many = o.many == true, Required = false, Number = o.number == true })
 	}
@@ -168,7 +177,8 @@ class Parser {
 		}
 		let rows: { { string } } = {}
 		let positionals: { { string } } = {}
-		table.insert(rows, { "-h, --help", "show this help and exit" })
+		// -h is the help's too, unless a flag or an option has it.
+		table.insert(rows, { if (self:find(nil, "h") == nil) "-h, --help" else "    --help", "show this help and exit" })
 		for (_, spec in self.Specs) {
 			let text = spec.Help
 			if (spec.Default != nil) {
@@ -245,7 +255,7 @@ class Parser {
 				table.insert(positional, arg)
 			} else if (arg == "--") {
 				onlyPositional = true
-			} else if (arg == "-h" || arg == "--help") {
+			} else if (arg == "--help" || (arg == "-h" && self:find(nil, "h") == nil)) {
 				parsed.Help = true
 				return parsed, nil
 			} else if (string.sub(arg, 1, 2) == "--") {

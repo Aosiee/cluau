@@ -13,17 +13,34 @@ const kProject = "cluau.toml"
 const kLock = "cluau.lock"
 const kModules = "cluau_modules"
 const kMarker = ".cluau-commit"
+// In cluau_modules while a command installs there, so that two at once do
+// not undo each other's work.
+const kBusy = ".lock"
 
 type Value = string | number | boolean | { [string]: Value } | { Value }
 type Table = { [string]: Value }
 
-// A dependency as cluau.toml gives it, and as cluau.lock pins it.
-type Dependency = { name: string, git: string, ref: string, kind: string }
-type Locked = { name: string, git: string, ref: string, commit: string, via: string }
+// A dependency as cluau.toml gives it, and as cluau.lock pins it. `git` is
+// the repository as written (a relative path stays one, so that cluau.lock
+// is the same everywhere); `url` is what git is given.
+type Dependency = { name: string, git: string, url: string, ref: string, kind: string }
+type Locked = { name: string, git: string, url: string, ref: string, commit: string, via: string }
 
 // What a failure puts back before cluau exits (cluau.toml as it was before
-// an add that did not complete).
+// an add that did not complete), and the hold on cluau_modules let go.
 let undo: (() -> ())? = nil
+let release: (() -> ())? = nil
+
+// The packages this command has fetched into cluau_modules.
+const fetchedNow: { string } = {}
+
+function Release() {
+	if (release != nil) {
+		const free = release
+		release = nil
+		pcall(free)
+	}
+}
 
 function Fail(message: string): never {
 	io.writeError(`cluau: {message}\n`)
@@ -32,6 +49,7 @@ function Fail(message: string): never {
 		undo = nil
 		pcall(restore)
 	}
+	Release()
 	return process.exit(1)
 }
 
@@ -73,7 +91,19 @@ function ParseString(text: string, at: number): (string, number) {
 				i = string.find(text, "[^%s]", i + 1) or #text + 1
 				continue
 			}
-			const escapes: { [string]: string } = { n = "\n", t = "\t", r = "\r", ["\\"] = "\\", ["\""] = "\"" }
+			if (e == "u" || e == "U") {
+				// \uXXXX and \UXXXXXXXX: a character by its code point.
+				const digits = if (e == "u") 4 else 8
+				const hex = string.sub(text, i + 2, i + 1 + digits)
+				const code = if (#hex == digits && string.find(hex, "^%x+$") != nil) tonumber(hex, 16) else nil
+				if (code == nil || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+					error(`\\{e} needs {digits} hexadecimal digits of a character`, 0)
+				}
+				table.insert(out, utf8.char(code :: number))
+				i += 2 + digits
+				continue
+			}
+			const escapes: { [string]: string } = { n = "\n", t = "\t", r = "\r", b = "\b", f = "\f", ["\\"] = "\\", ["\""] = "\"" }
 			table.insert(out, escapes[e] or e)
 			i += 2
 		} else {
@@ -156,6 +186,9 @@ function ParseValue(text: string, at: number): (Value, number) {
 				error(`expected '=' after {key}`, 0)
 			}
 			const value, after = ParseValue(text, j + 1)
+			if (inline[key] != nil) {
+				error(`{key} is given twice`, 0)
+			}
 			inline[key] = value
 			j = SkipSpace(text, after)
 			const d = string.sub(text, j, j)
@@ -206,8 +239,11 @@ function ParseToml(text: string, file: string): { [string]: Table } {
 		}
 		const header = string.match(body, "^%[%s*([%w_%.%-]+)%s*%]%s*#?.*$")
 		if (header != nil) {
+			if (tables[header] != nil) {
+				problem(`[{header}] is given twice`)
+			}
 			current = header
-			tables[current] = tables[current] or {}
+			tables[current] = {}
 			continue
 		}
 		if (string.find(body, "^%[%[") != nil) {
@@ -236,13 +272,22 @@ function ParseToml(text: string, file: string): { [string]: Table } {
 		if (trailing != "" && string.sub(trailing, 1, 1) != "#") {
 			problem(`unexpected text after the value: {trailing}`)
 		}
+		if (tables[current][name] != nil) {
+			problem(`{name} is given twice`)
+		}
 		tables[current][name] = value :: Value
 	}
 	return tables
 }
 
+// `text` as a TOML string: a backslash, a quote and control characters
+// escaped, so that every name and path reads back as it was.
 function Quote(text: string): string {
-	return "\"" .. string.gsub(string.gsub(text, "\\", "\\\\"), "\"", "\\\"") .. "\""
+	const escaped = string.gsub(text, "[%c\"\\]", function(c: string): string {
+		const named: { [string]: string } = { ["\""] = "\\\"", ["\\"] = "\\\\", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }
+		return named[c] or string.format("\\u%04X", string.byte(c))
+	})
+	return "\"" .. escaped .. "\""
 }
 
 // ---- the project -------------------------------------------------------
@@ -264,6 +309,76 @@ function FindProject(): string? {
 
 function RequireProject(): string {
 	return FindProject() or Fail(`no {kProject} here or above (cluau init makes one)`)
+}
+
+// A path as compared with another (separators alike; in any case where the
+// file system ignores it).
+function Compared(file: string): string {
+	const slashed = string.gsub(file, "\\", "/")
+	return if (process.platform == "windows" || process.platform == "macos") string.lower(slashed) else slashed
+}
+
+// Whether `file` is a symbolic link (or a Windows junction): what is there
+// resolves to somewhere other than its own place in its directory.
+function IsLink(file: string): boolean {
+	const name = path.basename(file)
+	const found, dir = pcall(fs.realpath, path.dirname(file))
+	if (!found) {
+		return false
+	}
+	const listed, names = pcall(fs.list, dir)
+	if (!listed) {
+		return false
+	}
+	let here = false
+	for (_, each in names :: { string }) {
+		here = here || Compared(each) == Compared(name)
+	}
+	if (!here) {
+		return false
+	}
+	const resolved, real = pcall(fs.realpath, file)
+	return !resolved || Compared(real :: string) != Compared(path.join(dir :: string, name))
+}
+
+// The packages are installed only into a real cluau_modules directory of
+// the project's own: one that is a link (as a cloned project can hold) would
+// have them written, and what is no longer wanted deleted, where it points.
+function CheckModules(project: string) {
+	const modules = path.join(project, kModules)
+	if (IsLink(modules)) {
+		Fail(`{kModules} is a symbolic link: packages are installed only into a directory of the project's own (remove the link and run the command again)`)
+	}
+	if (fs.exists(modules) && !fs.isDir(modules)) {
+		Fail(`{kModules} is not a directory`)
+	}
+}
+
+// A file the command rewrites (cluau.toml, cluau.lock): written only when it
+// is the project's own, not through a link to another file.
+function CheckWritable(file: string, shown: string) {
+	if (IsLink(file)) {
+		Fail(`{shown} is a symbolic link: cluau rewrites only a file of the project's own`)
+	}
+}
+
+// Holds cluau_modules for this command: a directory moved into place, which
+// fails while another command holds it. Let go when the command ends.
+function Hold(project: string) {
+	CheckModules(project)
+	const modules = path.join(project, kModules)
+	fs.mkdir(modules)
+	const busy = path.join(modules, kBusy)
+	const mine = path.join(modules, `{kBusy}-{string.format("%x", math.floor((os.clock() + os.time()) * 1e6) % 0x7fffffff)}-{math.random(1, 0x7fffffff)}`)
+	fs.mkdir(mine)
+	fs.write(path.join(mine, "held-by"), "cluau\n")
+	if (!pcall(fs.rename, mine, busy)) {
+		fs.remove(mine, true)
+		Fail(`another cluau command is installing packages here ({kModules}/{kBusy} is there); if none is running, remove that directory`)
+	}
+	release = function() {
+		fs.remove(busy, true)
+	}
 }
 
 // A repository address: `github.com/a/b` is https://github.com/a/b; a URL,
@@ -302,11 +417,36 @@ function CheckArgument(what: string, value: string, where: string) {
 	}
 }
 
+// What git is given for a repository a cluau.toml in `dir` names: a local
+// path relative to that directory, `github.com/a/b` as an https:// address,
+// and anything else (a URL, git@host:a/b) as written.
+function Address(git: string, dir: string): string {
+	if (string.find(git, "://", 1, true) != nil || path.isAbsolute(git)) {
+		return git
+	}
+	const scp = string.find(git, "^[^/\\]+:") != nil
+	if (!scp && fs.exists(path.join(dir, git))) {
+		return path.absolute(path.join(dir, git))
+	}
+	if (!scp && string.find(git, "^[%w.-]+%.[%a]+/") != nil) {
+		return `https://{git}`
+	}
+	if (!scp && (string.find(git, "^%.%.?[/\\]") != nil || git == "." || git == "..")) {
+		return path.absolute(path.join(dir, git))
+	}
+	return git
+}
+
 // The dependencies a cluau.toml names; `shown` names the file in a problem.
 function Dependencies(project: string, shown: string): { Dependency } {
 	const file = path.join(project, kProject)
 	const tables = ParseToml(fs.read(file), shown)
 	const out: { Dependency } = {}
+	for (section in tables) {
+		if (string.sub(section, 1, 13) == "dependencies.") {
+			Fail(`{shown}: [{section}] is not read: write it as {string.sub(section, 14)} = \{ git = "...", tag = "..." } under [dependencies]`)
+		}
+	}
 	for (name, spec in tables.dependencies or {}) {
 		if (!IsName(name)) {
 			Fail(`{shown}: '{name}' is not a package name (letters, digits, - and _)`)
@@ -320,16 +460,29 @@ function Dependencies(project: string, shown: string): { Dependency } {
 			Fail(`{shown}: dependencies.{name} needs git = "<repository>"`)
 		}
 		CheckArgument("the repository", git :: string, `{shown}: dependencies.{name}`)
+		for (key, value in t) {
+			if (key != "git" && key != "tag" && key != "branch" && key != "rev") {
+				Fail(`{shown}: dependencies.{name} has '{key}', which is not git, tag, branch or rev`)
+			}
+			if (type(value) != "string") {
+				Fail(`{shown}: dependencies.{name}'s {key} is a string`)
+			}
+		}
 		let ref = "HEAD"
 		let kind = "head"
 		for (_, k in { "tag", "branch", "rev" }) {
-			if (type(t[k]) == "string") {
+			if (t[k] != nil) {
+				if (kind != "head") {
+					Fail(`{shown}: dependencies.{name} gives both {kind} and {k}: one of tag, branch and rev`)
+				}
 				ref = t[k] :: string
 				kind = k
 			}
 		}
 		CheckArgument(`the {kind}`, ref, `{shown}: dependencies.{name}`)
-		table.insert(out, { name = name, git = git :: string, ref = ref, kind = kind })
+		const url = Address(git :: string, project)
+		CheckArgument("the repository", url, `{shown}: dependencies.{name}`)
+		table.insert(out, { name = name, git = git :: string, url = url, ref = ref, kind = kind })
 	}
 	table.sort(out, function(a: Dependency, b: Dependency): boolean {
 		return a.name < b.name
@@ -348,6 +501,7 @@ function ReadLock(project: string): { [string]: Locked } {
 			out[name] = {
 				name = name,
 				git = tostring(t.git or ""),
+				url = "",
 				ref = tostring(t.ref or "HEAD"),
 				commit = tostring(t.commit or ""),
 				via = tostring(t.via or ""),
@@ -375,13 +529,16 @@ function WriteLock(project: string, locked: { [string]: Locked }) {
 		}
 		table.insert(lines, "")
 	}
-	fs.write(path.join(project, kLock), table.concat(lines, "\n"))
+	const file = path.join(project, kLock)
+	CheckWritable(file, kLock)
+	fs.write(file, table.concat(lines, "\n"))
 }
 
 // cluau.toml with `name`'s dependency line set (`spec`) or removed (nil):
 // the rest of the file, comments included, stays as it is.
 function EditDependency(project: string, name: string, spec: string?) {
 	const file = path.join(project, kProject)
+	CheckWritable(file, kProject)
 	const lines: { string } = {}
 	for (line in string.gmatch(fs.read(file) .. "\n", "([^\n]*)\n")) {
 		table.insert(lines, (string.gsub(line, "\r$", "")))
@@ -394,7 +551,10 @@ function EditDependency(project: string, name: string, spec: string?) {
 	let last = 0
 	let found = 0
 	for (i, line in lines) {
-		const h = string.match(line, "^%s*%[%s*([%w_%.%-]+)%s*%]")
+		// Any [table] or [[array of tables]] ends the one before it.
+		const h = if (string.find(line, "^%s*%[%[") != nil) "[[]]"
+			else if (string.find(line, "^%s*%[") != nil) (string.match(line, "^%s*%[%s*([%w_%.%-]+)%s*%]") or "[]")
+			else nil
 		if (h != nil) {
 			section = h
 			if (h == "dependencies") {
@@ -433,14 +593,21 @@ function EditDependency(project: string, name: string, spec: string?) {
 // ---- git -----------------------------------------------------------------
 
 function Git(args: { string }, cwd: string?): (boolean, string) {
-	const command = { "git" }
+	// ext:: runs a command of the address's choosing: never, whatever the
+	// user's Git configuration says.
+	const command = { "git", "-c", "protocol.ext.allow=never" }
 	for (_, a in args) {
 		table.insert(command, a)
 	}
 	// No prompts (a private or missing repository fails instead of waiting).
 	const ok, result = pcall(process.run, command, { cwd = cwd, stderr = "capture", env = { GIT_TERMINAL_PROMPT = "0" } })
 	if (!ok) {
-		Fail("cannot run git (it fetches packages): is it installed and on PATH?")
+		// The program not found, or the directory to run it in gone.
+		const reason = tostring(result)
+		if (cwd != nil && !fs.isDir(cwd)) {
+			Fail(`cannot run git in {cwd}: the directory is gone ({reason})`)
+		}
+		Fail(`cannot run git (it fetches packages): is it installed and on PATH? ({reason})`)
 	}
 	const r = result :: { code: number, output: string, error: string }
 	if (r.code != 0) {
@@ -541,21 +708,33 @@ function LatestTag(url: string): string? {
 	return best
 }
 
-// `commit` of `url` into cluau_modules/<name> (unless it is there already).
-function Fetch(project: string, name: string, url: string, commit: string): boolean {
+// Whether cluau_modules/<name> holds `commit` already.
+function Installed(project: string, name: string, commit: string): boolean {
+	const marker = path.join(project, kModules, name, kMarker)
+	return fs.isFile(marker) && string.match(fs.read(marker), "%x+") == commit
+}
+
+// `commit` of `url` into cluau_modules/<name>. With `onRef` (a branch, or
+// HEAD), the commit must be on it: that branch's history is fetched and the
+// commit looked for there.
+function Fetch(project: string, name: string, url: string, commit: string, onRef: string?) {
 	if (!IsCommit(commit)) {
 		return Fail(`{kLock}: {name}'s commit '{commit}' is not a commit id`)
 	}
 	const target = path.join(project, kModules, name)
-	const marker = path.join(target, kMarker)
-	if (fs.isFile(marker) && string.match(fs.read(marker), "%x+") == commit) {
-		return false
-	}
 	const scratch = path.join(project, kModules, `.{name}.fetching`)
+	const short = string.sub(commit, 1, 12)
 	fs.remove(scratch, true)
 	fs.mkdir(scratch)
 	let ok, problem = Git({ "init", "--quiet" }, scratch)
-	if (ok) {
+	if (ok && onRef != nil) {
+		ok, problem = Git({ "fetch", "--quiet", "--", url, onRef }, scratch)
+		if (ok && !Git({ "merge-base", "--is-ancestor", commit, "FETCH_HEAD" }, scratch)) {
+			fs.remove(scratch, true)
+			const where = if (onRef == "HEAD") "the default branch" else `branch {onRef}`
+			return Fail(`{kLock} pins {name} at {short}, which is not on {where} of {url}: cluau update {name} pins its newest commit`)
+		}
+	} else if (ok) {
 		ok, problem = Git({ "fetch", "--quiet", "--depth", "1", "--", url, commit }, scratch)
 		if (!ok) {
 			// A server that does not serve single commits: all of it.
@@ -567,13 +746,41 @@ function Fetch(project: string, name: string, url: string, commit: string): bool
 	}
 	if (!ok) {
 		fs.remove(scratch, true)
-		return Fail(`cannot fetch {name} ({url} at {string.sub(commit, 1, 12)}): {problem}`)
+		return Fail(`cannot fetch {name} ({url} at {short}): {problem}`)
 	}
 	fs.remove(path.join(scratch, ".git"), true)
+	// The package may have a file of the marker's name, or a link by that
+	// name to a file elsewhere: replaced, never written through.
+	fs.remove(path.join(scratch, kMarker), true)
 	fs.write(path.join(scratch, kMarker), commit .. "\n")
 	fs.remove(target, true)
 	fs.rename(scratch, target)
-	return true
+	table.insert(fetchedNow, name)
+}
+
+// The commit cluau.lock pins for `dep`, checked against what it names: a
+// tag's commit must be the one the tag names now, and a branch's (or the
+// default branch's) is looked for on it when it is fetched (`onRef`). An
+// explicit commit (rev) is taken as it is.
+function Pinned(project: string, dep: Dependency, commit: string): string? {
+	const short = string.sub(commit, 1, 12)
+	if (Installed(project, dep.name, commit)) {
+		return nil
+	}
+	if (dep.kind == "tag") {
+		const tagged = Resolve(dep.url, dep.ref)
+		if (tagged != commit) {
+			Fail(`{kLock} pins {dep.name} at {short}, but tag {dep.ref} of {dep.git} is {string.sub(tagged, 1, 12)}: cluau update {dep.name} pins the tag's commit`)
+		}
+		return nil
+	}
+	if (dep.kind == "rev") {
+		if (string.sub(commit, 1, #dep.ref) != string.lower(dep.ref)) {
+			Fail(`{kLock} pins {dep.name} at {short}, which is not the commit {dep.ref}: cluau update {dep.name} pins it again`)
+		}
+		return nil
+	}
+	return dep.ref
 }
 
 // ---- the commands ---------------------------------------------------------
@@ -581,6 +788,7 @@ function Fetch(project: string, name: string, url: string, commit: string): bool
 // Every dependency (and theirs, flattened) fetched at its locked commit, or a
 // newly resolved one where the lock has none (or `fresh` names it).
 function Install(project: string, fresh: { [string]: boolean }) {
+	CheckWritable(path.join(project, kLock), kLock)
 	const lock = ReadLock(project)
 	const chosen: { [string]: Locked } = {}
 	const queue: { { dep: Dependency, via: string } } = {}
@@ -595,7 +803,7 @@ function Install(project: string, fresh: { [string]: boolean }) {
 		const dep = item.dep
 		const previous = chosen[dep.name]
 		if (previous != nil) {
-			if (previous.git != dep.git || previous.ref != dep.ref) {
+			if (previous.url != dep.url || previous.ref != dep.ref) {
 				const first = if (previous.via == "") "the project" else previous.via
 				const second = if (item.via == "") "the project" else item.via
 				Fail(`{dep.name} is wanted at two places: {previous.git} {previous.ref} (by {first}) and {dep.git} {dep.ref} (by {second})`)
@@ -604,13 +812,18 @@ function Install(project: string, fresh: { [string]: boolean }) {
 		}
 		const locked = lock[dep.name]
 		let commit = ""
-		if (locked != nil && locked.git == dep.git && locked.ref == dep.ref && IsCommit(locked.commit) && !fresh[dep.name] && !fresh["*"]) {
-			commit = locked.commit
+		let onRef: string? = nil
+		if (dep.kind == "rev" && IsCommit(dep.ref)) {
+			commit = string.lower(dep.ref)
+		} else if (locked != nil && locked.git == dep.git && locked.ref == dep.ref && IsCommit(locked.commit) && !fresh[dep.name] && !fresh["*"]) {
+			commit = string.lower(locked.commit)
+			onRef = Pinned(project, dep, commit)
 		} else {
-			commit = Resolve(dep.git, dep.ref)
+			commit = Resolve(dep.url, dep.ref)
 		}
-		chosen[dep.name] = { name = dep.name, git = dep.git, ref = dep.ref, commit = commit, via = item.via }
-		if (Fetch(project, dep.name, dep.git, commit)) {
+		chosen[dep.name] = { name = dep.name, git = dep.git, url = dep.url, ref = dep.ref, commit = commit, via = item.via }
+		if (!Installed(project, dep.name, commit)) {
+			Fetch(project, dep.name, dep.url, commit, onRef)
 			fetched += 1
 			Say(`  {dep.name} {if (dep.ref == "HEAD") "" else dep.ref .. " "}({string.sub(commit, 1, 12)})`)
 		}
@@ -622,11 +835,12 @@ function Install(project: string, fresh: { [string]: boolean }) {
 			}
 		}
 	}
-	// What is no longer wanted goes.
+	// What is no longer wanted goes (not cluau's own .lock and the like,
+	// which no package name starts with).
 	const modules = path.join(project, kModules)
 	if (fs.isDir(modules)) {
 		for (_, name in fs.list(modules)) {
-			if (chosen[name] == nil && fs.isFile(path.join(modules, name, kMarker))) {
+			if (chosen[name] == nil && string.sub(name, 1, 1) != "." && fs.isFile(path.join(modules, name, kMarker))) {
 				fs.remove(path.join(modules, name), true)
 				Say(`  removed {name}`)
 			}
@@ -642,21 +856,20 @@ function Install(project: string, fresh: { [string]: boolean }) {
 
 function Init(args: { string }) {
 	const dir = process.cwd()
-	if (fs.exists(path.join(dir, kProject))) {
+	if (fs.exists(path.join(dir, kProject)) || IsLink(path.join(dir, kProject))) {
 		Fail(`{kProject} is here already`)
 	}
 	const name = args[1] or path.basename(dir)
 	fs.write(path.join(dir, kProject), `[package]\nname = {Quote(name)}\nversion = "0.1.0"\n\n[dependencies]\n`)
 	Say(`made {kProject} for {name}`)
 	const ignore = path.join(dir, ".gitignore")
-	if (!fs.exists(ignore)) {
+	if (!fs.exists(ignore) && !IsLink(ignore)) {
 		fs.write(ignore, `{kModules}/\n`)
 		Say(`made .gitignore (leaving {kModules}/ out of Git)`)
 	}
 }
 
-function Add(args: { string }) {
-	const project = RequireProject()
+function Add(project: string, args: { string }) {
 	let given: string? = nil
 	let name: string? = nil
 	let i = 1
@@ -724,8 +937,12 @@ function Add(args: { string }) {
 	// cluau.toml goes back to what it was if the install fails.
 	const file = path.join(project, kProject)
 	const before = fs.read(file)
+	// So do the packages it fetched (the next install fetches what is wanted).
 	undo = function() {
 		fs.write(file, before)
+		for (_, fetched in fetchedNow) {
+			fs.remove(path.join(project, kModules, fetched), true)
+		}
 		io.writeError(`cluau: {kProject} is left as it was\n`)
 	}
 	EditDependency(project, package, spec)
@@ -741,8 +958,7 @@ function Add(args: { string }) {
 	}
 }
 
-function Remove(args: { string }) {
-	const project = RequireProject()
+function Remove(project: string, args: { string }) {
 	const name = args[1] or Fail("usage: cluau remove <name>")
 	let known = false
 	for (_, dep in Dependencies(project, kProject)) {
@@ -756,8 +972,7 @@ function Remove(args: { string }) {
 	Install(project, {})
 }
 
-function Update(args: { string }) {
-	const project = RequireProject()
+function Update(project: string, args: { string }) {
 	const fresh: { [string]: boolean } = {}
 	if (#args == 0) {
 		fresh["*"] = true
@@ -796,16 +1011,28 @@ function main(args: { string }) {
 	for (i = 2, #args) {
 		table.insert(rest, args[i])
 	}
+	// The commands that install hold cluau_modules while they run.
+	local function Holding(run: (string, { string }) -> ()) {
+		const project = RequireProject()
+		Hold(project)
+		const ok, problem = pcall(run, project, rest)
+		Release()
+		if (!ok) {
+			error(problem, 0)
+		}
+	}
 	if (command == "init") {
 		Init(rest)
 	} else if (command == "add") {
-		Add(rest)
+		Holding(Add)
 	} else if (command == "remove") {
-		Remove(rest)
+		Holding(Remove)
 	} else if (command == "install") {
-		Install(RequireProject(), {})
+		Holding(function(project: string) {
+			Install(project, {})
+		})
 	} else if (command == "update") {
-		Update(rest)
+		Holding(Update)
 	} else if (command == "list") {
 		List()
 	} else {

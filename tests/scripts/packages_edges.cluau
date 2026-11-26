@@ -1,0 +1,219 @@
+// The package commands where a project or a package is not what it seems: a
+// package holding a link named .cluau-commit, a cluau_modules or cluau.lock
+// that is a link, a cluau.lock whose commit is not the tag's or not on the
+// branch, a [[table]] after [dependencies], a relative repository path, the
+// cluau.toml forms that are refused, github.com/owner/name in cluau.toml,
+// git's ext:: transport, a second command while one holds cluau_modules, a
+// name with a line break, and a failed add.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const cluau = process.executable
+const work = path.join(fs.tempDir(), `cluau-packages-edges-{process.platform}-{math.floor(time.now() * 1000)}`)
+const app = path.join(work, "app")
+const repos = path.join(work, "repos")
+fs.mkdir(app)
+fs.mkdir(repos)
+const links = process.platform != "windows" // links made here with ln
+
+function Run(args: { string }, cwd: string): string {
+	const r = process.run(args, { cwd = cwd, stderr = "merge" })
+	return (string.gsub(r.output, "\r", ""))
+}
+
+function Git(args: { string }, cwd: string): string {
+	const command = { "git", "-c", "user.name=cluau tests", "-c", "user.email=tests@example.invalid", "-c", "init.defaultBranch=main" }
+	for (_, a in args) {
+		table.insert(command, a)
+	}
+	return Run(command, cwd)
+}
+
+// What a command prints, the same on every machine: no commit ids, no paths.
+function Shown(text: string): string {
+	let out = string.gsub(text, (string.gsub(work, "%p", "%%%0")), "<work>")
+	out = string.gsub(out, "\\", "/")
+	out = string.gsub(out, "%x%x%x%x%x%x%x%x%x%x%x%x+", "<commit>")
+	return (string.gsub(out, "%s+$", ""))
+}
+
+function Cluau(args: { string }, cwd: string?): string {
+	const command: { string } = { cluau }
+	for (_, a in args) {
+		table.insert(command, a)
+	}
+	return Shown(Run(command, cwd or app))
+}
+
+// A repository with `files`, committed and tagged v1.0.0.
+function Repository(name: string, files: { [string]: string }): string {
+	const dir = path.join(repos, name)
+	fs.mkdir(dir)
+	for (file, text in files) {
+		fs.write(path.join(dir, file), text)
+	}
+	Git({ "init", "-q" }, dir)
+	Git({ "add", "-A" }, dir)
+	Git({ "commit", "-q", "-m", "one" }, dir)
+	Git({ "tag", "v1.0.0" }, dir)
+	return dir
+}
+
+function Head(dir: string): string {
+	return (string.gsub(Git({ "rev-parse", "HEAD" }, dir), "%s+$", ""))
+}
+
+function SetToml(text: string) {
+	fs.write(path.join(app, "cluau.toml"), "[package]\nname = \"app\"\n\n" .. text)
+	fs.remove(path.join(app, "cluau.lock"))
+}
+
+const victim = path.join(work, "victim.txt")
+fs.write(victim, "the user's own data\n")
+print(Cluau({ "init" }))
+
+// A package whose repository has a link named .cluau-commit to a file
+// outside: the marker replaces the link, and the file is left alone. (Git
+// makes the link from the index; where links are not made, it is a file.)
+const evil = path.join(repos, "evil")
+fs.mkdir(evil)
+fs.write(path.join(evil, "init.cluau"), "return 1\n")
+const target = path.join(work, "link-target")
+fs.write(target, victim)
+Git({ "init", "-q" }, evil)
+const blob = (string.gsub(Git({ "hash-object", "-w", target }, evil), "%s+$", ""))
+Git({ "add", "init.cluau" }, evil)
+Git({ "update-index", "--add", "--cacheinfo", `120000,{blob},.cluau-commit` }, evil)
+Git({ "commit", "-q", "-m", "one" }, evil)
+Git({ "tag", "v1.0.0" }, evil)
+print(Cluau({ "add", evil }))
+print("victim", fs.read(victim) == "the user's own data\n")
+print("marker", Shown(fs.read(path.join(app, "cluau_modules", "evil", ".cluau-commit"))))
+print(Cluau({ "remove", "evil" }))
+
+// A cluau_modules (or cluau.lock) that is a link, as a cloned project can
+// have: refused, and what it points to is left as it was.
+const outside = path.join(work, "outside")
+fs.mkdir(path.join(outside, "lib"))
+fs.write(path.join(outside, "lib", "thesis.txt"), "years of work\n")
+const lib = Repository("lib", { ["init.cluau"] = 'return "v1"\n' })
+if (links) {
+	fs.remove(path.join(app, "cluau_modules"), true)
+	Run({ "ln", "-s", outside, path.join(app, "cluau_modules") }, app)
+	SetToml(`[dependencies]\nlib = \{ git = "{lib}" }\n`)
+	print(Cluau({ "install" }))
+	fs.remove(path.join(app, "cluau_modules"))
+	Run({ "ln", "-s", path.join(work, "planted.lock"), path.join(app, "cluau.lock") }, app)
+	print(Cluau({ "install" }))
+	fs.remove(path.join(app, "cluau.lock"))
+	print("planted", fs.exists(path.join(work, "planted.lock")))
+} else {
+	print("cluau: cluau_modules is a symbolic link: packages are installed only into a directory of the project's own (remove the link and run the command again)")
+	print("cluau: cluau.lock is a symbolic link: cluau rewrites only a file of the project's own")
+	print("planted", false)
+}
+print("outside", fs.read(path.join(outside, "lib", "thesis.txt")) == "years of work\n", fs.read(victim) == "the user's own data\n")
+
+// cluau.lock's commit is checked against what cluau.toml names: a tag's must
+// be the tag's, a branch's must be on the branch; a rev is taken as it is.
+const first = Head(lib)
+fs.write(path.join(lib, "init.cluau"), 'return "v2"\n')
+Git({ "commit", "-q", "-a", "-m", "two" }, lib)
+Git({ "checkout", "-q", "-b", "side", first }, lib)
+fs.write(path.join(lib, "init.cluau"), 'return "side"\n')
+Git({ "commit", "-q", "-a", "-m", "side" }, lib)
+const side = Head(lib)
+Git({ "checkout", "-q", "main" }, lib)
+Git({ "branch", "-q", "-D", "side" }, lib) // the commit stays in the repository, on no branch
+function Pin(commit: string) {
+	const file = path.join(app, "cluau.lock")
+	fs.write(file, (string.gsub(fs.read(file), "commit = \"%x+\"", `commit = "{commit}"`)))
+	fs.remove(path.join(app, "cluau_modules"), true)
+}
+function Installed(): string {
+	return fs.read(path.join(app, "cluau_modules", "lib", "init.cluau"))
+}
+SetToml(`[dependencies]\nlib = \{ git = "{lib}", tag = "v1.0.0" }\n`)
+print(Cluau({ "install" }))
+Pin(side)
+print(Cluau({ "install" }))
+print(Cluau({ "update", "lib" }), Installed())
+SetToml(`[dependencies]\nlib = \{ git = "{lib}", branch = "main" }\n`)
+print(Cluau({ "install" }), Installed())
+Pin(first)
+print(Cluau({ "install" }), Installed())
+Pin(side)
+print(Cluau({ "install" }))
+SetToml(`[dependencies]\nlib = \{ git = "{lib}" }\n`)
+print(Cluau({ "install" }))
+Pin(side)
+print(Cluau({ "install" }))
+SetToml(`[dependencies]\nlib = \{ git = "{lib}", rev = "{side}" }\n`)
+print(Cluau({ "install" }), Installed())
+
+// A [[table]] after [dependencies]: add puts the line in [dependencies].
+SetToml(`[dependencies]\n\n[[bin]]\nname = "tool"\n`)
+print(Cluau({ "add", `{lib}@v1.0.0` }))
+print(Shown(fs.read(path.join(app, "cluau.toml"))))
+
+// A relative repository path is relative to the cluau.toml naming it, from
+// any directory, and stays relative in cluau.lock.
+SetToml(`[dependencies]\nlib = \{ git = "../repos/lib", tag = "v1.0.0" }\n`)
+fs.mkdir(path.join(app, "sub"))
+print(Cluau({ "install" }, path.join(app, "sub")))
+print(string.match(fs.read(path.join(app, "cluau.lock")), "git = [^\n]*"))
+
+// Forms of cluau.toml that are refused rather than misread.
+for (_, toml in {
+	`[dependencies.lib]\ngit = "{lib}"\n`,
+	`[dependencies]\nlib = \{ git = "{lib}", tga = "v1.0.0" }\n`,
+	`[dependencies]\nlib = \{ git = "{lib}", tag = "v1.0.0", branch = "main" }\n`,
+	`[dependencies]\nlib = \{ git = "{lib}" }\nlib = \{ git = "{lib}" }\n`,
+	`[dependencies]\nlib = \{ git = "{lib}", git = "{lib}" }\n`,
+	`[dependencies]\n\n[dependencies]\n`,
+}) {
+	SetToml(toml)
+	print(Cluau({ "install" }))
+}
+
+// github.com/owner/name in cluau.toml is an https:// address, as in cluau
+// add (git is pointed from it to the repository here).
+process.setEnv("GIT_CONFIG_COUNT", "1")
+process.setEnv("GIT_CONFIG_KEY_0", `url.{lib}.insteadOf`)
+process.setEnv("GIT_CONFIG_VALUE_0", "https://github.com/someone/mathlib")
+SetToml(`[dependencies]\nmathlib = \{ git = "github.com/someone/mathlib", tag = "v1.0.0" }\n`)
+print(Cluau({ "install" }))
+print(Cluau({ "list" }))
+// git's ext:: transport runs a command; it is refused even where the
+// user's Git configuration allows it.
+process.setEnv("GIT_CONFIG_KEY_0", "protocol.ext.allow")
+process.setEnv("GIT_CONFIG_VALUE_0", "always")
+SetToml('[dependencies]\nx = { git = "ext::git upload-pack% ../repos/lib% PWNED" }\n')
+print("ext refused", string.find(Cluau({ "install" }), "transport 'ext' not allowed", 1, true) != nil)
+process.setEnv("GIT_CONFIG_COUNT", nil)
+
+// While one command holds cluau_modules, another is refused; the hold goes
+// when a command ends, failed or not.
+fs.mkdir(path.join(app, "cluau_modules", ".lock", "x"))
+print(Cluau({ "install" }))
+fs.remove(path.join(app, "cluau_modules", ".lock"), true)
+SetToml(`[dependencies]\nlib = \{ git = "{lib}", tag = "no-such-tag" }\n`)
+print(Cluau({ "install" }))
+print("held", fs.exists(path.join(app, "cluau_modules", ".lock")))
+
+// A name with a line break is written so that cluau.toml reads back.
+const named = path.join(work, "named")
+fs.mkdir(named)
+print(Cluau({ "init", "two\nlines\t\"q\"" }, named))
+print(fs.read(path.join(named, "cluau.toml")))
+print(Cluau({ "install" }, named))
+
+// A failed add puts cluau.toml back and takes out what it fetched.
+const broken = Repository("broken", { ["init.cluau"] = "return 1\n", ["cluau.toml"] = `[dependencies]\nmissing = \{ git = "{lib}", tag = "no-such-tag" }\n` })
+SetToml("[dependencies]\n")
+print(Cluau({ "add", broken }))
+print("left", fs.exists(path.join(app, "cluau_modules", "broken")))
+
+fs.remove(work, true)

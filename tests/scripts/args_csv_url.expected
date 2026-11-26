@@ -1,0 +1,41 @@
+-h	help	false	human	true
+-hh	help	false	human	true
+--help	help	true	human	false
+usage: du [-h]
+
+options:
+      --help   show this help and exit
+  -h, --human  human sizes
+-h	true
+false	args_csv_url.cluau:25: args: --help is the parser's own (it prints the help)
+false	args_csv_url.cluau:30: args: 'target' is required but comes after 'source', which is optional
+cp	x	nil
+false	args_csv_url.cluau:40: args: --count takes a number, but its default is 'lots'
+default	-2.5
+{{age = "36", name = "ada"}}
+{{name = "ada"}, {name = ""}, {name = "bob"}}
+{{"a"}, {""}, {"b"}}
+"\"\"\na,,c\n\n"
+"name\nada\n\"\"\nbob\n"	{{name = "ada"}, {name = ""}, {name = "bob"}}
+http://h:65535/	h	65535	http://h:65535/
+http://h:/	h	nil	http://h/
+http://[::1]:8/	::1	8	http://[::1]:8/
+http://h:65536/	url.parse: 'http://h:65536/' has a port that is not a number from 0 to 65535
+http://h:abc/	url.parse: 'http://h:abc/' has a port that is not a number from 0 to 65535
+http://h:-1/	url.parse: 'http://h:-1/' has a port that is not a number from 0 to 65535
+http://[::1]x/	url.parse: 'http://[::1]x/' has text after its IPv6 address
+http:///x	->	http:///x
+http://user@/p	->	http://user@/p
+http://:pw@h/	->	http://:pw@h/
+file:b	->	file:b
+file:///x	->	file:///x
+file://h/x	->	file://h/x
+file:///made/by%20hand
+http://?q	b	->	http:///b
+file://	b?q	->	file:///b?q
+file:b		->	file:b
+x://h:81/c	///p	->	x:///p
+http://a/b/c/d;p?q	http:g	->	http:g
+{a = "1;b=2", c = "3"}
+1=first&10=ten&z=last
+exit: 0

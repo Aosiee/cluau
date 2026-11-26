@@ -14,6 +14,7 @@ export type Url = {
 	password: string,
 	host: string,     // without the brackets of an IPv6 address
 	port: number?,    // nil when the address gives none
+	authority: boolean?, // the address has a // part (http:///x has one with no host); nil: one when there is a host
 	path: string,     // decoded
 	rawPath: string?, // as written (format keeps it while it decodes to `path`)
 	query: string,    // as written, without the ?
@@ -42,11 +43,12 @@ const decode = function(text: string, plus: boolean?): string {
 	return decoded
 }
 
-// A query string's names and values (decoded; a later repeat wins).
+// A query string's names and values (decoded; a later repeat wins). Pairs
+// are split at & only, as browsers do (a ; is part of a value).
 const parseQuery = function(text: string): { [string]: string } {
 	const out: { [string]: string } = {}
 	const trimmed = if (string.sub(text, 1, 1) == "?") string.sub(text, 2) else text
-	for (pair in string.gmatch(trimmed, "[^&;]+")) {
+	for (pair in string.gmatch(trimmed, "[^&]+")) {
 		const name, value = string.match(pair, "^([^=]*)=?(.*)$")
 		if (name != nil && name != "") {
 			out[decode(name, true)] = decode(value or "", true)
@@ -55,22 +57,50 @@ const parseQuery = function(text: string): { [string]: string } {
 	return out
 }
 
-// A query string from names and values, in the names' order.
+// A query string from names and values, in the names' order (as text, so
+// a number as a name sorts among the others).
 const encodeQuery = function(values: { [string]: string | number | boolean }): string {
 	const names: { string } = {}
-	for (name in values) {
-		table.insert(names, name)
+	const byName: { [string]: string | number | boolean } = {}
+	for (name, value in values :: { [unknown]: string | number | boolean }) {
+		const shown = tostring(name)
+		table.insert(names, shown)
+		byName[shown] = value
 	}
 	table.sort(names)
 	const parts: { string } = {}
 	for (_, name in names) {
-		table.insert(parts, encode(name) .. "=" .. encode(tostring(values[name])))
+		table.insert(parts, encode(name) .. "=" .. encode(tostring(byName[name])))
 	}
 	return table.concat(parts, "&")
 }
 
-const parse = function(text: string): Url {
-	const u: Url = { scheme = "", user = "", password = "", host = "", port = nil, path = "", rawPath = "", query = "", fragment = "" }
+// A port as written (digits, or nothing), or an error (raised at the line
+// that called url.parse or url.resolve).
+const Port = function(text: string, written: string): number? {
+	if (text == "") {
+		return nil
+	}
+	const port = if (string.find(text, "^%d+$") != nil) tonumber(text) else nil
+	if (port == nil || port > 65535) {
+		error(`url.parse: '{written}' has a port that is not a number from 0 to 65535`, 4)
+	}
+	return port
+}
+
+const Parse = function(text: string): Url {
+	const u: Url = {
+		scheme = "",
+		user = "",
+		password = "",
+		host = "",
+		port = nil,
+		authority = false,
+		path = "",
+		rawPath = "",
+		query = "",
+		fragment = "",
+	}
 	let rest = text
 	const fragmentAt = string.find(rest, "#", 1, true)
 	if (fragmentAt != nil) {
@@ -88,6 +118,7 @@ const parse = function(text: string): Url {
 		rest = afterScheme
 	}
 	if (string.sub(rest, 1, 2) == "//") {
+		u.authority = true
 		const authority = string.match(rest, "^//([^/]*)") or ""
 		rest = string.sub(rest, 3 + #authority)
 		const userinfo, hostport = string.match(authority, "^(.*)@(.*)$")
@@ -98,24 +129,32 @@ const parse = function(text: string): Url {
 			u.user = decode(user or "")
 			u.password = decode(password or "")
 		}
-		const bracketed, bracketPort = string.match(where, "^%[([^%]]*)%]:?(%d*)$")
-		if (bracketed != nil) {
-			u.host = bracketed
-			if (bracketPort != nil && bracketPort != "") {
-				u.port = tonumber(bracketPort)
+		// [IPv6]:port, or host:port; the port may be left empty (host:).
+		const bracketed, after = string.match(where, "^%[([^%]]*)%](.*)$")
+		if (bracketed != nil && after != nil) {
+			if (after != "" && string.sub(after, 1, 1) != ":") {
+				error(`url.parse: '{text}' has text after its IPv6 address`, 3)
 			}
+			u.host = bracketed
+			u.port = Port(string.sub(after, 2), text)
 		} else {
-			const host, port = string.match(where, "^([^:]*):(%d+)$")
-			if (host != nil) {
+			const host, port = string.match(where, "^([^:]*):(.*)$")
+			if (host != nil && port != nil) {
 				u.host = string.lower(host)
-				u.port = tonumber(port)
+				u.port = Port(port, text)
 			} else {
-				u.host = string.lower(string.gsub(where, ":$", ""))
+				u.host = string.lower(where)
 			}
 		}
 	}
 	u.rawPath = rest
 	u.path = decode(rest)
+	return u
+}
+
+// The address's parts; a port that is not one is an error.
+const parse = function(text: string): Url {
+	const u = Parse(text)
 	return u
 }
 
@@ -140,9 +179,13 @@ const Format = function(u: Url, query: boolean, fragment: boolean): string {
 	if (u.scheme != "") {
 		table.insert(parts, u.scheme .. ":")
 	}
-	if (u.host != "" || u.scheme == "file") {
+	// A // part: as the address had it, or (for a table made by hand) when
+	// there is a host, or a file: address's absolute path.
+	const authority = if (u.authority != nil) u.authority
+		else u.host != "" || (u.scheme == "file" && string.sub(u.path, 1, 1) == "/")
+	if (authority) {
 		table.insert(parts, "//")
-		if (u.user != "") {
+		if (u.user != "" || u.password != "") {
 			table.insert(parts, encode(u.user))
 			if (u.password != "") {
 				table.insert(parts, ":" .. encode(u.password))
@@ -199,30 +242,40 @@ const RemoveDots = function(path: string): string {
 
 // `relative` resolved against `base` (RFC 3986, 5.2).
 const resolve = function(base: string, relative: string): string {
-	const b = parse(base)
-	const r = parse(relative)
-	const t: Url = { scheme = "", user = "", password = "", host = "", port = nil, path = "", rawPath = "", query = "", fragment = r.fragment }
+	const b = Parse(base)
+	const r = Parse(relative)
+	const t: Url = {
+		scheme = "",
+		user = "",
+		password = "",
+		host = "",
+		port = nil,
+		authority = false,
+		path = "",
+		rawPath = "",
+		query = "",
+		fragment = r.fragment,
+	}
 	const beforeFragment = string.match(relative, "^[^#]*") or relative
 	const rQuery = string.find(beforeFragment, "?", 1, true) != nil
 	const bQuery = string.find(string.match(base, "^[^#]*") or base, "?", 1, true) != nil
 	let query = rQuery
-	const hasAuthority = string.sub(string.match(relative, "^[%a][%w+%-.]*:(.*)$") or relative, 1, 2) == "//"
 	const bPath = b.rawPath or ""
 	const rPath = r.rawPath or ""
 	let raw: string
 	if (r.scheme != "") {
 		t.scheme = r.scheme
-		t.user, t.password, t.host, t.port = r.user, r.password, r.host, r.port
+		t.user, t.password, t.host, t.port, t.authority = r.user, r.password, r.host, r.port, r.authority
 		raw = RemoveDots(rPath)
 		t.query = r.query
 	} else {
 		t.scheme = b.scheme
-		if (hasAuthority) {
-			t.user, t.password, t.host, t.port = r.user, r.password, r.host, r.port
+		if (r.authority) {
+			t.user, t.password, t.host, t.port, t.authority = r.user, r.password, r.host, r.port, true
 			raw = RemoveDots(rPath)
 			t.query = r.query
 		} else {
-			t.user, t.password, t.host, t.port = b.user, b.password, b.host, b.port
+			t.user, t.password, t.host, t.port, t.authority = b.user, b.password, b.host, b.port, b.authority
 			if (rPath == "") {
 				raw = bPath
 				if (rQuery) {
@@ -235,7 +288,7 @@ const resolve = function(base: string, relative: string): string {
 				if (string.sub(rPath, 1, 1) == "/") {
 					raw = RemoveDots(rPath)
 				} else {
-					const dir = string.match(bPath, "^(.*/)") or (if (b.host != "") "/" else "")
+					const dir = string.match(bPath, "^(.*/)") or (if (b.authority) "/" else "")
 					raw = RemoveDots(dir .. rPath)
 				}
 				t.query = r.query

@@ -74,6 +74,8 @@ if (made.code == 0) {
 	print("system tar", "from a file")
 }
 print(pcall(tar.fromString, string.rep("x", 1024)))
+// Data that starts like gzip but is not: the error says so, without a place inside @std/tar.
+print(pcall(tar.fromString, "\31\139garbage"))
 
 // Names past 100 bytes with no slash to split at: a PAX record, which the
 // system's tar reads back too.

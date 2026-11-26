@@ -39,6 +39,7 @@ plain	true	ustar
 escape	false	true
 system tar	from a file
 false	tar: the data is not a tar archive (a header's checksum does not match at byte 0)
+false	tar: the data is not a gzip-compressed tar archive (the data is not gzip)
 long entry	124	false
 long entry	131	true
 long entry	255	false

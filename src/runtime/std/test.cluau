@@ -12,10 +12,18 @@
 // the next one runs. `cluau test` runs every *_test.cluau file and reports.
 
 const io = require("@std/io")
+const process = require("@std/process")
 
 // What an assertion raises: the case fails with its message, at the line
-// of the assertion in the test file.
+// of the assertion in the test file. Shown as that wherever it ends up (an
+// assertion in a task that fails outside any case, say).
 type Failure = { __cluauTestFailure: boolean, message: string, where: string }
+
+const FailureShown = {
+	__tostring = function(failure: Failure): string {
+		return `{failure.where}: {failure.message}`
+	},
+}
 
 const state = {
 	file = "",
@@ -23,6 +31,14 @@ const state = {
 	passed = 0,
 	failed = 0,
 	skipped = 0,
+	exit = nil :: ((number?) -> never)?,
+}
+
+// @std/task, once a case has run (nil without it), and the tasks the case
+// running now has started, which it waits for before it is reported.
+const tasks = {
+	module = nil :: any,
+	started = nil :: { any }?,
 }
 
 // The line that called the assertion `depth` calls up (file:line).
@@ -37,11 +53,87 @@ function Where(depth: number): string {
 
 function Fail(message: string, depth: number): never {
 	const failure: Failure = { __cluauTestFailure = true, message = message, where = Where(depth + 1) }
-	error(failure, 0)
+	error(setmetatable(failure, FailureShown), 0)
 }
 
 function Shown(value: unknown): string {
 	return repr(value)
+}
+
+// An error as a case reports it: a failure's place and message, a string as
+// it is, anything else as it shows (its __tostring, or its contents).
+function Describe(problem: unknown): string {
+	if (type(problem) == "table" && (problem :: Failure).__cluauTestFailure) {
+		const failure = problem :: Failure
+		return `{failure.where}: {failure.message}`
+	}
+	if (type(problem) == "string") {
+		return problem :: string
+	}
+	const meta = getmetatable(problem :: any)
+	if (type(meta) == "table" && (meta :: any).__tostring != nil) {
+		return tostring(problem)
+	}
+	return `an error that is not a string: {repr(problem)}`
+}
+
+// @std/task, loaded for the cases (blocking calls then wait the way they do
+// in any script with tasks); its spawn and delay note the tasks a case starts.
+function TaskModule(): any {
+	if (tasks.module == nil) {
+		const loaded, module = pcall(require, "@std/task")
+		if (!loaded) {
+			return nil
+		}
+		tasks.module = module
+		const spawn = module.spawn
+		const delay = module.delay
+		local function Note(started: any): any {
+			if (tasks.started != nil) {
+				table.insert(tasks.started :: { any }, started)
+			}
+			return started
+		}
+		module.spawn = function(...: any): any {
+			return Note(spawn(...))
+		}
+		module.delay = function(...: any): any {
+			return Note(delay(...))
+		}
+	}
+	return tasks.module
+}
+
+// The tasks a case started (and those they started) run to their end; the
+// first error among them, or nil. After an error the rest are cancelled, and
+// so is a task that can never finish.
+function Settle(started: { any }, failed: boolean): unknown? {
+	const module = tasks.module
+	if (module == nil) {
+		return nil
+	}
+	let problem: unknown? = nil
+	let i = 1
+	while (i <= #started) {
+		const each = started[i]
+		i += 1
+		if (!each.done) {
+			if (failed || problem != nil) {
+				module.cancel(each)
+			} else {
+				const joined, raised = pcall(module.join, each)
+				if (!joined) {
+					if (rawequal(raised, module._failure.message)) {
+						problem = raised
+					} else {
+						module.cancel(each)
+						problem = "a task the case started can never finish (nothing it waits for will happen)"
+					}
+				}
+			}
+		}
+	}
+	return problem
 }
 
 // Deep equality: tables are equal when their keys and values are (cycles
@@ -85,20 +177,22 @@ function case(name: string, fn: () -> ()) {
 	if (!Matches(name)) {
 		return
 	}
-	const ok, problem = pcall(fn)
-	if (ok) {
+	TaskModule()
+	const outer = tasks.started
+	const started: { any } = {}
+	tasks.started = started
+	const ok, raised = pcall(fn)
+	// A task the case started that fails later is the case's failure, not
+	// that of whichever case is running then.
+	const late = Settle(started, !ok)
+	tasks.started = outer
+	if (ok && late == nil) {
 		state.passed += 1
 		io.write(`  ok    {name}\n`)
 		return
 	}
 	state.failed += 1
-	let message: string
-	if (type(problem) == "table" && (problem :: Failure).__cluauTestFailure) {
-		const failure = problem :: Failure
-		message = `{failure.where}: {failure.message}`
-	} else {
-		message = tostring(problem)
-	}
+	const message = Describe(if (ok) late else raised)
 	io.write(`  FAIL  {name}\n`)
 	for (line in string.gmatch(message, "[^\n]+")) {
 		io.write(`        {line}\n`)
@@ -137,6 +231,9 @@ function ok(value: unknown, message: string?) {
 // Two numbers within `tolerance` (1e-9 by default) of each other. NaN is
 // near nothing, and a NaN tolerance fails.
 function near(actual: number, expected: number, tolerance: number?, message: string?) {
+	if (type(actual) != "number" || type(expected) != "number") {
+		Fail(`{if (message != nil) message .. ": " else ""}expected two numbers, got {Shown(actual)} and {Shown(expected)}`, 2)
+	}
 	const within = tolerance or 1e-9
 	if (!(math.abs(actual - expected) <= within)) {
 		Fail(`{if (message != nil) message .. ": " else ""}expected {expected} (within {within}), got {actual}`, 2)
@@ -150,7 +247,7 @@ function raises(fn: () -> (), text: string?): string {
 	if (completed) {
 		return Fail(if (text != nil) `expected an error containing '{text}', but none was raised` else "expected an error, but none was raised", 2)
 	}
-	const message = if (type(problem) == "table" && (problem :: Failure).__cluauTestFailure) (problem :: Failure).message else tostring(problem)
+	const message = if (type(problem) == "table" && (problem :: Failure).__cluauTestFailure) (problem :: Failure).message else Describe(problem)
 	if (text != nil && string.find(message, text, 1, true) == nil) {
 		return Fail(`expected an error containing '{text}', got '{message}'`, 2)
 	}
@@ -162,17 +259,30 @@ function fail(message: string): never {
 	return Fail(message, 2)
 }
 
-// For `cluau test`: a file starts (its cases matching `filter`) ...
+// For `cluau test`: a file starts (its cases matching `filter`) ... While it
+// runs, process.exit raises an error instead of ending every test run with
+// that status: a case calling it fails, and outside a case the file does
+// not finish.
 function _begin(file: string, filter: string) {
 	state.file = file
 	state.filter = filter
 	state.passed = 0
 	state.failed = 0
 	state.skipped = 0
+	if (state.exit == nil) {
+		state.exit = process.exit
+		process.exit = function(code: number?): never {
+			return Fail(`process.exit({code or 0}) was called during the tests`, 2)
+		}
+	}
 }
 
 // ... and ends: how its cases went.
 function _finish(): (number, number, number) {
+	if (state.exit != nil) {
+		process.exit = state.exit
+		state.exit = nil
+	}
 	return state.passed, state.failed, state.skipped
 }
 

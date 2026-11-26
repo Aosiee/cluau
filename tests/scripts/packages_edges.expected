@@ -1,0 +1,76 @@
+made cluau.toml for app
+made .gitignore (leaving cluau_modules/ out of Git)
+added evil (<work>/repos/evil v1.0.0) to cluau.toml
+  evil v1.0.0 (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+victim	true
+marker	<commit>
+removed evil from cluau.toml
+  removed evil
+0 package(s) in cluau_modules
+cluau: cluau_modules is a symbolic link: packages are installed only into a directory of the project's own (remove the link and run the command again)
+cluau: cluau.lock is a symbolic link: cluau rewrites only a file of the project's own
+planted	false
+outside	true	true
+  lib v1.0.0 (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+cluau: cluau.lock pins lib at <commit>, but tag v1.0.0 of <work>/repos/lib is <commit>: cluau update lib pins the tag's commit
+  lib v1.0.0 (<commit>)
+1 package(s) in cluau_modules, 1 fetched	return "v1"
+
+  lib main (<commit>)
+1 package(s) in cluau_modules, 1 fetched	return "v2"
+
+  lib main (<commit>)
+1 package(s) in cluau_modules, 1 fetched	return "v1"
+
+cluau: cluau.lock pins lib at <commit>, which is not on branch main of <work>/repos/lib: cluau update lib pins its newest commit
+  lib (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+cluau: cluau.lock pins lib at <commit>, which is not on the default branch of <work>/repos/lib: cluau update lib pins its newest commit
+  lib <commit> (<commit>)
+1 package(s) in cluau_modules, 1 fetched	return "side"
+
+added lib (<work>/repos/lib v1.0.0) to cluau.toml
+  lib v1.0.0 (<commit>)
+1 package(s) in cluau_modules, 1 fetched
+[package]
+name = "app"
+
+[dependencies]
+lib = { git = "<work>/repos/lib", tag = "v1.0.0" }
+
+[[bin]]
+name = "tool"
+1 package(s) in cluau_modules
+git = "../repos/lib"
+cluau: cluau.toml: [dependencies.lib] is not read: write it as lib = { git = "...", tag = "..." } under [dependencies]
+cluau: cluau.toml: dependencies.lib has 'tga', which is not git, tag, branch or rev
+cluau: cluau.toml: dependencies.lib gives both tag and branch: one of tag, branch and rev
+cluau: cluau.toml:6: lib is given twice
+cluau: cluau.toml:5: git is given twice
+cluau: cluau.toml:6: [dependencies] is given twice
+  mathlib v1.0.0 (<commit>)
+  removed lib
+1 package(s) in cluau_modules, 1 fetched
+mathlib v1.0.0 <commit> github.com/someone/mathlib
+ext refused	true
+cluau: another cluau command is installing packages here (cluau_modules/.lock is there); if none is running, remove that directory
+cluau: <work>/repos/lib has no tag, branch or commit 'no-such-tag'
+held	false
+made cluau.toml for two
+lines	"q"
+made .gitignore (leaving cluau_modules/ out of Git)
+[package]
+name = "two\nlines\t\"q\""
+version = "0.1.0"
+
+[dependencies]
+
+0 package(s) in cluau_modules
+added broken (<work>/repos/broken v1.0.0) to cluau.toml
+  broken v1.0.0 (<commit>)
+cluau: <work>/repos/lib has no tag, branch or commit 'no-such-tag'
+cluau: cluau.toml is left as it was
+left	false
+exit: 0

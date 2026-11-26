@@ -1,0 +1,112 @@
+// `cluau test` where the code under test does what a case cannot see: calls
+// process.exit (in a case, and outside one), starts a task that fails after
+// the case returns, leaves a task that can never finish, or fails while its
+// task still runs; and errors that are not strings.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const dir = path.join(fs.tempDir(), `cluau-test-runner-{math.floor(time.now() * 1000)}`)
+fs.mkdir(dir)
+
+const files: { [string]: string } = {
+	["a_exit_test.cluau"] = [[const test = require("@std/test")
+const process = require("@std/process")
+test.case("exits", function() {
+	process.exit(0)
+})
+test.case("runs after", function() {
+	test.ok(true)
+})
+]],
+	["b_exit_outside_test.cluau"] = [[const test = require("@std/test")
+test.case("before", function() {
+	test.ok(true)
+})
+require("@std/process").exit(0)
+]],
+	["c_tasks_test.cluau"] = [[const test = require("@std/test")
+const task = require("@std/task")
+test.case("first: its task fails later", function() {
+	task.spawn(function() {
+		task.wait(0.05)
+		test.equal("from the first case", "x")
+	})
+})
+test.case("second: only waits", function() {
+	task.wait(0.1)
+})
+test.case("stuck: two tasks wait for each other", function() {
+	let b: any = nil
+	const a = task.spawn(function() {
+		task.wait(0)
+		task.join(b)
+	})
+	b = task.spawn(function() {
+		task.join(a)
+	})
+})
+test.case("fails while its task runs", function() {
+	task.spawn(function() {
+		task.wait(30)
+	})
+	test.fail("early")
+})
+test.case("joined in the case", function() {
+	const t = task.spawn(function(): number {
+		task.wait(0.01)
+		return 3
+	})
+	test.equal(task.join(t), 3)
+})
+]],
+	["d_values_test.cluau"] = [[const test = require("@std/test")
+test.case("a table", function() {
+	error({ code = 7 })
+})
+test.case("nil", function() {
+	error(nil)
+})
+test.case("raises a table", function() {
+	test.equal(test.raises(function() {
+		error({ code = 7 })
+	}, "code"), "an error that is not a string: {code = 7}")
+})
+test.case("near a string", function() {
+	test.near("1" :: any, 1)
+})
+]],
+	["e_task_outside_test.cluau"] = [[const test = require("@std/test")
+const task = require("@std/task")
+task.spawn(function() {
+	task.wait(0.01)
+	test.equal(1, 2)
+})
+test.case("passes", function() {
+	test.ok(true)
+})
+]],
+}
+for (name, text in files) {
+	fs.write(path.join(dir, name), text)
+}
+
+// The report, without the backtraces of errors that end a file.
+const started = time.monotonic()
+const r = process.run({ process.executable, "test" }, { cwd = dir, stderr = "merge" })
+let skipping = false
+for (line in string.gmatch(string.gsub(r.output, "\r", ""), "[^\n]+")) {
+	if (string.find(line, "^stack backtrace") != nil) {
+		skipping = true
+	} else if (string.find(line, "_test%.cluau$") != nil || string.find(line, "^%d+ passed") != nil) {
+		skipping = false
+	}
+	if (!skipping) {
+		print(line)
+	}
+}
+print("status", r.code)
+print("no task waited its 30 seconds", time.monotonic() - started < 20)
+
+fs.remove(dir, true)

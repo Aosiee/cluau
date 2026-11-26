@@ -1,0 +1,31 @@
+a_exit_test.cluau
+  FAIL  exits
+        a_exit_test.cluau:4: process.exit(0) was called during the tests
+  ok    runs after
+b_exit_outside_test.cluau
+  ok    before
+b_exit_outside_test.cluau:5: process.exit(0) was called during the tests
+c_tasks_test.cluau
+  FAIL  first: its task fails later
+        c_tasks_test.cluau:6: expected "x", got "from the first case"
+  ok    second: only waits
+  FAIL  stuck: two tasks wait for each other
+        a task the case started can never finish (nothing it waits for will happen)
+  FAIL  fails while its task runs
+        c_tasks_test.cluau:26: early
+  ok    joined in the case
+d_values_test.cluau
+  FAIL  a table
+        an error that is not a string: {code = 7}
+  FAIL  nil
+        an error that is not a string: nil
+  ok    raises a table
+  FAIL  near a string
+        d_values_test.cluau:14: expected two numbers, got "1" and 1
+e_task_outside_test.cluau
+  ok    passes
+e_task_outside_test.cluau:5: expected 2, got 1
+6 passed, 7 failed, 2 file(s) did not finish (5 file(s))
+status	1
+no task waited its 30 seconds	true
+exit: 0

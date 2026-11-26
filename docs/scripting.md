@@ -209,6 +209,13 @@ tests/shapes_test.cluau
 - A case runs when it is declared. A failed assertion or an error ends
   that case, and the file goes on with the next. An error outside any case
   stops the file, which is reported as not finished.
+- The `@std/task` tasks a case starts are its own: once its function
+  returns, the case waits for them to finish and fails if one of them
+  fails (or can never finish). When the case fails first, its tasks are
+  cancelled.
+- `process.exit` raises an error while the tests run, so code under test
+  that calls it (a `--help` handled by `@std/args`, say) fails its case
+  instead of ending the run; outside a case it stops the file.
 - `-k text` runs the cases whose names contain `text` (in any case).
 - The exit status is 1 when a case failed, a file did not finish, or
   nothing ran, so `cluau test` fits a CI step.
@@ -645,19 +652,44 @@ pinned = { git = "https://github.com/someone/pinned", rev = "0007d6e4fc04c4a1d5b
 | command | does |
 |---|---|
 | `cluau init [name]` | makes `cluau.toml` (and a `.gitignore` leaving `cluau_modules/` out, when there is none) |
-| `cluau add <repository>[@ref] [--name <name>]` | adds a dependency and installs it. `@ref` is a tag, a branch or a commit (its id, or the first 7 or more digits of it, pinned as the whole id); without one, the newest version tag (`v1.2.3`), else the default branch. The name is the repository's last part (`my.lib.git` is `my-lib`) unless `--name` gives one. When the install fails, `cluau.toml` is left as it was |
-| `cluau install` | fetches every dependency at the commit `cluau.lock` pins (resolving and pinning the new ones), and removes what is no longer wanted |
+| `cluau add <repository>[@ref] [--name <name>]` | adds a dependency and installs it. `@ref` is a tag, a branch or a commit (its id, or the first 7 or more digits of it, pinned as the whole id); without one, the newest version tag (`v1.2.3`), else the default branch. The name is the repository's last part (`my.lib.git` is `my-lib`) unless `--name` gives one. When the install fails, `cluau.toml` is left as it was and the packages it fetched are removed |
+| `cluau install` | fetches every dependency at the commit `cluau.lock` pins (resolving and pinning the new ones), and removes what is no longer wanted. A pinned commit it fetches is checked against `cluau.toml` (see below) |
 | `cluau update [name...]` | resolves the dependencies' tags and branches again (all of them, or those named) and pins the new commits |
 | `cluau remove <name>` | removes a dependency |
 | `cluau list` | the installed packages, their commits, and which package wanted each |
 
 - A repository is `github.com/owner/name` (an `https://` address), any Git
-  URL (`https://`, `ssh://`, `git@host:path`), or a local directory. Git
-  fetches them, so `git` must be on `PATH`; private repositories use your
-  Git credentials. The `@ref` of `cluau add` is the last `@` in the
-  address's path, so a user in it (`ssh://git@host/a/b.git@v1`) stays.
+  URL (`https://`, `ssh://`, `git@host:path`), or a local directory, in
+  `cluau.toml` as in `cluau add`. A relative directory (`../lib.git`) is
+  relative to the `cluau.toml` that names it, and stays relative in
+  `cluau.lock`. Git fetches them, so `git` must be on `PATH`; private
+  repositories use your Git credentials. The `@ref` of `cluau add` is the
+  last `@` in the address's path, so a user in it
+  (`ssh://git@host/a/b.git@v1`) stays.
+- A dependency is `name = { git = "...", tag = "..." }` under
+  `[dependencies]`, with at most one of `tag`, `branch` and `rev` (none:
+  the default branch). Other keys, a `[dependencies.name]` table and a key
+  or table given twice are errors rather than read some other way.
 - A package's name is letters, digits, `-` and `_`. An address or a ref
   starting with `-` is refused, in `cluau.toml` and in `cluau add`.
+- When `cluau install` fetches the commit `cluau.lock` pins, it checks it
+  against what `cluau.toml` names, so that an edited lock cannot install
+  a commit the repository does not publish there: for a `tag`, the commit
+  must be the one the tag names now; for a `branch` (or the default
+  branch), it must be on that branch (its history is fetched to look). A
+  `rev` is taken as it is. A mismatch is an error, and `cluau update
+  <name>` pins the commit the tag or branch names now. A package already
+  installed at the pinned commit is not checked again.
+- Packages are written only into a `cluau_modules` directory of the
+  project's own: when `cluau_modules`, `cluau.toml` or `cluau.lock` is a
+  symbolic link (or a Windows junction), the command refuses rather than
+  write or delete where it points. A file a package has under the name
+  cluau keeps its commit in (`.cluau-commit`) is replaced, never written
+  through.
+- `cluau add`, `install`, `update` and `remove` hold `cluau_modules` while
+  they run (`cluau_modules/.lock`), and a second one in the same project
+  meanwhile stops with an error. If a command was killed, remove that
+  directory by hand.
 - A package is a repository whose `init.cluau` is what `require("name")`
   returns; `require("name/part")` loads `part.cluau` from it.
 - A package's own `cluau.toml` dependencies are installed too, beside it in
@@ -923,7 +955,11 @@ for (_, file in options:list("files")) {
   left (none or more; one or more with `required`). After `--`, every
   argument is positional.
 - Short flags combine (`-vq`, and `-vh` prints the help as `-h` and
-  `--help` do). An argument like `-5` or `-1.5` is a negative number (a
+  `--help` do). A flag or option declared with `short = "h"` takes `-h`
+  for itself (alone or combined), leaving the help `--help` only. `help`
+  cannot be declared as a flag or option's name. A required positional
+  cannot follow an optional one, and a `number` option's `default` must be
+  a number. An argument like `-5` or `-1.5` is a negative number (a
   positional argument or a value), unless a short flag of that name is
   declared; `number` options take decimal numbers only (not `inf`, `nan`
   or `0x10`).
@@ -946,11 +982,11 @@ the case with a message at the assertion's line:
 |---|---|
 | `case(name, fn)` | declares a case and runs it |
 | `skip(name, fn)` | declares a case without running it (reported as skipped) |
-| `equal(actual, expected, message?)` | equal values; tables are equal when their keys and values are |
+| `equal(actual, expected, message?)` | equal values; tables are equal when they hold the same keys with equal values (keys compare as `==` does, so a table as a key is that very table) |
 | `notEqual(actual, unexpected, message?)` | anything but `unexpected` |
 | `ok(value, message?)` | a value other than `false` or `nil` |
-| `near(actual, expected, tolerance?, message?)` | numbers within `tolerance` (`1e-9` by default); NaN is near nothing |
-| `raises(fn, text?): string` | `fn` raises an error (containing `text`, when given); its message |
+| `near(actual, expected, tolerance?, message?)` | numbers (not strings that look like them) within `tolerance` (`1e-9` by default); NaN is near nothing |
+| `raises(fn, text?): string` | `fn` raises an error (containing `text`, when given); its message (an error that is not a string, such as a table, is shown by its contents) |
 | `fail(message)` | fails the case here |
 
 ### `@std/csv`
@@ -960,9 +996,9 @@ separator, a quote or a line break is quoted, with `""` for a quote):
 
 | function | is |
 |---|---|
-| `parse(text, options?): {{string}}` | every row's fields (a byte order mark at the start is left out) |
-| `records(text, options?): {{[string]: string}}` | the rows after the first, keyed by the first row's names |
-| `encode(rows, options?): string` | rows (of text, numbers or booleans) as CSV, each line ending in `\n` |
+| `parse(text, options?): {{string}}` | every row's fields (a byte order mark at the start is left out; a blank line is a row of one empty field) |
+| `records(text, options?): {{[string]: string}}` | the rows after the first, keyed by the first row's names; blank lines are passed over (a line holding `""` is a record) |
+| `encode(rows, options?): string` | rows (of text, numbers or booleans) as CSV, each line ending in `\n`; a `nil` in a row is an empty field, and a row of one empty field is written `""` (an empty line is no row to most readers) |
 | `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order (`""` for a missing one) |
 
 `options.separator` is another one-character separator (`";"`, `"\t"`).
@@ -1185,13 +1221,13 @@ Web addresses (RFC 3986).
 
 | function | is |
 |---|---|
-| `parse(text): Url` | `{ scheme, user, password, host, port, path, rawPath, query, fragment }`: the scheme and host in lowercase, `path` decoded and `rawPath` as written (`/a%2Fb` is `path` `/a/b`, `rawPath` `/a%2Fb`), `port` `nil` when the address has none |
-| `format(url): string` | the address from its parts: the path as `rawPath` has it while that decodes to `path` (so `%2F` stays `%2F`), else `path` encoded |
-| `resolve(base, relative): string` | `relative` read against `base`, as a browser follows a link (`"../c"`, `"?q=1"`, `"//host/x"`), on the paths as written |
+| `parse(text): Url` | `{ scheme, user, password, host, port, authority, path, rawPath, query, fragment }`: the scheme and host in lowercase, `path` decoded and `rawPath` as written (`/a%2Fb` is `path` `/a/b`, `rawPath` `/a%2Fb`), `port` `nil` when the address has none, `authority` whether it has a `//` part (`http:///x` has one with no host). A port that is not a number from 0 to 65535 is an error |
+| `format(url): string` | the address from its parts: the path as `rawPath` has it while that decodes to `path` (so `%2F` stays `%2F`), else `path` encoded; a `//` part when `authority` says so (when it is not given: when there is a host, or for a `file:` address's absolute path) |
+| `resolve(base, relative): string` | `relative` read against `base` by RFC 3986's rules (`"../c"`, `"?q=1"`, `"//host/x"`), on the paths as written. They are the strict rules: `http:g` against an `http:` base stays `http:g`, where a browser reads it as `g` |
 | `encode(text, keep?): string` | percent-encoded but for letters, digits and `- . _ ~` (and the characters in `keep`: `"/"` for a path) |
 | `decode(text, plus?): string` | `%XX` back to its byte (and `+` to a space, with `plus`) |
-| `parseQuery(text): {[string]: string}` | a query string's names and values, decoded |
-| `encodeQuery(values): string` | a query string from a table, its names in order |
+| `parseQuery(text): {[string]: string}` | a query string's names and values, decoded; pairs are split at `&` only (a `;` is part of a value, as browsers have it) |
+| `encodeQuery(values): string` | a query string from a table, its names in order (as text) |
 
 ### `@std/crypto`
 
@@ -1302,12 +1338,16 @@ bytes. The same calls as `@std/zip`:
 
 An `Archive` has `entries()` (each `{ name, size, directory, link, mode,
 modified }`; `link` is a link's target), `read(name)`, `extract(directory)`
-(refusing an entry that would land outside it; links, devices and FIFOs
-are left out) and `close()`. Data that is not an archive (shorter than a
-header, a header that does not check, an archive cut short) is an error;
-an empty archive has no entries. A `Writer` has `add(name, data, options?)`, `addFile(name, path,
-options?)` (`options.mode`, 0644 by default), `addDirectory(name)` and
-`finish()`.
+(refusing an entry that would land outside it or whose name holds a NUL
+byte; links, devices and FIFOs are left out; the files are written with
+the usual permissions, not the archive's modes) and `close()`. A GNU
+sparse file is listed with its real name and size, but `read` and
+`extract` refuse it. Data that is not an archive (shorter than a header, a
+header that does not check, an archive cut short, a PAX size that is not
+a whole number) is an error; an empty archive has no entries. A `Writer`
+has `add(name, data, options?)`, `addFile(name, path, options?)`
+(`options.mode`, 0644 by default: a whole number from 0 to 0o7777777),
+`addDirectory(name)` and `finish()`.
 
 ### `@std/sqlite`
 

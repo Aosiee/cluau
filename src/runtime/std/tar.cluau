@@ -26,12 +26,23 @@ export type Entry = {
 	modified: number,  // a time, as @std/time has them
 }
 
-// What an entry is: only files and directories are extracted.
-type Kind = "file" | "directory" | "link" | "other"
+// What an entry is: only files and directories are extracted. A sparse file
+// (GNU's, with holes) is listed with its real name and size but cannot be
+// read or extracted.
+type Kind = "file" | "directory" | "link" | "sparse" | "other"
 type Stored = { Entry: Entry, Offset: number, Kind: Kind }
 
 const Octal = function(field: string): number {
-	// Base-256 (a size of 8 GiB or more): the first byte's high bit set.
+	// Base-256 (a size of 8 GiB or more, a time before 1970): the first
+	// byte's high bit set, and 0xFF for a negative number (two's complement,
+	// read through its inverse so that small ones stay exact).
+	if (#field > 0 && string.byte(field, 1) == 255) {
+		let inverse = 0
+		for (i = 2, #field) {
+			inverse = inverse * 256 + (255 - string.byte(field, i))
+		}
+		return -(inverse + 1)
+	}
 	if (#field > 0 && bit32.band(string.byte(field, 1), 128) != 0) {
 		let n = bit32.band(string.byte(field, 1), 127)
 		for (i = 2, #field) {
@@ -74,7 +85,15 @@ class Archive {
 
 	function Init(data: string, what: string) {
 		// gzip's first two bytes: unpacked first.
-		self.Data = if (string.sub(data, 1, 2) == "\31\139") Compress().gunzip(data) else data
+		self.Data = data
+		if (string.sub(data, 1, 2) == "\31\139") {
+			const unpacked, result = pcall(Compress().gunzip, data)
+			if (!unpacked) {
+				const reason = string.gsub(tostring(result), "^compress%.gunzip: ", "")
+				error(`tar: {what} is not a gzip-compressed tar archive ({reason})`, 4)
+			}
+			self.Data = result
+		}
 		if (#self.Data < 512) {
 			error(`tar: {what} is not a tar archive (it is shorter than a header)`, 4)
 		}
@@ -88,15 +107,32 @@ class Archive {
 				break // the end: zero blocks
 			}
 			// The header's checksum: its bytes, the checksum field as spaces.
+			// Some old writers summed the bytes as signed; that is taken too.
 			let sum = 0
+			let signed = 0
 			for (i = 1, 512) {
-				sum += if (i > 148 && i <= 156) 32 else string.byte(block, i)
+				const byte = if (i > 148 && i <= 156) 32 else string.byte(block, i)
+				sum += byte
+				signed += if (byte >= 128) byte - 256 else byte
 			}
-			if (sum != Octal(string.sub(block, 149, 156))) {
+			const stated = Octal(string.sub(block, 149, 156))
+			if (sum != stated && signed != stated) {
 				error(`tar: {what} is not a tar archive (a header's checksum does not match at byte {at})`, 4)
 			}
 			const typeflag = string.sub(block, 157, 157)
-			const size = Octal(string.sub(block, 125, 136))
+			const extension = typeflag == "L" || typeflag == "K" || typeflag == "x" || typeflag == "g" || typeflag == "V"
+			let size = Octal(string.sub(block, 125, 136))
+			// A PAX size (an entry of 8 GiB or more) is the size of the data
+			// that follows, and where the next header is.
+			if (!extension && pax["size"] != nil) {
+				if (string.find(pax["size"], "^%d+$") == nil || #pax["size"] > 15) {
+					error(`tar: {what} is not a tar archive (a PAX size that is not a whole number at byte {at})`, 4)
+				}
+				size = tonumber(pax["size"]) :: number
+			}
+			if (size < 0) {
+				error(`tar: {what} is not a tar archive (a negative size at byte {at})`, 4)
+			}
 			const dataAt = at + 512
 			if (dataAt + size > #self.Data) {
 				error(`tar: {what} ends inside an entry`, 4)
@@ -116,13 +152,23 @@ class Archive {
 				// global PAX records and a volume's label: nothing here uses them
 			} else {
 				let name = Field(block, 0, 100)
-				const prefix = if (string.sub(block, 258, 262) == "ustar") Field(block, 345, 155) else ""
+				// POSIX ustar's prefix (an old GNU header, whose magic is
+				// "ustar  ", has times there instead).
+				const prefix = if (string.sub(block, 258, 263) == "ustar\0") Field(block, 345, 155) else ""
 				if (prefix != "") {
 					name = prefix .. "/" .. name
 				}
-				name = pax["path"] or longName or name
+				name = pax["GNU.sparse.name"] or pax["path"] or longName or name
+				let realSize = size
 				let kind: Kind = "other"
-				if (typeflag == "5" || typeflag == "D") {
+				// GNU's sparse files: type S, or PAX records naming the real file.
+				const paxSparse = pax["GNU.sparse.major"] or pax["GNU.sparse.map"] or pax["GNU.sparse.numblocks"]
+				if (typeflag == "S" || paxSparse != nil) {
+					kind = "sparse"
+					const real = if (typeflag == "S") tostring(Octal(string.sub(block, 484, 495)))
+						else pax["GNU.sparse.realsize"] or pax["GNU.sparse.size"] or ""
+					realSize = if (string.find(real, "^%d+$") != nil) tonumber(real) :: number else size
+				} else if (typeflag == "5" || typeflag == "D") {
 					kind = "directory"
 				} else if (typeflag == "1" || typeflag == "2") {
 					kind = "link"
@@ -130,14 +176,18 @@ class Archive {
 					// A name ending in / is a directory (as old archives have them).
 					kind = if (string.sub(name, -1) == "/") "directory" else "file"
 				}
+				// A PAX time is a decimal number of seconds (a fraction allowed).
+				const paxTime = pax["mtime"]
+				const modified = if (paxTime != nil && string.find(paxTime, "^%-?%d+%.?%d*$") != nil) tonumber(paxTime) :: number
+					else Octal(string.sub(block, 137, 148))
 				table.insert(self.Entries, {
 					Entry = {
 						name = name,
-						size = if (pax["size"] != nil) tonumber(pax["size"]) or size else size,
+						size = realSize,
 						directory = kind == "directory",
 						link = if (kind == "link") (pax["linkpath"] or longLink or Field(block, 157, 100)) else nil,
 						mode = Octal(string.sub(block, 101, 108)),
-						modified = if (pax["mtime"] != nil) tonumber(pax["mtime"]) or 0 else Octal(string.sub(block, 137, 148)),
+						modified = modified,
 					},
 					Offset = dataAt,
 					Kind = kind,
@@ -166,6 +216,9 @@ class Archive {
 		for (i = #self.Entries, 1, -1) {
 			const stored = self.Entries[i]
 			if (stored.Entry.name == name) {
+				if (stored.Kind == "sparse") {
+					error(`archive:read: '{name}' is a sparse file, which @std/tar does not read`, 2)
+				}
 				return string.sub(self.Data, stored.Offset + 1, stored.Offset + stored.Entry.size)
 			}
 		}
@@ -180,6 +233,14 @@ class Archive {
 		let written = 0
 		for (_, stored in self.Entries) {
 			const entry = stored.Entry
+			// A NUL byte would end the name where the file is made, after
+			// the checks below have looked at all of it.
+			if (string.find(entry.name, "\0", 1, true) != nil || string.find(entry.link or "", "\0", 1, true) != nil) {
+				error(`archive:extract: {repr(entry.name)} holds a NUL byte: nothing more extracted`, 2)
+			}
+			if (stored.Kind == "sparse") {
+				error(`archive:extract: '{entry.name}' is a sparse file, which @std/tar does not extract: nothing more extracted`, 2)
+			}
 			const parts: { string } = {}
 			for (part in string.gmatch(entry.name, "[^/]+")) {
 				if (part == ".." || string.find(part, "\\", 1, true) != nil || string.find(part, ":", 1, true) != nil) {
@@ -212,8 +273,14 @@ class Archive {
 	}
 }
 
+// `n` in octal, as a header field of `width` bytes holds it.
 const Octals = function(n: number, width: number): string {
 	return string.format(`%0{width - 1}o`, n) .. "\0"
+}
+
+// The largest number a header field of `width` bytes holds in octal.
+const Largest = function(width: number): number {
+	return 8 ^ (width - 1) - 1
 }
 
 // One 512-byte ustar header block, its checksum filled in.
@@ -267,11 +334,20 @@ class Writer {
 		self.Gzip = gzip
 	}
 
-	function Add(name: string, data: string, typeflag: string, mode: number) {
+	function Add(name: string, data: string, typeflag: string, mode: unknown) {
 		if (self.Finished) {
 			error("writer: the archive is finished", 3)
 		}
-		table.insert(self.Parts, Header(name, #data, typeflag, mode, math.floor(os.time())))
+		if (type(mode) != "number" || mode != math.floor(mode) || mode < 0 || mode > Largest(8)) {
+			error(`writer: the mode {repr(mode)} is not a whole number from 0 to 0o7777777 (0644 is 420)`, 3)
+		}
+		if (#data > Largest(12)) {
+			error(`writer: '{name}' is too large for a tar entry`, 3)
+		}
+		if (string.find(name, "\0", 1, true) != nil) {
+			error(`writer: the name {repr(name)} holds a NUL byte`, 3)
+		}
+		table.insert(self.Parts, Header(name, #data, typeflag, mode :: number, math.floor(os.time())))
 		table.insert(self.Parts, data)
 		table.insert(self.Parts, string.rep("\0", (512 - #data % 512) % 512))
 	}

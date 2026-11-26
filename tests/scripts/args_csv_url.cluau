@@ -1,0 +1,79 @@
+// @std/args, @std/csv and @std/url at their edges: a declared -h, a flag
+// named help, an optional positional before a required one, a number
+// option's default; blank lines in records, a row of one empty field and a
+// row with a hole; ports, an empty authority, file: addresses, a ; in a
+// query and names of mixed types.
+const args = require("@std/args")
+const csv = require("@std/csv")
+const url = require("@std/url")
+const io = require("@std/io")
+
+// A declared -h is that flag, alone or in a cluster; --help is the help.
+const du = args.parser({ name = "du" })
+du:flag("human", { short = "h", help = "human sizes" })
+for (_, given in { { "-h" }, { "-hh" }, { "--help" } }) {
+	const parsed = du:tryParse(given)
+	if (parsed != nil) {
+		print(given[1], "help", parsed.Help, "human", parsed:flag("human"))
+	}
+}
+io.write(du:help())
+// Without one, -h is the help as before.
+const plain = args.parser():tryParse({ "-h" })
+print("-h", plain != nil && plain.Help)
+print(pcall(function() {
+	args.parser():flag("help")
+}))
+print(pcall(function() {
+	const cp = args.parser()
+	cp:positional("source", { optional = true })
+	cp:positional("target")
+}))
+const cp = args.parser()
+cp:positional("source")
+cp:positional("target", { optional = true })
+const copied = cp:tryParse({ "x" })
+if (copied != nil) {
+	print("cp", copied:get("source"), copied:get("target"))
+}
+print(pcall(function() {
+	args.parser():option("count", { number = true, default = "lots" })
+}))
+const counted = args.parser():option("count", { number = true, default = "-2.5" }):tryParse({})
+if (counted != nil) {
+	print("default", counted:number("count"))
+}
+
+// csv: blank lines are no records (a line of "" is one); a row of one empty
+// field is written "" and a hole as an empty field.
+print(repr(csv.records("name,age\nada,36\n\n")))
+print(repr(csv.records("name\r\nada\r\n\r\n\"\"\r\nbob\r\n")))
+print(repr(csv.parse("a\n\nb\n")))
+const holed: { csv.Field } = { "a" }
+holed[3] = "c"
+print(repr(csv.encode({ { "" }, holed, {} })))
+const list: { { [string]: csv.Field } } = { { name = "ada" }, {}, { name = "bob" } }
+print(repr(csv.encodeRecords(list, { "name" })), repr(csv.records(csv.encodeRecords(list, { "name" }))))
+
+// url: a port is a number from 0 to 65535.
+for (_, text in { "http://h:65535/", "http://h:/", "http://[::1]:8/", "http://h:65536/", "http://h:abc/", "http://h:-1/", "http://[::1]x/" }) {
+	const ok, result = pcall(url.parse, text)
+	if (ok) {
+		print(text, result.host, result.port, url.format(result))
+	} else {
+		print(text, result)
+	}
+}
+// An empty authority is kept, and a file: address without one gains none.
+for (_, text in { "http:///x", "http://user@/p", "http://:pw@h/", "file:b", "file:///x", "file://h/x" }) {
+	print(text, "->", url.format(url.parse(text)))
+}
+print(url.format({ scheme = "file", user = "", password = "", host = "", path = "/made/by hand", query = "", fragment = "" }))
+for (_, case in { { "http://?q", "b" }, { "file://", "b?q" }, { "file:b", "" }, { "x://h:81/c", "///p" }, { "http://a/b/c/d;p?q", "http:g" } }) {
+	print(case[1], case[2], "->", url.resolve(case[1], case[2]))
+}
+print(repr(url.parseQuery("a=1;b=2&c=3")))
+const mixed: { [string]: string } = { z = "last" }
+rawset(mixed :: { [unknown]: string }, 1, "first")
+rawset(mixed :: { [unknown]: string }, 10, "ten")
+print(url.encodeQuery(mixed))
