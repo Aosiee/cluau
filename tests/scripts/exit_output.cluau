@@ -1,0 +1,33 @@
+// Output still buffered when cluau ends is written then, and a failure to
+// write it is reported with a status that is not 0, however the run ends.
+// /dev/full fails every write on Linux.
+const process = require("@std/process")
+
+const cases = {
+	{ "end of a script", "-e 'print(\"x\")'" },
+	{ "a long output", "-e 'print(string.rep(\"x\", 1000000))'" },
+	{ "process.exit()", "-e 'print(\"x\"); require(\"@std/process\").exit()'" },
+	{ "process.exit(3)", "-e 'print(\"x\"); require(\"@std/process\").exit(3)'" },
+	{ "an uncaught error", "-e 'print(\"x\"); error(\"boom\")'" },
+	{ "a task's end", "-e 'require(\"@std/task\").spawn(function() { print(\"x\") })'" },
+	{ "standard input", "-", "print(1)" },
+	{ "the REPL", "-i", "1 + 1" },
+	{ "--version", "--version" },
+	{ "--help", "--help" },
+	{ "fmt", "fmt -", "let x=1" },
+}
+
+for (_, c in cases) {
+	if (process.platform == "linux") {
+		const r = process.run({ "sh", "-c", `"$0" {c[2]} > /dev/full`, process.executable }, { stderr = "capture", input = c[3] or "" })
+		const reported = string.find(r.error, "cluau: cannot write standard output", 1, true) != nil
+		print(c[1], r.code, reported)
+	} else {
+		const codes: { [string]: number } = { ["process.exit(3)"] = 3 }
+		print(c[1], codes[c[1]] or 1, true)
+	}
+}
+
+// Nothing changes when the output is written.
+const r = process.run({ process.executable, "-e", "print('x')" })
+print("written", r.code, (string.gsub(r.output, "\r", "")))
