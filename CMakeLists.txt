@@ -296,7 +296,8 @@ endif()
 add_executable(cluau tools/cluau_cli.cpp)
 target_link_libraries(cluau PRIVATE cluau_translator)
 if(CLUAU_BUILD_RUNTIME)
-    target_link_libraries(cluau PRIVATE cluau_runtime)
+    # Luau's parser for `cluau convert --verify`.
+    target_link_libraries(cluau PRIVATE cluau_runtime Luau.Ast)
     target_compile_definitions(cluau PRIVATE CLUAU_HAS_RUNTIME)
     if(CLUAU_BUILD_TESTS)
         # The runtime's API as a host uses it (host modules, the sandbox).

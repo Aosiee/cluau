@@ -1,0 +1,49 @@
+until.luau: convert [exit 0]
+﻿let n = 0
+do {
+	n += 1
+} while (!(n >= 3 &&
+	n < 10));
+print(n)
+
+
+until.luau: --verify [exit 0]
+
+strings.luau: convert [exit 0]
+let s = "one\
+two and three"
+let y = 10 / /* half */ 2
+print(s, y)
+
+
+strings.luau: --verify [exit 0]
+
+stylua.luau: convert [exit 0]
+let a = true
+let v = if (a)
+	 1
+	else 2
+print(v)
+
+
+stylua.luau: --verify [exit 0]
+
+iflocal.luau: convert [exit 1]
+if (local y = 5) { print(y) }
+
+iflocal.luau:1:4: 'if local' has no cluau form: declare the local before it (left as written)
+
+iflocal.luau: --verify [exit 1]
+iflocal.luau:1:4: 'if local' has no cluau form: declare the local before it (left as written)
+iflocal.luau: round trip: the input does not parse as Luau: line 1: Expected identifier when parsing expression, got 'local'
+
+invalid.luau: convert [exit 0]
+let x = = 1
+
+
+invalid.luau: --verify [exit 1]
+invalid.luau: round trip: the input does not parse as Luau: line 1: Expected identifier when parsing expression, got '='
+
+folder: [exit 2]	cluau: cannot read 'folder': it is a directory
+
+exit: 0
