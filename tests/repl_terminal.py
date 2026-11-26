@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # The interactive prompt in a real terminal (a pseudo-terminal): an
 # expression's value, Ctrl-C abandoning a line and a multi-line input, a
-# pasted block arriving whole, tab completion, and Ctrl-D leaving.
+# pasted block arriving whole, tab completion, Ctrl-C stopping running
+# code, and Ctrl-D leaving.
 #
 #   python3 repl_terminal.py <cluau>
 #
-# Each step waits for the prompt's own output (no fixed delays), so a slow
+# Each step waits for the prompt's own output (no fixed delays but a short
+# one letting code start before a Ctrl-C stops it), so a slow
 # machine only makes it slower.
 
 import os
@@ -106,6 +108,30 @@ def main():
     p.send(")\r")
     p.expect(r'"hi"', "the completed method call")
     p.ready("the prompt")
+
+    # A key a table does not have itself: a class's inherited static (its
+    # metatable's __index is a function, which completion never calls).
+    p.send("class Base { static Info = { size = 1 } }\r")
+    p.ready("the prompt after a class with a static")
+    p.send("class Derived extends Base { }\r")
+    p.ready("the prompt after its subclass")
+    p.send("Derived.Info.si\t")
+    p.expect(r"Derived\.Info\.size", "tab completing an inherited static's member")
+    p.send("\r")
+    p.expect(r"\n1\r?\n", "the inherited static's member")
+    p.ready("the prompt")
+
+    # A Ctrl-C the code caught, then another: the second stops the code too.
+    p.send("pcall(function() { while (true) { } })\r")
+    time.sleep(0.3)
+    p.send("\x03")
+    p.expect(r'false\s+"interrupted"', "a caught Ctrl-C")
+    p.ready("the prompt after a caught Ctrl-C")
+    p.send("while (true) { }\r")
+    time.sleep(0.3)
+    p.send("\x03")
+    p.expect(r"interrupted", "a second Ctrl-C stopping the code")
+    p.ready("the prompt after the second Ctrl-C")
 
     p.send("\x04")
     status = p.finish()

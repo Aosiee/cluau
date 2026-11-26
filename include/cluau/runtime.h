@@ -31,8 +31,11 @@ namespace cluau::runtime {
 		// are added by the command line).
 		std::vector<std::string> SearchPath;
 		// Ctrl-C (SIGINT) stops the running script with an `interrupted`
-		// error instead of ending the process (a second one ends it). The
-		// command line sets it; a host that handles SIGINT itself leaves it.
+		// error instead of ending the process (a second one while the first
+		// is pending ends it). The signal is the process's: with several
+		// runtimes, the catching one that reaches a safepoint first stops.
+		// The command line sets it; a host that handles SIGINT itself
+		// leaves it.
 		bool CatchInterrupt = false;
 		// Scripts and modules compile to native code (Luau's code generator,
 		// on x64 and arm64; elsewhere they are interpreted either way).
@@ -65,7 +68,11 @@ namespace cluau::runtime {
 		Runtime& operator=(const Runtime&) = delete;
 
 		// Runs a script file. The exit status: 0, or 1 after an error (which
-		// is reported on stderr). `process.exit(n)` ends the process itself.
+		// is reported on stderr), 130 after a Ctrl-C. `process.exit(n)` ends
+		// the process itself. Requires resolve from the real file's
+		// directory (through a symbolic link). Run from inside another run
+		// (a host's callback), the outer run's main directory and
+		// `process.script` are restored when it returns.
 		int RunFile(const std::string& path);
 		// Runs source text (`cluau -e`, a script on stdin). `name` is what
 		// errors call it ("-e", "stdin"); relative requires resolve from the
@@ -87,6 +94,11 @@ namespace cluau::runtime {
 		};
 		bool RunTest(const std::string& path, const std::string& filter, TestCounts& counts);
 
+		// The Luau state, for the host's own globals. Each run sets Luau's
+		// interrupt callback (Ctrl-C, the profiler); a callback the host
+		// set before the run is kept and called first. A runtime is used
+		// from one thread at a time; separate runtimes may run on separate
+		// threads.
 		lua_State* State() const;
 
 		// With Options::Coverage: for each file run (its absolute path), its
@@ -116,7 +128,9 @@ namespace cluau::runtime {
 	};
 
 	// The text `repr(value)` gives: strings quoted, tables shown with their
-	// contents (nested tables to a few levels, cycles marked).
+	// contents (nested tables to a few levels, cycles marked). A value's
+	// own __tostring is run, and its error is raised on L: call it inside
+	// a protected call (or from a C function Lua called).
 	std::string Repr(lua_State* L, int index);
 
 	// The standard modules this build has, as `require` names them

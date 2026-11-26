@@ -14,3 +14,8 @@ const loose: any = 1
 const allowed: any = 2 // allow-any: the test's exemption
 // allow-any: an exemption that covers nothing
 print(loose, allowed)
+
+const half = function(n: number) { return n / 2 }
+const shape = { Area = function(side: number) { return side * side } }
+table.sort({ 3, 1 }, function(a: number, b: number) { return a < b })
+print(half(1), shape.Area(2))

@@ -32,6 +32,7 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <stdlib.h>
 #define CLUAU_ISATTY(fd) _isatty(fd)
 #else
 #include <unistd.h>
@@ -40,9 +41,26 @@
 
 namespace {
 
+#ifdef _WIN32
+	// UTF-16 text (Windows' wide arguments and variables) as UTF-8.
+	std::string Utf8(const wchar_t* text)
+	{
+		try
+		{
+			const auto u = std::filesystem::path(std::wstring(text)).u8string();
+			return std::string(u.begin(), u.end());
+		}
+		catch (const std::exception&)
+		{
+			return "?"; // not UTF-16 (an unpaired surrogate)
+		}
+	}
+#endif
+
+	// Paths are UTF-8 (as the runtime's are).
 	bool Read(const std::string& path, std::string& text)
 	{
-		std::ifstream in(path, std::ios::binary);
+		std::ifstream in(std::filesystem::u8path(path), std::ios::binary);
 		if (!in)
 		{
 			std::fprintf(stderr, "cluau: cannot read '%s'\n", path.c_str());
@@ -229,7 +247,7 @@ namespace {
 				std::printf("%s needs formatting\n", file.c_str());
 				continue;
 			}
-			std::ofstream out(file, std::ios::binary | std::ios::trunc);
+			std::ofstream out(fs::u8path(file), std::ios::binary | std::ios::trunc);
 			out << result.Text;
 			if (!out)
 			{
@@ -282,9 +300,18 @@ namespace {
 	std::vector<std::string> SearchPath()
 	{
 		std::vector<std::string> dirs;
+#ifdef _WIN32
+		// The wide variable, as UTF-8 (the narrow one is in the ANSI code page).
+		const wchar_t* wide = _wgetenv(L"CLUAU_PATH");
+		if (!wide)
+			return dirs;
+		const std::string text = Utf8(wide);
+		const char* env = text.c_str();
+#else
 		const char* env = std::getenv("CLUAU_PATH");
 		if (!env)
 			return dirs;
+#endif
 #ifdef _WIN32
 		const char sep = ';';
 #else
@@ -314,12 +341,20 @@ namespace {
 		const size_t eq = spec.find('=');
 		if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size())
 			return Usage();
+		// A name a host can register (Runtime::AddModule): @alias/name, any alias but std.
+		const std::string name = spec.substr(0, eq);
+		const size_t slash = name.find('/');
+		if (name[0] != '@' || slash == std::string::npos || slash < 2 || slash + 1 == name.size() || name.rfind("@std/", 0) == 0)
+		{
+			std::fprintf(stderr, "cluau check: --module %s: a host's module is named @alias/name (any alias but std)\n", name.c_str());
+			return 2;
+		}
 		const std::string path = spec.substr(eq + 1);
 		std::string text;
 		if (!Read(path, text))
 			return 2;
 		const bool cluauSource = path.size() > 6 && path.compare(path.size() - 6, 6, ".cluau") == 0;
-		(cluauSource ? options.ModuleSources : options.Modules)[spec.substr(0, eq)] = text;
+		(cluauSource ? options.ModuleSources : options.Modules)[name] = text;
 		return 0;
 	}
 
@@ -639,7 +674,7 @@ namespace {
 
 } // namespace
 
-int main(int argc, char** argv)
+static int Main(int argc, char** argv)
 {
 	// The runtime's flags, before the command: taken out of the arguments.
 	std::vector<char*> rest{ argv[0] };
@@ -732,3 +767,22 @@ int main(int argc, char** argv)
 	return NoRuntime();
 #endif
 }
+
+#if defined(_WIN32) && defined(_MSC_VER)
+// Windows hands a narrow main its arguments in the ANSI code page (a
+// character outside it arrives as '?'); the wide ones, as UTF-8, are what
+// the runtime reads.
+int wmain(int argc, wchar_t** wide)
+{
+	std::vector<std::string> args;
+	for (int i = 0; i < argc; i++)
+		args.push_back(Utf8(wide[i]));
+	std::vector<char*> argv;
+	for (std::string& arg : args)
+		argv.push_back(arg.data());
+	argv.push_back(nullptr);
+	return Main(argc, argv.data());
+}
+#else
+int main(int argc, char** argv) { return Main(argc, argv); }
+#endif

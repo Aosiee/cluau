@@ -11,15 +11,23 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
 #include <thread>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -196,6 +204,301 @@ TEST("check: the host's modules are typed by CheckOptions")
 	CHECK(!cluau::runtime::Check({ good }).empty());
 	std::filesystem::remove(good);
 	std::filesystem::remove(bad);
+}
+
+namespace {
+
+	int RaiseSigint(lua_State*)
+	{
+		std::raise(SIGINT);
+		return 0;
+	}
+
+	int OpenSignal(lua_State* L)
+	{
+		lua_newtable(L);
+		lua_pushcfunction(L, RaiseSigint, "raise");
+		lua_setfield(L, -2, "raise");
+		return 1;
+	}
+
+	int CatchingInterrupts(const std::string& source)
+	{
+		cluau::runtime::Options options;
+		options.CatchInterrupt = true;
+		cluau::runtime::Runtime runtime(options);
+		runtime.AddModule("@test/signal", OpenSignal);
+		return runtime.RunSource(source, "-e");
+	}
+
+	std::string ReadText(const std::filesystem::path& path)
+	{
+		std::ifstream in(path, std::ios::binary);
+		std::stringstream text;
+		text << in.rdbuf();
+		return text.str();
+	}
+
+	// What `run` writes on stderr (the profiler's report).
+	std::string Stderr(const std::function<void()>& run)
+	{
+		const std::filesystem::path path = TempDir() / "stderr.txt";
+		std::fflush(stderr);
+#ifdef _WIN32
+		const int saved = _dup(2);
+		FILE* file = std::fopen(path.string().c_str(), "wb");
+		_dup2(_fileno(file), 2);
+		run();
+		std::fflush(stderr);
+		_dup2(saved, 2);
+		_close(saved);
+#else
+		const int saved = dup(2);
+		FILE* file = std::fopen(path.string().c_str(), "wb");
+		dup2(fileno(file), 2);
+		run();
+		std::fflush(stderr);
+		dup2(saved, 2);
+		close(saved);
+#endif
+		std::fclose(file);
+		return ReadText(path);
+	}
+
+	int g_HostInterrupts = 0;
+
+	cluau::runtime::Runtime* g_Outer = nullptr;
+
+	int RunNested(lua_State* L)
+	{
+		lua_pushinteger(L, g_Outer->RunFile(luaL_checkstring(L, 1)));
+		return 1;
+	}
+
+	int OpenNested(lua_State* L)
+	{
+		lua_newtable(L);
+		lua_pushcfunction(L, RunNested, "run");
+		lua_setfield(L, -2, "run");
+		return 1;
+	}
+
+} // namespace
+
+TEST("runtime: after a Ctrl-C a script caught, the next one stops it; a later error exits 1")
+{
+	CHECK_EQ(CatchingInterrupts("const signal = require(\"@test/signal\")\n"
+								"const ok, e = pcall(function() { signal.raise(); while (true) { } })\n"
+								"assert(not ok and e == \"interrupted\")\n"
+								"signal.raise()\n"
+								"const stop = os.clock() + 5\n"
+								"while (os.clock() < stop) { }\n"),
+		130);
+	CHECK_EQ(CatchingInterrupts("const signal = require(\"@test/signal\")\n"
+								"pcall(function() { signal.raise(); while (true) { } })\n"
+								"error(\"an ordinary failure\")\n"),
+		1);
+	// Raised again as it was caught, it still is a Ctrl-C.
+	CHECK_EQ(CatchingInterrupts("const signal = require(\"@test/signal\")\n"
+								"const ok, e = pcall(function() { signal.raise(); while (true) { } })\n"
+								"error(e, 0)\n"),
+		130);
+}
+
+TEST("runtime: an interrupt callback the host set is called, the runtime's own beside it")
+{
+	g_HostInterrupts = 0;
+	cluau::runtime::Runtime runtime;
+	lua_callbacks(runtime.State())->interrupt = [](lua_State* L, int gc) {
+		if (gc >= 0)
+			return;
+		if (++g_HostInterrupts == 1000)
+			luaL_error(L, "the host's watchdog");
+	};
+	CHECK_EQ(runtime.RunSource("const stop = os.clock() + 3\nwhile (os.clock() < stop) { }\n", "-e"), 1);
+	CHECK_EQ(g_HostInterrupts, 1000);
+}
+
+TEST("runtime: a file run from inside a run leaves the outer script's directory and name as they were")
+{
+	std::filesystem::create_directories(TempDir() / "nested" / "outer");
+	std::filesystem::create_directories(TempDir() / "nested" / "other");
+	const std::string inner = std::filesystem::path(Temp("nested/other/inner.cluau", "print(\"inner runs\")\n")).generic_u8string();
+	Temp("nested/outer/mod.cluau", "return \"the outer script's module\"\n");
+	const std::string outer = (TempDir() / "nested" / "outer" / "main.cluau").generic_u8string();
+	Temp("nested/outer/main.cluau", "const sink = require(\"@test/sink\")\n"
+									"sink.put(require(\"@test/nested\").run(\"" + inner + "\"))\n"
+									"sink.put(require(\"mod\"))\n"
+									"sink.put(require(\"@std/process\").script == \"" + outer + "\")\n");
+	Sunk().clear();
+	cluau::runtime::Runtime runtime;
+	g_Outer = &runtime;
+	runtime.AddModule("@test/sink", OpenSink);
+	runtime.AddModule("@test/nested", OpenNested);
+	CHECK_EQ(runtime.RunFile(outer), 0);
+	g_Outer = nullptr;
+	CHECK_EQ(Sunk().size(), size_t(3));
+	if (Sunk().size() == 3)
+	{
+		CHECK_EQ(Sunk()[0], std::string("0"));
+		CHECK_EQ(Sunk()[1], std::string("\"the outer script's module\""));
+		CHECK_EQ(Sunk()[2], std::string("true"));
+	}
+}
+
+TEST("runtime: a NUL byte in a script is an error; a byte order mark is skipped in source text too")
+{
+	std::string withNul = "require(\"@test/sink\").put(1)\n";
+	withNul += '\0';
+	withNul += "require(\"@test/sink\").put(2)\n";
+	CHECK_EQ(Run(withNul), 1);
+	CHECK(Sunk().empty());
+	CHECK_EQ(Run("\xEF\xBB\xBFrequire(\"@test/sink\").put(1)\n"), 0);
+	CHECK_EQ(Sunk().size(), size_t(1));
+	std::string fileText = "print(1)\n";
+	fileText += '\0';
+	fileText += "print(2)\n";
+	const std::string nul = Temp("nul.cluau", fileText);
+	bool reported = false;
+	for (const cluau::runtime::CheckFinding& f : cluau::runtime::Check({ nul }))
+		reported = reported || (f.At.Begin.Line == 1 && f.Message.find("NUL") != std::string::npos);
+	CHECK(reported);
+}
+
+TEST("runtime: repr's escapes are three digits, and number keys are in numeric order")
+{
+	CHECK_EQ(Run("const sink = require(\"@test/sink\")\n"
+				 "const s = \"\\1\" .. \"2\\127\" .. \"9\\0\"\n"
+				 "sink.put(s)\n"
+				 "sink.put({ [10] = \"a\", [2] = \"b\", [-1] = \"c\" })\n"),
+		0);
+	CHECK_EQ(Sunk().size(), size_t(2));
+	if (Sunk().size() == 2)
+	{
+		CHECK_EQ(Sunk()[0], std::string("\"\\0012\\1279\\000\""));
+		CHECK_EQ(Sunk()[1], std::string("{[-1] = \"c\", [2] = \"b\", [10] = \"a\"}"));
+	}
+}
+
+TEST("runtime: a script linked from another directory requires the modules beside the file it links to")
+{
+	namespace fs = std::filesystem;
+	fs::create_directories(TempDir() / "linked" / "real");
+	fs::create_directories(TempDir() / "linked" / "bin");
+	Temp("linked/real/helper.cluau", "return \"beside the real file\"\n");
+	Temp("linked/real/main.cluau", "const a = require(\"helper\")\n"
+								   "const b = require(\"./helper\")\n"
+								   "require(\"@test/sink\").put(a == b)\n");
+	const fs::path link = TempDir() / "linked" / "bin" / "tool.cluau";
+	std::error_code ec;
+	fs::create_symlink(TempDir() / "linked" / "real" / "main.cluau", link, ec);
+	if (ec)
+		return; // no symbolic links here (Windows without the privilege)
+	Sunk().clear();
+	cluau::runtime::Runtime runtime;
+	runtime.AddModule("@test/sink", OpenSink);
+	CHECK_EQ(runtime.RunFile(link.u8string()), 0);
+	CHECK_EQ(Sunk().size(), size_t(1));
+	cluau::runtime::CheckOptions options;
+	options.Modules["@test/sink"] = "local m: any = nil\nreturn m :: { put: (value: unknown) -> () }\n";
+	CHECK(cluau::runtime::Check({ link.u8string() }, options).empty());
+}
+
+TEST("check: an any-typed expression is reported with the same range each time")
+{
+	const std::string file = Temp("anys.cluau", "const m = require(\"./nowhere\")\n"
+												"const v = m.Vec(1, 2)\n"
+												"print(v)\n");
+	for (int i = 0; i < 10; i++)
+	{
+		int found = 0;
+		for (const cluau::runtime::CheckFinding& f : cluau::runtime::Check({ file }))
+			if (f.Code == "NoAny" && f.At.Begin.Line == 1)
+			{
+				found++;
+				CHECK_EQ(f.At.Begin.Col, 10);
+				CHECK_EQ(f.At.End.Col, 11); // `m`, the shortest
+			}
+		CHECK_EQ(found, 1);
+	}
+}
+
+TEST("profile: a blocking call's time goes to its line; a coroutine's body is its function; time is measured")
+{
+	const std::string sleepy = Temp("sleepy.cluau", "const process = require(\"@std/process\")\n"
+													"process.sleep(0.3)\n"
+													"let x = 0\n"
+													"print(x)\n");
+	const std::string report = Stderr([&] {
+		cluau::runtime::Options options;
+		options.Profile = true;
+		cluau::runtime::Runtime runtime(options);
+		CHECK_EQ(runtime.RunFile(sleepy), 0);
+	});
+	const size_t lines = report.find("self  line\n");
+	CHECK(lines != std::string::npos);
+	if (lines != std::string::npos)
+	{
+		const size_t end = report.find('\n', lines + 11);
+		CHECK(report.substr(lines + 11, end - lines - 11).find("sleepy.cluau:2") != std::string::npos);
+	}
+	double seconds = 0;
+	long sampled = 0;
+	const size_t head = report.find("profile: ");
+	CHECK(head != std::string::npos && std::sscanf(report.c_str() + head, "profile: %lf s, %ld ms sampled", &seconds, &sampled) == 2);
+	CHECK(sampled >= 0.95 * seconds * 1000 && sampled <= seconds * 1000 + 1);
+
+	const std::string co = Temp("co.cluau", "coroutine.wrap(function() {\n"
+											"\tconst stop = os.clock() + 0.1\n"
+											"\twhile (os.clock() < stop) { }\n"
+											"})()\n");
+	const std::filesystem::path folded = TempDir() / "co.folded";
+	Stderr([&] {
+		cluau::runtime::Options options;
+		options.Profile = true;
+		options.ProfileFolded = folded.u8string();
+		cluau::runtime::Runtime runtime(options);
+		CHECK_EQ(runtime.RunFile(co), 0);
+	});
+	CHECK_EQ(ReadText(folded).rfind("(anonymous) (", 0), size_t(0));
+}
+
+TEST("profile: runtimes profile on their own, one after another and on two threads")
+{
+	const std::string busy = Temp("busy2.cluau", "const stop = os.clock() + 0.1\n"
+												 "while (os.clock() < stop) { }\n");
+	const std::filesystem::path first = TempDir() / "first.folded", second = TempDir() / "second.folded";
+	Stderr([&] {
+		cluau::runtime::Options options;
+		options.Profile = true;
+		options.ProfileFolded = second.u8string();
+		cluau::runtime::Runtime later(options);
+		{
+			options.ProfileFolded = first.u8string();
+			cluau::runtime::Runtime earlier(options);
+			CHECK_EQ(earlier.RunFile(busy), 0);
+		}
+		CHECK_EQ(later.RunFile(busy), 0);
+	});
+	CHECK(!ReadText(first).empty());
+	CHECK(!ReadText(second).empty());
+
+	std::vector<std::filesystem::path> files = { TempDir() / "thread1.folded", TempDir() / "thread2.folded" };
+	Stderr([&] {
+		std::vector<std::thread> threads;
+		for (const std::filesystem::path& file : files)
+			threads.emplace_back([&busy, file] {
+				cluau::runtime::Options options;
+				options.Profile = true;
+				options.ProfileFolded = file.u8string();
+				cluau::runtime::Runtime runtime(options);
+				runtime.RunFile(busy);
+			});
+		for (std::thread& t : threads)
+			t.join();
+	});
+	for (const std::filesystem::path& file : files)
+		CHECK(!ReadText(file).empty());
 }
 
 // ---- the language server ---------------------------------------------------

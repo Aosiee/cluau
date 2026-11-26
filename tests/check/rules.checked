@@ -4,5 +4,7 @@ rules.cluau:11:1: 'limit' is const and cannot be assigned
 rules.cluau:13:14: an explicit any - strict typing allows any only with a line exemption: // allow-any: <reason>
 rules.cluau:15:1: warning: this allow-any exemption covers nothing - remove it
 rules.cluau:16:7: a value of type any - strict typing allows any only with a line exemption: // allow-any: <reason>
-cluau check: 5 error(s), 1 warning(s)
+rules.cluau:18:7: this function returns a value: annotate its return type (strict typing)
+rules.cluau:19:24: this function returns a value: annotate its return type (strict typing)
+cluau check: 7 error(s), 1 warning(s)
 exit: 1

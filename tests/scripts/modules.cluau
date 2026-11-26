@@ -15,3 +15,6 @@ print(ok, string.find(tostring(err), "not found", 1, true) != nil) // allow-any:
 
 const probe = require("./lib/nested/probe")
 print(probe.Ok, probe.Sibling)
+
+const side: boolean = require("./lib/sideeffect")
+print(side, require("./lib/sideeffect"))

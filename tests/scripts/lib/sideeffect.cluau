@@ -1,0 +1,2 @@
+// A module that returns nothing: require gives true.
+print("the module ran")

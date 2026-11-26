@@ -21,3 +21,13 @@ if (x > 1) {
 	print("a block over lines")
 }
 nil
+setmetatable({}, { __tostring = function() { error("its __tostring fails") } })
+print("the session goes on")
+function Fails() {
+	error("raised in an earlier input")
+}
+Fails()
+let members = 0
+for (k, v in Point) { members += 1; if (members > 10) { break } }
+members
+class Bad { static Fields = 1 }

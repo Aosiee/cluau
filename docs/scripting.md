@@ -49,7 +49,11 @@ The arguments after the script are `process.args`. A script's first line
 may be `#!/usr/bin/env cluau`, so a script marked executable runs by itself
 once `cluau` is on `PATH` (the installers in the README put it there; so
 does `cmake --install build --prefix ~/.local`).
-A `.luau` file runs as Luau (it is not translated).
+A `.luau` file runs as Luau (it is not translated). A script linked from
+elsewhere (a symbolic link in a `bin` directory) finds its modules beside
+the file it links to. Source text is UTF-8 (a byte order mark at its start
+is skipped, in a file, on standard input and in `-e` alike) and cannot
+contain a NUL byte.
 
 The exit status is 0, 1 after an error, 2 when the script cannot be read,
 130 after Ctrl-C, or the code passed to `process.exit(code)`.
@@ -261,12 +265,15 @@ profile: 1.204 s, 1187 ms sampled
 ```
 
 It samples the stack about once a millisecond, at Luau's safepoints
-(calls and loops); time inside a long C call (a sleep, a read, a download)
+(calls and loops), each sample weighted by the time measured since the
+last; time inside a long C call (a sleep, a read, a download)
 goes to the line that made the call, and so does time in the standard
 modules written in cluau (a `task.wait`). A module's top level is
-`(top level)`, as the script's is. `--top n` shows `n` functions (20 by
-default). `--folded file` writes the samples as folded stacks
-(`outer;inner count` per line), which flame graph tools (`flamegraph.pl`,
+`(top level)`, as the script's is; a coroutine's or a task's function is
+`(anonymous)` with its line, unless it has a name. `--top n` shows `n`
+functions (20 by default). `--folded file` writes the samples as folded
+stacks (`outer;inner count` per line, the count in microseconds), which
+flame graph tools (`flamegraph.pl`,
 speedscope, Inferno) draw. Native code is profiled as it runs; with
 `--no-native`, a loop's time is on its `for` or `while` line rather than
 its body.
@@ -442,7 +449,9 @@ ends it early. A pasted block arrives whole.
 
 At the prompt a top-level `let`, `const` or `local` sets a global (each
 input is its own chunk, so a local would end with its line), and a class
-is a global too.
+is a global too. Errors name the n-th input `stdin[n]`, so a backtrace
+through a function defined earlier quotes that input's lines. A value
+whose `__tostring` fails is reported as an error, and the session goes on.
 
 - Tab completes globals, keywords, a module's or a table's members
   (`string.up` to `string.upper(`), and an instance's methods after `:`,
@@ -607,7 +616,9 @@ returns (`true` when it returns nothing); later calls give the same value.
 
 For each, `name` (when it ends in `.cluau` or `.luau`), `name.cluau`,
 `name.luau`, `name/init.cluau` and `name/init.luau` are tried in that
-order; a file of any other kind is not a module. A module that requires itself,
+order; a file of any other kind is not a module. A module reached through a
+symbolic link resolves its own requires from the directory of the file it
+links to (as `cluau check` does). A module that requires itself,
 directly or through others, is an error (`require cycle`).
 
 ```
@@ -778,7 +789,7 @@ back with `/` on every platform, Windows included (which accepts them).
 | `exec(command, options?): (number, boolean)` | runs a command with the script's own output; its exit code, and whether it timed out |
 | `spawn(command, options?): Child` | starts a command that runs alongside the script |
 | `sleep(seconds)` | waits |
-| `exit(code?)` | ends the script (0 by default) |
+| `exit(code?)` | ends the script with exit status `code`, a whole number from 0 to 255 (0 by default) |
 
 A command is a list or a string:
 
@@ -1489,6 +1500,17 @@ needs no Luau.
 
 `Options` sets the script's arguments, the search path, Ctrl-C handling,
 native code (`Native`, on by default) and the sandbox (`Sandbox`).
+
+The runtime sets Luau's interrupt callback on `State()` for each run; one
+the host had set there is called first, so a host's watchdog keeps
+working. Several runtimes can live in one process, each on one thread at a
+time, and each profiles on its own; Ctrl-C (`CatchInterrupt`) is the
+process's signal, and stops whichever catching runtime reaches its next
+safepoint first. A file or source run from inside a run (a host's callback
+calling `RunFile`) leaves the outer script's directory and
+`process.script` as they were when it returns. `cluau::runtime::Repr`
+runs a value's `__tostring`, which can raise a Lua error: call it where
+an error is caught (inside a protected call).
 
 ### Host modules
 

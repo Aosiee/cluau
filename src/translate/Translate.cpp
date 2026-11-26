@@ -1912,6 +1912,12 @@ namespace cluau {
 						depth--;
 					v++;
 				}
+				// The runtime keeps a script class's own data under these.
+				const std::string_view name = m_Toks[nameTok].Text;
+				if (m_Profile == &ScriptProfile())
+					for (const char* internal : { "Fields", "__index", "__name", "__base", "__abstract", "__abstracts" })
+						if (name == internal)
+							Error(m_Toks[nameTok], "`" + std::string(name) + "` is a name the runtime uses in a class: give the static member another name");
 				m_StaticSpans.push_back({ j, nameTok, v });
 				info.Statics.push_back(std::string(m_Toks[nameTok].Text));
 				return Sig(v);
