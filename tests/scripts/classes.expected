@@ -3,4 +3,5 @@ constructed:	5
 1	0	bag
 Bag {Items = {"apple"}, Label = "bag"}
 class Vec
+3	5
 exit: 0

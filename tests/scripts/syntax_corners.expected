@@ -13,4 +13,8 @@ y	2	3	8	87
 after //[[
 after ]
 nested inner false
+m	4	7
+sorted: 1,2,3
+5 true 3 big 3
+3 arguments	42	2
 exit: 0

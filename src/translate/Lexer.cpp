@@ -19,40 +19,71 @@ namespace cluau::detail {
 		class Lexer
 		{
 		public:
-			Lexer(std::string_view source, std::vector<Diagnostic>& diagnostics)
-				: m_Src(source), m_Diagnostics(diagnostics)
+			Lexer(std::string_view source, std::vector<Diagnostic>& diagnostics, bool split)
+				: m_Src(source), m_Diagnostics(diagnostics), m_Split(split)
 			{
 			}
 
 			std::vector<Token> Run()
 			{
-				std::vector<Token> tokens;
+				// A byte order mark is not code (the source's columns still count it).
+				if (m_Src.substr(0, 3) == "\xEF\xBB\xBF")
+					m_Pos = 3;
 				for (;;)
 				{
 					SkipWhitespace();
-					Token token;
-					token.Begin = m_Pos;
-					token.Line = m_Line;
-					token.Col = Col();
+					Token token = Start();
 					if (m_Pos >= m_Src.size())
 					{
+						// An interpolated string still in a segment: reported at its start.
+						if (!m_Interp.empty())
+						{
+							const Token& open = m_Tokens[m_Interp.front().Token];
+							Diagnostic d;
+							d.At = { { open.Line, open.Col }, { m_Line, Col() } };
+							d.Message = "unterminated interpolated string";
+							m_Diagnostics.push_back(std::move(d));
+							for (const InterpOpen& o : m_Interp)
+								m_Tokens[o.Token].Open = true;
+						}
 						token.Kind = TokenKind::Eof;
-						token.End = m_Pos;
-						token.EndLine = m_Line;
-						token.EndCol = Col();
-						tokens.push_back(token);
-						return tokens;
+						Finish(token);
+						m_Tokens.push_back(token);
+						return std::move(m_Tokens);
 					}
+					m_TokenIndex = m_Tokens.size();
 					LexOne(token);
-					token.End = m_Pos;
-					token.Text = m_Src.substr(token.Begin, token.End - token.Begin);
-					token.EndLine = m_Line;
-					token.EndCol = Col();
-					tokens.push_back(token);
+					Finish(token);
+					m_Tokens.push_back(token);
 				}
 			}
 
 		private:
+			// The open segments of split interpolated strings: each one's
+			// InterpBegin / InterpMid token and the braces open inside it.
+			struct InterpOpen
+			{
+				size_t Token = 0;
+				int Depth = 0;
+			};
+
+			Token Start() const
+			{
+				Token token;
+				token.Begin = m_Pos;
+				token.Line = m_Line;
+				token.Col = Col();
+				return token;
+			}
+
+			void Finish(Token& token) const
+			{
+				token.End = m_Pos;
+				token.Text = m_Src.substr(token.Begin, token.End - token.Begin);
+				token.EndLine = m_Line;
+				token.EndCol = Col();
+			}
+
 			int Col() const { return (int)(m_Pos - m_LineStart); }
 			char At(size_t offset = 0) const { return m_Pos + offset < m_Src.size() ? m_Src[m_Pos + offset] : '\0'; }
 
@@ -115,9 +146,12 @@ namespace cluau::detail {
 				return false;
 			}
 
-			bool SkipQuoted(char quote)
+			// `continued`: the source ends where the string goes on (after a
+			// `\` line continuation or a `\z`), so more input would finish it.
+			bool SkipQuoted(char quote, bool* continued = nullptr)
 			{
 				Advance();
+				bool going = false;
 				while (m_Pos < m_Src.size())
 				{
 					const char c = At();
@@ -125,6 +159,7 @@ namespace cluau::detail {
 					{
 						Advance();
 						const bool skipSpace = m_Pos < m_Src.size() && At() == 'z';
+						going = m_Pos >= m_Src.size() || skipSpace || At() == '\n' || At() == '\r';
 						// A backslash before a line break continues the string
 						// on the next line; a CRLF break is one break, as Luau
 						// reads it.
@@ -139,71 +174,74 @@ namespace cluau::detail {
 					}
 					if (c == '\n')
 						return false;
+					going = false;
 					Advance();
 					if (c == quote)
 						return true;
 				}
+				if (continued)
+					*continued = going;
 				return false;
 			}
 
-			// `...`, with `{expr}` segments that may hold strings and braces.
-			bool SkipInterpolated(int nesting = 0)
+			enum class Part { End, Segment, Eof };
+
+			// An interpolated string's text from here (after its backtick or a
+			// segment's `}`) to its closing backtick or the next segment's `{`,
+			// past either.
+			Part SkipStringPart()
 			{
-				Advance();
-				int depth = 0;
 				while (m_Pos < m_Src.size())
 				{
 					const char c = At();
-					if (depth == 0)
-					{
-						if (c == '\\')
-						{
-							Advance();
-							if (m_Pos < m_Src.size())
-								Advance();
-							continue;
-						}
-						if (c == '`')
-						{
-							Advance();
-							return true;
-						}
-						if (c == '{')
-							depth = 1;
-						Advance();
-						continue;
-					}
-					if (c == '"' || c == '\'')
-					{
-						SkipQuoted(c);
-						continue;
-					}
-					if (c == '`')
-					{
-						if (nesting + 1 >= kMaxInterpolationNesting)
-						{
-							// Reported once; the rest is read as the segment's text.
-							if (!m_TooDeep)
-							{
-								Token at;
-								at.Line = m_Line;
-								at.Col = Col();
-								Error(at, "interpolated strings nest too deeply (more than " + std::to_string(kMaxInterpolationNesting) + " levels)");
-								m_TooDeep = true;
-							}
-							Advance();
-							continue;
-						}
-						SkipInterpolated(nesting + 1);
-						continue;
-					}
-					if (c == '{')
-						depth++;
-					else if (c == '}')
-						depth--;
 					Advance();
+					if (c == '\\')
+					{
+						if (m_Pos < m_Src.size())
+							Advance();
+					}
+					else if (c == '`')
+						return Part::End;
+					else if (c == '{')
+						return Part::Segment;
 				}
-				return false;
+				return Part::Eof;
+			}
+
+			// `...{expr}...` as one token: each segment is read as code (its
+			// strings, comments and braces), up to the `}` that closes it.
+			bool SkipInterpolated()
+			{
+				Advance();
+				for (;;)
+				{
+					const Part part = SkipStringPart();
+					if (part != Part::Segment)
+						return part == Part::End;
+					int depth = 0;
+					m_Nesting++;
+					for (;;)
+					{
+						SkipWhitespace();
+						if (m_Pos >= m_Src.size())
+						{
+							m_Nesting--;
+							return false;
+						}
+						if (At() == '}' && depth == 0)
+						{
+							Advance();
+							break;
+						}
+						Token inner = Start();
+						LexOne(inner);
+						if (inner.Kind == TokenKind::Op && m_Src[inner.Begin] == '{')
+							depth++;
+						else if (inner.Kind == TokenKind::Op && m_Src[inner.Begin] == '}')
+							depth--;
+					}
+					m_Nesting--;
+				}
 			}
 
 			void LexOne(Token& token)
@@ -268,17 +306,62 @@ namespace cluau::detail {
 				if (c == '"' || c == '\'')
 				{
 					token.Kind = TokenKind::String;
-					if (!SkipQuoted(c))
+					bool continued = false;
+					if (!SkipQuoted(c, &continued))
+					{
 						Error(token, "unterminated string");
+						token.Open = continued;
+					}
 					return;
 				}
-				if (c == '`')
+				if (c == '`' && m_Nesting + (int)m_Interp.size() >= kMaxInterpolationNesting)
+				{
+					// Reported once; the backtick is lexed as a stray character.
+					if (!m_TooDeep)
+					{
+						Error(token, "interpolated strings nest too deeply (more than " + std::to_string(kMaxInterpolationNesting) + " levels)");
+						m_TooDeep = true;
+					}
+					token.Kind = TokenKind::Op;
+					Advance();
+					return;
+				}
+				if (c == '`' && !m_Split)
 				{
 					token.Kind = TokenKind::Interpolated;
 					if (!SkipInterpolated())
 					{
 						Error(token, "unterminated interpolated string");
 						token.Open = true;
+					}
+					return;
+				}
+				if (c == '`' || (c == '}' && !m_Interp.empty() && m_Interp.back().Depth == 0))
+				{
+					// Split: a piece of text; the segment after it is lexed as code.
+					const bool first = c == '`';
+					Advance();
+					const Part part = SkipStringPart();
+					if (part == Part::Segment)
+					{
+						token.Kind = first ? TokenKind::InterpBegin : TokenKind::InterpMid;
+						if (first)
+							m_Interp.push_back({ m_TokenIndex, 0 });
+						return;
+					}
+					token.Kind = first ? TokenKind::Interpolated : TokenKind::InterpEnd;
+					size_t begin = m_TokenIndex;
+					if (!first)
+					{
+						begin = m_Interp.back().Token;
+						m_Interp.pop_back();
+					}
+					if (part == Part::Eof)
+					{
+						// Reported at the outermost string's start (Run, when one is open around it).
+						token.Open = true;
+						if (m_Interp.empty())
+							Error(begin == m_TokenIndex ? token : m_Tokens[begin], "unterminated interpolated string");
 					}
 					return;
 				}
@@ -293,6 +376,8 @@ namespace cluau::detail {
 					return;
 				}
 				token.Kind = TokenKind::Op;
+				if (!m_Interp.empty() && (c == '{' || c == '}'))
+					m_Interp.back().Depth += c == '{' ? 1 : -1;
 				for (std::string_view op : kOperators)
 					if (m_Src.compare(m_Pos, op.size(), op) == 0)
 					{
@@ -305,6 +390,11 @@ namespace cluau::detail {
 
 			std::string_view m_Src;
 			std::vector<Diagnostic>& m_Diagnostics;
+			bool m_Split = false;
+			std::vector<Token> m_Tokens;
+			size_t m_TokenIndex = 0;          // the token being lexed
+			std::vector<InterpOpen> m_Interp; // split: the segments open here
+			int m_Nesting = 0;                // not split: the segments being skipped around here
 			size_t m_Pos = 0;
 			size_t m_LineStart = 0;
 			int m_Line = 0;
@@ -313,9 +403,9 @@ namespace cluau::detail {
 
 	} // namespace
 
-	std::vector<Token> Lex(std::string_view source, std::vector<Diagnostic>& diagnostics)
+	std::vector<Token> Lex(std::string_view source, std::vector<Diagnostic>& diagnostics, bool splitInterpolation)
 	{
-		return Lexer(source, diagnostics).Run();
+		return Lexer(source, diagnostics, splitInterpolation).Run();
 	}
 
 } // namespace cluau::detail

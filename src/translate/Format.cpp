@@ -58,6 +58,15 @@ namespace cluau {
 
 	FormatResult Format(std::string_view source, const FormatOptions& options)
 	{
+		// A byte order mark stays where it is, before the first line's indentation.
+		constexpr std::string_view kBom = "\xEF\xBB\xBF";
+		if (source.substr(0, kBom.size()) == kBom)
+		{
+			FormatResult result = Format(source.substr(kBom.size()), options);
+			result.Text.insert(0, kBom);
+			result.Changed = result.Text != source;
+			return result;
+		}
 		FormatResult result;
 		std::vector<Token> tokens = detail::Lex(source, result.Diagnostics);
 		if (result.HasErrors())

@@ -10,6 +10,10 @@ Anything not described here is Luau unchanged: the type syntax (`: number`,
 `type`, generics, unions, `?`), method calls with `:` (`obj:Method()`),
 strings and string interpolation, `#`, `..`, 1-based arrays, `nil`,
 `return`, `break`, `continue`, and the compound assignments (`+=`, ...).
+An interpolated string's `{}` segments are cluau expressions, translated
+like any other (see Operators).
+
+A UTF-8 byte order mark at the start of a file is ignored.
 
 ## Statements and blocks
 
@@ -51,6 +55,12 @@ strings and string interpolation, `#`, `..`, 1-based arrays, `nil`,
 | `x++`, `x--` (statements) | `x += 1`, `x -= 1` |
 
 `and`, `or` and `not` are also accepted.
+
+The same holds in an interpolated string's segments, which are ordinary
+cluau expressions: `` `{a != b}` ``, `` `{if (n == 1) "one" else "many"}` ``,
+a function with a `{ }` body, comments and long strings all work there as
+anywhere else. Floor division there is `~/` too, since `//` starts a
+comment (which would run to the end of the line, past the string's end).
 
 ### If-expressions
 

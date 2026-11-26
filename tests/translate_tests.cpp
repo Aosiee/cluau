@@ -722,3 +722,138 @@ TEST("format: a generic's closing > ends a line, every line keeps its own line b
 	CHECK_EQ(Formatted("let a = 1\r\nlet s = [[x\ny\r\nz]]\nlet b = 2\n"), std::string("let a = 1\r\nlet s = [[x\ny\r\nz]]\nlet b = 2\n"));
 	CHECK_EQ(Formatted("let a = 1\r\nlet b = 2"), std::string("let a = 1\r\nlet b = 2\r\n"));
 }
+
+TEST("classes: a field's default is placed by the lowering's shape, not found in its text")
+{
+	// The default's text occurs earlier in the lowered line (`3` in Vector3, `d` in Fields).
+	const std::string vec = ScriptTranslation("class Vector3 {\n\tZ: number = 3\n}\n").Luau;
+	CHECK(vec.find("\tVector3.Fields.Z = function() return 3 end\n") != std::string::npos);
+	const std::string box = ScriptTranslation("const d = 5\nclass Box {\n\tWidth: number = d\n}\n").Luau;
+	CHECK(box.find("\tBox.Fields.Width = function() return d end\n") != std::string::npos);
+	const std::string host = Luau("class Vec2 {\n\tY: number = 2\n}\n");
+	CHECK(host.find("\tVec2.Fields.Y = 2\n") != std::string::npos);
+	// A profile whose lowering does not hold the default as it is: one line.
+	cluau::ClassProfile upper;
+	upper.LowerField = [](const cluau::ClassField& field, const std::string& className, std::string&) {
+		return className + ".Fields." + field.Name + " = " + std::to_string(field.Default.size());
+	};
+	cluau::TranslateOptions options;
+	options.Profile = &upper;
+	CHECK(Luau("class P {\n\tS: string = \"abc\"\n}\n", options).find("\tP.Fields.S = 5 ") != std::string::npos);
+}
+
+TEST("classes: positions in a field's default map to the source")
+{
+	const cluau::TranslateResult r = ScriptTranslation("class K {\n\tF: number = ( nope )\n\tH: number = nope3 + 1\n}\n");
+	CHECK(!r.HasErrors());
+	auto luauColumn = [&](int line, const std::string& word) {
+		size_t start = 0;
+		for (int l = 0; l < line; l++)
+			start = r.Luau.find('\n', start) + 1;
+		return (int)(r.Luau.find(word, start) - start);
+	};
+	CHECK_EQ(r.Map.FromLuau({ 1, luauColumn(1, "nope") }).Col, 15);
+	CHECK_EQ(r.Map.FromLuau({ 2, luauColumn(2, "nope3") }).Col, 13);
+}
+
+TEST("classes: a script class's `};` after a member's own `;`")
+{
+	const cluau::TranslateResult r = ScriptTranslation("class Point {\n\tX: number = 1;\n};\nlet p = Point()\n");
+	CHECK(!r.HasErrors());
+	CHECK(r.Luau.find("end;\n\n") != std::string::npos);
+	CHECK(r.Luau.find("\n;") == std::string::npos);
+	// Without one of its own, the class's `;` stays (it ends the statement before a `(` line).
+	CHECK(ScriptTranslation("class Q {\n\tstatic F = f\n};\n(g)()\n").Luau.find("Q.F = f\n;\n") != std::string::npos);
+}
+
+TEST("comments: a comment right after a minus stays a comment of its own")
+{
+	CHECK_EQ(Luau("x = x -/* one */1"), std::string("x = x - --[[ one ]]1"));
+	CHECK_EQ(Luau("y = 10 -// more\n3"), std::string("y = 10 - -- more\n3"));
+	CHECK_EQ(Luau("z = 1 - /* c */ 2"), std::string("z = 1 - --[[ c ]] 2"));
+}
+
+TEST("interpolation: a segment is translated like any other expression")
+{
+	CHECK_EQ(Luau("s = `{(function() { return 1 })()}`"), std::string("s = `{(function()  return 1 end)()}`"));
+	CHECK_EQ(Luau("s = `{a /* n */ + b}`"), std::string("s = `{a --[[ n ]] + b}`"));
+	CHECK_EQ(Luau("s = `{a and!b}`"), std::string("s = `{a and not b}`"));
+	CHECK_EQ(Luau("s = `{string.len([==[a`b]==])}`"), std::string("s = `{string.len([==[a`b]==])}`"));
+	CHECK_EQ(Luau("s = `{if (a) 1 else 2} and {x ~/ 2}`"), std::string("s = `{if (a) then 1 else 2} and {x // 2}`"));
+	CHECK_EQ(Luau("s = `a{`b{c != d}`}e{f}g`"), std::string("s = `a{`b{c ~= d}`}e{f}g`"));
+	CHECK_EQ(Luau("s = `{t[\"}\"]} \\{x}`"), std::string("s = `{t[\"}\"]} \\{x}`"));
+	// `//` starts a comment there too (floor division is `~/`), which here runs past the string's end.
+	CHECK(HasError(cluau::Translate("s = `{a // b}`\n"), "unterminated interpolated string"));
+	// An if-expression in a segment needs its else before the segment ends.
+	CHECK(HasError(cluau::Translate("s = `{if (a) 1}`\n"), "an if-expression needs an else"));
+	CHECK(HasError(cluau::Translate("s = `{f(}`\n"), "unclosed '('"));
+	// Its lines and columns are the source's.
+	const std::string multi = "s = `{a +\n\tb}` .. `{c\n}`\nprint(s)\n";
+	CHECK_EQ(Lines(Luau(multi)), Lines(multi));
+	const cluau::TranslateResult r = cluau::Translate("s = `x{a != b}y` .. `{!c}`");
+	CHECK_EQ(r.Luau, std::string("s = `x{a ~= b}y` .. `{not c}`"));
+	CHECK_EQ(r.Map.ToLuau({ 0, 11 }).Col, 11);
+	CHECK_EQ(r.Map.ToLuau({ 0, 23 }).Col, 26);
+}
+
+TEST("interpolation: a try passes on the `...` a segment uses")
+{
+	const std::string luau = Luau("function f(...: number) {\n\ttry {\n\t\tprint(`{select(\"#\", ...)}`)\n\t} catch (e) {\n\t}\n}\n");
+	CHECK(luau.find("pcall(function(...: number): ...any") != std::string::npos);
+	CHECK(luau.find("end, ...)") != std::string::npos);
+}
+
+TEST("try: a return's value on the next line is the return's, as Luau reads it")
+{
+	const std::string luau = Luau("function f(): number {\n\ttry {\n\t\treturn\n\t\t\t42\n\t} catch (e) {\n\t\treturn 0\n\t}\n}\n");
+	CHECK(luau.find("return 1, table.pack(\n\t\t\t42)") != std::string::npos);
+	CHECK(Luau("function g() {\n\ttry {\n\t\treturn\n\t} catch (e) {\n\t}\n}\n").find("return 1, table.pack()\n") != std::string::npos);
+}
+
+TEST("scripts: REPL declarations whose type does not end are left for Luau")
+{
+	cluau::TranslateOptions options;
+	options.Repl = true;
+	CHECK_EQ(Luau("let x: Array<number = {1, 2}; print(\"after\")", options), std::string("local x: Array<number = {1, 2}; print(\"after\")"));
+	CHECK_EQ(Luau("let y: {number = 1", options), std::string("local y: {number = 1}"));
+	// A blanked type keeps the lines of a token that spans them.
+	const std::string typed = "let s: \"a\\\nb\" = \"a\\\nb\"\nprint(s)\n";
+	CHECK_EQ(Lines(Luau(typed, options)), Lines(typed));
+}
+
+TEST("scripts: a pending if-expression or a continued string is unfinished")
+{
+	CHECK(cluau::Translate("let y = if (true)\n").Unfinished);
+	CHECK(cluau::Translate("let y = if (a) 1 else if (b)\n").Unfinished);
+	CHECK(cluau::Translate("let s = \"a\\\n").Unfinished);
+	CHECK(cluau::Translate("let s = \"a\\").Unfinished);
+	CHECK(cluau::Translate("let s = \"a\\z  \n").Unfinished);
+	CHECK(cluau::Translate("let s = `a{`b{x").Unfinished);
+	CHECK(!cluau::Translate("let y = if (a) 1 else 2\n").Unfinished);
+	CHECK(!cluau::Translate("let s = \"a\\n\n").Unfinished);
+}
+
+TEST("sources: a UTF-8 byte order mark is not code")
+{
+	const cluau::TranslateResult r = cluau::Translate("\xEF\xBB\xBFlet x = 1\nprint(x)\n");
+	CHECK(!r.HasErrors());
+	CHECK_EQ(r.Luau, std::string("local x = 1\nprint(x)\n"));
+	CHECK_EQ(r.Map.ToLuau({ 0, 11 }).Col, 10);
+	CHECK_EQ(Formatted("\xEF\xBB\xBF  let x = 1\n"), std::string("\xEF\xBB\xBFlet x = 1\n"));
+	CHECK_EQ(Formatted("\xEF\xBB\xBFif (a) {\nf()\n}\n"), std::string("\xEF\xBB\xBFif (a) {\n\tf()\n}\n"));
+}
+
+TEST("diagnostics: the first fifty, and how many more")
+{
+	const cluau::TranslateResult r = cluau::Translate(std::string(200, '}'));
+	CHECK_EQ(r.Diagnostics.size(), (size_t)51);
+	CHECK(r.Diagnostics.back().Message.find("150 more errors") == 0);
+	CHECK_EQ(r.Diagnostics.back().At.Begin.Col, 50);
+}
+
+TEST("statements: a brace-less if does not take a later line's table for its block")
+{
+	CHECK(HasError(cluau::Translate("if (x) (f)()\nlet t = { 1 }\n"), "if needs a { } block"));
+	CHECK(HasError(cluau::Translate("while (x) (f)()\nlet t = { 1 }\n"), "while needs a { } block"));
+	CHECK(!cluau::Translate("if (a &&\n\tb) {\n}\nif (a)\n{\n}\nwhile (a) // why\n{\n}\nif (a)\n\t&& (b) {\n}\n").HasErrors());
+}
