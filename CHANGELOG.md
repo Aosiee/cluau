@@ -2,6 +2,32 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.31.0: TOML, collections, random numbers and logging
+
+Four new standard modules, each available in the sandbox:
+- @std/toml: `toml.decode` reads all of TOML 1.0.0 (every key, string,
+  number and date form, inline tables, arrays of tables, and every rule
+  against defining something twice, with the line and column of what is
+  wrong); `toml.encode` writes a table back, keys sorted, floats so they
+  read back exactly. Dates and times are `DateTime` values, and an integer
+  beyond what a number holds exactly (2^53) is an error rather than a
+  rounded value. Compared with Python's tomllib on about 240,000
+  generated documents, with no disagreement.
+- @std/collections: stable sorting (`sorted`, `sortBy`, `minBy`,
+  `maxBy`), `counter` and `mostCommon`, `groupBy`, `unique`, `chunk`,
+  `zip`, `flatten`, `range`, `slice`, `map`, `filter`, `reduce`, `some`,
+  `every`, `sum`, `find`, `indexOf`, sorted `keys` and `values`, an
+  insertion-ordered `Set<T>` and a `Deque<T>`, all typed generically.
+- @std/random: reproducible random numbers from a seed (xoshiro256**),
+  the same sequence on every platform: `random`, `integer` (unbiased),
+  `uniform`, `normal`, `choice`, `shuffle`, `sample`, `weighted`, on a
+  shared generator or one of a script's own (`random.new(seed)`). Not for
+  secrets: @std/crypto's `randomBytes` is.
+- @std/log: levels, named loggers, fields bound with `with`, text or JSON
+  lines to standard error, standard output or a function, and the level
+  from `CLUAU_LOG` unless the script sets one. A log call never raises
+  because of what it is given to log.
+
 ## 0.30.0: defaults, nil operators, destructuring, switch and generators
 
 Language:
