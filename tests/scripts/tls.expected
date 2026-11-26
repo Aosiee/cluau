@@ -4,4 +4,6 @@ secure by name
 untrusted	false	true
 wrong name	false	true
 secure unverified
+mismatched key	false	true
+closed while making the handshake
 exit: 0

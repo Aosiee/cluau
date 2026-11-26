@@ -983,17 +983,29 @@ http.download("https://example.com/data.zip", "data.zip")
 
 The options: `headers` (`{ [name] = value }`), `body` (text), `json` (a
 value sent as JSON, with `Content-Type: application/json`), `timeout`
-(seconds for the whole request), `followRedirects` (true by default, up to
-10), `caFile` (a certificate bundle to trust instead of the system's). A
-body goes with its own `Content-Type` header; without one, none is sent.
+(seconds for the whole request, its redirects included), `followRedirects`
+(true by default, up to 10), `caFile` (a certificate bundle to trust
+instead of the system's). A body goes with its own `Content-Type` header;
+without one, none is sent. A header name or a method that is not an HTTP
+token, a header value with a line break or a NUL, and an address with a NUL
+are errors (they could add headers to the request); a header with an empty
+value is sent empty.
+
+A redirect is followed as RFC 9110 has it: a 303 with `GET` (a `HEAD`
+stays one), a 301 or 302 after a `POST` with `GET` too, each without the
+body; a 307 or 308 keeps the method and the body. A redirect to another
+host (or scheme, or port) takes none of the request's own headers but
+`Accept`, `Accept-Language`, `Content-Type` and `User-Agent`, and no user
+name or password: the others may be credentials meant for the first host.
 
 A `Response` is `{ status, ok, headers, body, url }`: `ok` is a 2xx status,
 `headers` has lower-case names (one value per name, repeated ones joined
 with `, `), and `url` is the address the answer came from after
 redirects. A 4xx or 5xx status is a response, not an error; a request that
 gets no answer (an unknown host, a refused connection, a timeout, a
-certificate that is not trusted) is an error naming the request and why.
-Ctrl-C stops a request in progress.
+certificate that is not trusted) is an error naming the request (its
+address without a password) and why. `download` onto a directory is an
+error. Ctrl-C stops a request in progress.
 
 HTTPS certificates are checked against the system's trusted ones: the
 Windows certificate store, macOS's `/etc/ssl/cert.pem`, and on Linux the
@@ -1144,12 +1156,13 @@ and:
 | method | is |
 |---|---|
 | `read(count?): string?` | what has arrived, up to `count` bytes (64 KiB by default), waiting for at least one; `nil` at the end of the stream |
-| `readLine(limit?): string?` | the next line, without its line break (`\r\n` or `\n`); the last line may have none; `nil` at the end. With `limit`, a line longer than that many bytes is an error (and stays unread): a server's guard against a client that never ends its line |
+| `readLine(limit?): string?` | the next line, without its line break (`\r\n` or `\n`); the last line may have none; `nil` at the end. With `limit`, a line longer than that many bytes (its line break aside) is an error (and stays unread): a server's guard against a client that never ends its line |
 | `lines()` | an iterator over the lines: `for (line in socket:lines()) { }` |
 | `readAll(): string` | the rest of the stream, until the other side closes it |
 | `write(...)` | sends the strings, in order |
-| `setTimeout(seconds?)` | how long a read or write may wait (none, or 0: no limit) |
-| `close()` | ends the connection (a wait on it in another task ends with an error) |
+| `setTimeout(seconds?)` | how long each wait of a read or write may take (none, or 0: no limit); a peer that sends a byte now and then never trips it |
+| `setDeadline(seconds?)` | the time from now within which every read and write, those under way too, must end, however the data comes (an error then: `the time setDeadline gave has passed`); none: no deadline |
+| `close()` | ends the connection (a wait on it in another task ends with an error); what was read before is still given out, then reads are errors |
 
 `tls` (on a socket and a server) says whether it is encrypted.
 
@@ -1159,11 +1172,12 @@ the server's certificate against the system's trusted certificates (or
 `options.serverName`); `options.verify = false` skips both, for a server
 of one's own with a certificate nothing trusts. `listen`'s
 `options.tls = { certFile, keyFile }` (PEM files: the certificate chain and
-its key) serves TLS. `accept` returns a connection as soon as it arrives,
-and its handshake is made by the connection's first read or write, so a
-client that is slow to begin holds up only its own task; a connection
-whose handshake fails reads as one that ended (`nil`), and a write to it
-is an error.
+its key, which must be the certificate's) serves TLS. `accept` returns a
+connection as soon as it arrives, and its handshake is made by the
+connection's first read or write, so a client that is slow to begin holds
+up only its own task; a handshake has the socket's timeout (30 seconds
+without one) in all; a connection whose handshake fails reads as one that
+ended (`nil`), and a write to it is an error.
 
 ```
 const net = require("@std/net")
@@ -1180,9 +1194,13 @@ const server = net.listen("127.0.0.1", 8080)
 while (true) {
 	const client = server:accept()
 	task.spawn(function() {
-		for (line in client:lines()) {
-			client:write(string.upper(line), "\n")
-		}
+		// A client that leaves early makes a write fail: an error in a task
+		// would end the whole script, so the connection's work is in pcall.
+		pcall(function() {
+			for (line in client:lines()) {
+				client:write(string.upper(line), "\n")
+			}
+		})
 		client:close()
 	})
 }
@@ -1196,18 +1214,28 @@ answers each request.
 
 | function | is |
 |---|---|
-| `serve(options, handler): Server` | serves `handler` and returns at once; `options.host` (`"127.0.0.1"` by default: this machine only), `options.port` (8080; 0 for any free one), `options.tls` (`{ certFile, keyFile }`), `options.maxBody` (16 MiB), `options.idle` (seconds a connection may wait between requests, 60). The `Server` has `host`, `port` and `close()` (which stops taking connections and closes those waiting for a request; a request under way is finished) |
+| `serve(options, handler): Server` | serves `handler` and returns at once; `options.host` (`"127.0.0.1"` by default: this machine only), `options.port` (8080; 0 for any free one), `options.tls` (`{ certFile, keyFile }`), `options.maxBody` (16 MiB), `options.idle` (seconds a connection may wait for its next request, and each wait while reading or writing one, 60), `options.headTimeout` (seconds a request's head, its request line and headers, may take in all from its first byte, 30; 0: no limit; a client that sends a byte now and then is answered 408). The `Server` has `host`, `port` and `close()` (which stops taking connections and closes those waiting for a request; a request under way is finished) |
 | `router(): Router` | routes by method and path: `get`, `post`, `put`, `delete` and `route(method, pattern, handler)` (each returns the router, to chain), and `handler()` for `serve`. A pattern's parts are literal, `:name` (in `request.params.name`) or `*` (the rest, in `request.params["*"]`). The path is split at its `/`s before it is decoded, so `/users/a%2Fb` has the one part `a/b` |
-| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension); a path that would leave the directory, or holds a NUL, is refused, and hidden files (a part starting with `.`: `.git`, `.env`) are not found. A symbolic link inside `directory` is followed only to a file that is itself inside `directory` |
-| `upgrade(request, fn): Answer` | answers a WebSocket request: `fn` gets the connection (a `@std/websocket` `WebSocket`), and the connection ends when `fn` returns |
+| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension), each sent as it is read; a path that would leave the directory, or holds a NUL, is refused, and hidden files (a part starting with `.`: `.git`, `.env`) are not found. A symbolic link inside `directory` is followed only to a file that is itself inside `directory` |
+| `upgrade(request, fn): Answer` | answers a WebSocket request: `fn` gets the connection (a `@std/websocket` `WebSocket`), and the connection ends when `fn` returns. A request that is not a WebSocket one as RFC 6455 has it (a `GET` of HTTP/1.1 with `Upgrade: websocket`, `Connection: Upgrade` and a `Sec-WebSocket-Key` of 16 bytes in base64) is answered 400, and one of a version other than 13 426; in a build without `@std/crypto`, `upgrade` is an error (so a 500) |
 
 A `Request` has `method`, `path` (decoded, without the query), `query`
 (its names and values, decoded), `headers` (names in lowercase), `body`,
-`params`, `remoteHost`, `remotePort` and `target` (as the request line gave
-it). A handler answers with a table (`status`, 200 by default; `headers`;
-`body`, a string or a buffer), a string (200, as text), or `nil` (404). An
-error in a handler is a 500, with the error on stderr; so is a response
-header whose name is not a header name or whose value has a line break.
+`params`, `remoteHost`, `remotePort`, `version` (`"1.1"` or `"1.0"`) and
+`target` (as the request line gave it; an absolute one, `http://host/path`,
+is routed by its path). A handler answers with a table (`status`, a whole
+number from 200 to 999, 200 by default; `headers`, whose values are strings
+or numbers; `body`, a string or a buffer), a string (200, as text), or `nil`
+(404). An error in a handler is a 500, with the error on stderr; so is any
+other answer, and a response header whose name is not a header name or
+whose value has a line break. The server frames the answer itself: a
+handler's `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`,
+`TE`, `Trailer` and `Upgrade` are left out (so an answer relayed from
+`@std/http` keeps its framing right), and a 204 or 304 is sent without a
+body or a `Content-Length`. A large body is written a piece (256 KiB) at a
+time, each within `options.idle`, so a client that reads slowly holds little
+of the server's memory, and not for long. Nothing a client does ends the
+server: an error on a connection ends that connection only.
 
 Requests are read strictly, so that the server and anything in front of it
 read the same request: a body is framed by `Content-Length` (digits only,
@@ -1215,9 +1243,17 @@ the same if repeated) or by `Transfer-Encoding: chunked`, not both and no
 other coding (400; 501 for a coding before `chunked`), and a body that ends
 early never reaches the handler (400, and the connection closes). A line of
 the head may have 64 KiB, and the head 256 KiB (431; 414 for the request
-line). `Expect: 100-continue` is answered with `100 Continue` before the
-body is read. A failed `accept` (out of file descriptors, say) is reported
-on stderr and tried again after a pause.
+line). A header's name is a token, white space around its value is spaces
+and tabs only, and a value with a control character (a CR, a NUL) is
+refused (400); so is an HTTP/1.1 request without exactly one `Host`, and a
+version other than 1.1 and 1.0 is a 505. `Connection` is read as a list
+(`close, TE` closes); an HTTP/1.0 request with `Transfer-Encoding` is read
+and the connection closed after it. `Expect: 100-continue` is answered with
+`100 Continue` before the body is read. After an answer to a request that
+was not read to its end, what the client still sends is read and dropped
+for half a second at most before the connection closes. A failed `accept`
+(out of file descriptors, say) is reported on stderr and tried again after
+a pause.
 
 ```
 const server = require("@std/server")
@@ -1245,23 +1281,31 @@ handshake.
 
 | function | is |
 |---|---|
-| `connect(url, options?): WebSocket` | a connection to a `ws://` or `wss://` address; `options.headers`, `options.protocols` (the subprotocols offered), `options.timeout`, and for `wss`, `options.caFile` and `options.verify` as `@std/net` has them |
+| `connect(url, options?): WebSocket` | a connection to a `ws://` or `wss://` address (its `#fragment` is not sent); `options.headers`, `options.protocols` (the subprotocols offered), `options.timeout` (seconds for connecting and the handshake; the connection's waits after it have no limit), and for `wss`, `options.caFile` and `options.verify` as `@std/net` has them |
 
 A `WebSocket` has `send(text)`, `sendBinary(data)`, `ping(data?)`,
 `receive()` (the next message, `{ kind, data }` with `kind` `"text"` or
 `"binary"`, or `nil` once the connection has closed), `messages()` (an
 iterator: `for (message in ws:messages()) { }`), `close(code?, reason?)`,
-and `protocol`, `closeCode` and `closeReason`. A ping's data and a close's
-payload are at most 125 bytes.
+and `protocol`, `closeCode` and `closeReason` (the other side's, whichever
+side closed first). A ping's data and a close's payload are at most 125
+bytes; a close's code is one an endpoint may send (1000 to 1003, 1007 to
+1014, 3000 to 4999) and its reason UTF-8.
 
 A frame that breaks RFC 6455 closes the connection with the code it gives
 (and `receive` returns `nil`, with that code in `closeCode`): an unmasked
 frame to a server or a masked one to a client, reserved bits or opcodes, a
 continuation with no message, a control frame over 125 bytes or
-fragmented (1002), a text message that is not UTF-8 (1007), a message of
-more than 64 MiB, its fragments together (1009). A connection that ends in
-the middle of a frame ends without a message. `connect` refuses a server
-that chooses a `Sec-WebSocket-Protocol` it was not offered.
+fragmented, a close code no endpoint sends (1002), a text message or a
+close reason that is not UTF-8 (1007), a message of more than 64 MiB, its
+fragments together, or in more than 65536 fragments (1009). A connection
+that ends in the middle of a frame ends without a message. `connect`
+refuses a header name or protocol that is not a token, a header value with
+a line break, and an address with white space or a control character in
+it (any of them could add to the request); and a server that answers
+without `Upgrade: websocket` and `Connection: Upgrade`, with a head of more
+than 256 KiB or 100 headers, or with a `Sec-WebSocket-Protocol` it was not
+offered. In a build without `@std/crypto`, `connect` is an error.
 
 ```
 const websocket = require("@std/websocket")

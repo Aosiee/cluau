@@ -15,9 +15,14 @@ const net = require("@std/net")
 const encoding = require("@std/encoding")
 
 // @std/crypto, loaded by the first connection: a build without it still
-// loads this module (and @std/server, which serves plain HTTP without it).
+// loads this module (and @std/server, which serves plain HTTP without it),
+// and a connection is an error saying why.
 const Crypto = function() {
-	return require("@std/crypto")
+	const found, crypto = pcall(require, "@std/crypto")
+	if (!found) {
+		error("websocket: this cluau is built without @std/crypto, which WebSockets need", 0)
+	}
+	return crypto
 }
 
 export type Kind = "text" | "binary"
@@ -36,8 +41,24 @@ const kBinary = 2
 const kClose = 8
 const kPing = 9
 const kPong = 10
-// The most a message may have, its fragments together.
+// The most a message may have, its fragments together, and the most
+// fragments it may come in.
 const kMaxMessage = 64 * 1024 * 1024
+const kMaxFragments = 65536
+// The most the handshake's answer may have: a line, and the whole head.
+const kLineLimit = 64 * 1024
+const kHeadLimit = 256 * 1024
+
+// The close codes an endpoint may send (RFC 6455 7.4): 1004 is reserved,
+// and 1005, 1006 and 1015 stand for a close without a code.
+const SendableCode = function(code: number): boolean {
+	return (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999)
+}
+
+// An HTTP token (a header's name, a subprotocol's).
+const IsToken = function(text: string): boolean {
+	return string.find(text, "^[%w!#$%%&'*+%-.^_`|~]+$") != nil
+}
 
 // Whether text is UTF-8 (as a text message must be): no bad sequences, and
 // no UTF-16 surrogates (U+D800 to U+DFFF).
@@ -50,20 +71,6 @@ const Accept = function(key: string): string {
 	return encoding.toBase64(Crypto().hash("sha1", key .. kGuid, { raw = true }))
 }
 
-// Exactly `count` bytes from the socket (nil when it ends first).
-const ReadExact = function(socket: net.Socket, count: number): string? {
-	const parts: { string } = {}
-	let have = 0
-	while (have < count) {
-		const chunk = socket:read(count - have)
-		if (chunk == nil) {
-			return nil
-		}
-		table.insert(parts, chunk)
-		have += #chunk
-	}
-	return table.concat(parts)
-}
 
 // The payload XORed with the 4-byte key (masking and unmasking alike), four
 // bytes at a time.
@@ -110,10 +117,44 @@ class Connection {
 	protocol: string = ""
 	closeCode: number = 0
 	closeReason: string = ""
+	// Read from the socket and not yet taken (from At on): the socket is
+	// read a chunk at a time, not once for each part of each frame.
+	Pending: string = ""
+	At: number = 1
 
 	function Init(socket: net.Socket, client: boolean) {
 		self.Socket = socket
 		self.Client = client
+	}
+
+	// Exactly `count` bytes (nil when the connection ends first).
+	function ReadExact(count: number): string? {
+		const have = #self.Pending - self.At + 1
+		if (have >= count) {
+			const taken = string.sub(self.Pending, self.At, self.At + count - 1)
+			self.At += count
+			return taken
+		}
+		const parts: { string } = { string.sub(self.Pending, self.At) }
+		let need = count - have
+		self.Pending = ""
+		self.At = 1
+		while (need > 0) {
+			const chunk = self.Socket:read(math.max(need, 65536))
+			if (chunk == nil) {
+				return nil
+			}
+			if (#chunk > need) {
+				table.insert(parts, string.sub(chunk, 1, need))
+				self.Pending = chunk
+				self.At = need + 1
+				need = 0
+			} else {
+				table.insert(parts, chunk)
+				need -= #chunk
+			}
+		}
+		return table.concat(parts)
 	}
 
 	function Send(opcode: number, payload: string) {
@@ -163,7 +204,7 @@ class Connection {
 	// when the connection ended, cut short or broken). A data frame may have
 	// at most `room` bytes.
 	function ReadFrame(room: number): (number?, boolean, string) {
-		const head = ReadExact(self.Socket, 2)
+		const head = self:ReadExact(2)
 		if (head == nil) {
 			return nil, true, ""
 		}
@@ -190,13 +231,13 @@ class Connection {
 			return nil, true, ""
 		}
 		if (length == 126) {
-			const extended = ReadExact(self.Socket, 2)
+			const extended = self:ReadExact(2)
 			if (extended == nil) {
 				return nil, true, ""
 			}
 			length = string.unpack(">I2", extended)
 		} else if (length == 127) {
-			const extended = ReadExact(self.Socket, 8)
+			const extended = self:ReadExact(8)
 			if (extended == nil) {
 				return nil, true, ""
 			}
@@ -211,8 +252,8 @@ class Connection {
 			self:Fault(1009, `a message of more than {kMaxMessage} bytes`)
 			return nil, true, ""
 		}
-		const key = if (masked) ReadExact(self.Socket, 4) else ""
-		const payload = ReadExact(self.Socket, length)
+		const key = if (masked) self:ReadExact(4) else ""
+		const payload = self:ReadExact(length)
 		if (key == nil || payload == nil) {
 			return nil, true, ""
 		}
@@ -228,6 +269,7 @@ class Connection {
 		let kind: Kind? = nil // the message under way, once its first frame came
 		const parts: { string } = {}
 		let size = 0
+		let fragments = 0
 		while (true) {
 			const opcode, fin, payload = self:ReadFrame(kMaxMessage - size)
 			if (opcode == nil) {
@@ -247,7 +289,16 @@ class Connection {
 					return nil
 				}
 				if (#payload >= 2) {
-					self.closeCode = string.unpack(">I2", payload)
+					const code = string.unpack(">I2", payload)
+					if (!SendableCode(code)) {
+						self:Fault(1002, `a close with the code {code}`)
+						return nil
+					}
+					if (!IsUtf8(string.sub(payload, 3))) {
+						self:Fault(1007, "a close reason that is not UTF-8")
+						return nil
+					}
+					self.closeCode = code
 					self.closeReason = string.sub(payload, 3)
 				}
 				if (!self.Closed) {
@@ -267,7 +318,15 @@ class Connection {
 				if (kind == nil) {
 					kind = if (opcode == kBinary) "binary" else "text"
 				}
-				table.insert(parts, payload)
+				// Empty fragments add nothing, but are counted.
+				fragments += 1
+				if (fragments > kMaxFragments) {
+					self:Fault(1009, `a message in more than {kMaxFragments} fragments`)
+					return nil
+				}
+				if (payload != "") {
+					table.insert(parts, payload)
+				}
 				size += #payload
 				if (fin) {
 					const data = table.concat(parts)
@@ -290,10 +349,17 @@ class Connection {
 	}
 
 	// Closes the connection: the close frame (with `code`, 1000 by default,
-	// and `reason`), then the other side's, then the socket.
+	// and `reason`), then the other side's (its code and reason in closeCode
+	// and closeReason), then the socket.
 	function close(code: number?, reason: string?) {
 		if (self.Closed) {
 			return
+		}
+		if (code != nil && (code != math.floor(code) || !SendableCode(code))) {
+			error(`websocket: {code} is not a close code to send (1000 to 1003, 1007 to 1014, 3000 to 4999)`, 2)
+		}
+		if (!IsUtf8(reason or "")) {
+			error("websocket: a close's reason is UTF-8", 2)
 		}
 		const payload = string.pack(">I2", code or 1000) .. (reason or "")
 		if (#payload > 125) {
@@ -303,12 +369,19 @@ class Connection {
 			self.Socket:write(Frame(kClose, payload, self.Client))
 		})
 		self.Closed = true
-		// The other side's close, briefly waited for.
-		self.Socket:setTimeout(2)
+		// The other side's close, briefly waited for (two seconds in all).
+		self.Socket:setDeadline(2)
 		pcall(function() {
 			while (true) {
-				const opcode = self:ReadFrame(kMaxMessage)
-				if (opcode == nil || opcode == kClose) {
+				const opcode, _, payload = self:ReadFrame(kMaxMessage)
+				if (opcode == nil) {
+					break
+				}
+				if (opcode == kClose) {
+					if (#payload >= 2) {
+						self.closeCode = string.unpack(">I2", payload)
+						self.closeReason = string.sub(payload, 3)
+					}
 					break
 				}
 			}
@@ -321,15 +394,23 @@ class Connection {
 // and close).
 export type WebSocket = Connection
 
-// ws://host[:port]/path?query or wss://...: host, port, the path, TLS.
+// ws://host[:port]/path?query or wss://...: host, port, the target (the
+// path and query, without a #fragment, which is not sent), TLS.
 const ParseUrl = function(url: string): (string, number, string, boolean) {
 	const scheme, rest = string.match(url, "^(wss?)://(.+)$")
 	if (scheme == nil || rest == nil) {
 		error(`websocket.connect: '{url}' is not a ws:// or wss:// address`, 3)
 	}
+	// Nothing in it may end the request line or a header early.
+	if (string.find(url, "[%s%c]") != nil) {
+		error(`websocket.connect: '{url}' has white space or a control character in it`, 3)
+	}
 	const tls = scheme == "wss"
 	const authority = string.match(rest, "^[^/?#]+") or rest
-	const target = string.sub(rest, #authority + 1)
+	let target = string.match(string.sub(rest, #authority + 1), "^[^#]*") or ""
+	if (target == "" || string.sub(target, 1, 1) == "?") {
+		target = "/" .. target
+	}
 	let host = authority
 	let port = if (tls) 443 else 80
 	const bracketed, bracketPort = string.match(authority, "^%[(.+)%]:?(%d*)$")
@@ -345,15 +426,86 @@ const ParseUrl = function(url: string): (string, number, string, boolean) {
 			port = tonumber(number) or port
 		}
 	}
-	return host, port, if (target == "") "/" else target, tls
+	return host, port, target, tls
+}
+
+// The handshake's answer: its status line and headers (names in lowercase,
+// repeated ones joined), within the limits of a head.
+const ReadAnswer = function(socket: net.Socket, url: string): (string, { [string]: string }) {
+	const read, status, headers = pcall(function(): (string, { [string]: string }) {
+		const first = socket:readLine(kLineLimit) or ""
+		const found: { [string]: string } = {}
+		let size = #first
+		let count = 0
+		while (true) {
+			const line = socket:readLine(kLineLimit)
+			if (line == nil || line == "") {
+				break
+			}
+			size += #line + 2
+			count += 1
+			if (size > kHeadLimit || count > 100) {
+				error("too long", 0)
+			}
+			const name, value = string.match(line, "^([^:]+):[ \t]*(.-)[ \t]*$")
+			if (name != nil && value != nil) {
+				const key = string.lower(name)
+				found[key] = if (found[key] != nil) found[key] .. ", " .. value else value
+			}
+		}
+		return first, found
+	})
+	if (!read) {
+		socket:close()
+		// The socket's own error, without where in this module it was raised.
+		const why = string.gsub(tostring(status), "^@std/websocket:%d+: ", "")
+		if (string.find(why, "longer than", 1, true) != nil || why == "too long") {
+			error(`websocket.connect: {url} answered the handshake with a head of more than {kHeadLimit} bytes or 100 headers`, 3)
+		}
+		error(`websocket.connect: {url}: {why}`, 3)
+	}
+	return status :: string, headers :: { [string]: string }
+}
+
+// Whether a comma-separated header value has `token` (case aside).
+const HasToken = function(value: string?, token: string): boolean {
+	for (part in string.gmatch(string.lower(value or ""), "[^,]+")) {
+		if (string.match(part, "^[ \t]*(.-)[ \t]*$") == token) {
+			return true
+		}
+	}
+	return false
 }
 
 // A connection to `url`: the handshake made and its answer checked.
+// options.timeout limits the connecting and the handshake (not later waits).
 const connect = function(url: string, options: ConnectOptions?): Connection {
 	const given = options or {}
 	const host, port, target, tls = ParseUrl(url)
-	const socket = net.connect(host, port, { timeout = given.timeout, tls = tls, caFile = given.caFile, verify = given.verify })
+	// What goes in the request is checked first: nothing may end a header.
+	const extra: { string } = {}
+	if (given.protocols != nil && #given.protocols > 0) {
+		for (_, protocol in given.protocols) {
+			if (type(protocol) != "string" || !IsToken(protocol)) {
+				error(`websocket.connect: '{tostring(protocol)}' is not a protocol name`, 2)
+			}
+		}
+		table.insert(extra, `Sec-WebSocket-Protocol: {table.concat(given.protocols, ", ")}`)
+	}
+	for (name, value in given.headers or {}) {
+		if (type(name) != "string" || !IsToken(name)) {
+			error(`websocket.connect: options.headers: '{tostring(name)}' is not a header name`, 2)
+		}
+		if ((type(value) != "string" && type(value) != "number") || string.find(tostring(value), "[\r\n%z]") != nil) {
+			error(`websocket.connect: options.headers: the {name} header's value is text with no line break`, 2)
+		}
+		table.insert(extra, `{name}: {value}`)
+	}
 	const key = encoding.toBase64(Crypto().randomBytes(16))
+	const socket = net.connect(host, port, { timeout = given.timeout, tls = tls, caFile = given.caFile, verify = given.verify })
+	if (given.timeout != nil) {
+		socket:setDeadline(given.timeout)
+	}
 	const lines: { string } = {
 		`GET {target} HTTP/1.1`,
 		`Host: {if (string.find(host, ":", 1, true) != nil) `[{host}]` else host}{if ((tls && port == 443) || (!tls && port == 80)) "" else ":" .. tostring(port)}`,
@@ -362,28 +514,18 @@ const connect = function(url: string, options: ConnectOptions?): Connection {
 		`Sec-WebSocket-Key: {key}`,
 		"Sec-WebSocket-Version: 13",
 	}
-	if (given.protocols != nil && #given.protocols > 0) {
-		table.insert(lines, `Sec-WebSocket-Protocol: {table.concat(given.protocols, ", ")}`)
-	}
-	for (name, value in given.headers or {}) {
-		table.insert(lines, `{name}: {value}`)
+	for (_, line in extra) {
+		table.insert(lines, line)
 	}
 	socket:write(table.concat(lines, "\r\n"), "\r\n\r\n")
-	const status = socket:readLine() or ""
-	const headers: { [string]: string } = {}
-	while (true) {
-		const line = socket:readLine()
-		if (line == nil || line == "") {
-			break
-		}
-		const name, value = string.match(line, "^([^:]+):%s*(.-)%s*$")
-		if (name != nil && value != nil) {
-			headers[string.lower(name)] = value
-		}
-	}
+	const status, headers = ReadAnswer(socket, url)
 	if (string.match(status, "^HTTP/1%.%d 101") == nil) {
 		socket:close()
 		error(`websocket.connect: {url} did not accept the connection ({status})`, 2)
+	}
+	if (!HasToken(headers["upgrade"], "websocket") || !HasToken(headers["connection"], "upgrade")) {
+		socket:close()
+		error(`websocket.connect: {url} answered 101 without Upgrade: websocket and Connection: Upgrade`, 2)
 	}
 	if (headers["sec-websocket-accept"] != Accept(key)) {
 		socket:close()
@@ -401,6 +543,10 @@ const connect = function(url: string, options: ConnectOptions?): Connection {
 			error(`websocket.connect: {url} chose the protocol '{chosen}', which was not offered`, 2)
 		}
 	}
+	// The connection's waits have no limit from here: a quiet connection is
+	// not a broken one.
+	socket:setDeadline(nil)
+	socket:setTimeout(0)
 	const ws = Connection(socket, true)
 	ws.protocol = chosen or ""
 	return ws

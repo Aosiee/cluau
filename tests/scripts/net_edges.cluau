@@ -1,0 +1,170 @@
+// @std/net at its edges: line limits that meet a CRLF, limits and times
+// that are not numbers of anything, reads after a close with part of a line
+// read, a deadline for a peer that sends a byte now and then, a long line,
+// and a server whose clients leave early.
+const net = require("@std/net")
+const task = require("@std/task")
+const time = require("@std/time")
+
+// A server that sends `data` (in `pieces` of a byte each `pause` seconds
+// when `pause` is given) to each client, then closes.
+const Sending = function(data: string, pause: number?): net.Server {
+	const listening = net.listen("127.0.0.1", 0)
+	task.spawn(function() {
+		while (true) {
+			const ok, client = pcall(function(): net.Socket {
+				return listening:accept()
+			})
+			if (!ok) {
+				break
+			}
+			task.spawn(function() {
+				pcall(function() {
+					if (pause == nil) {
+						client:write(data)
+					} else {
+						for (i = 1, #data) {
+							client:write(string.sub(data, i, i))
+							task.wait(pause)
+						}
+					}
+				})
+				pcall(function() {
+					client:close()
+				})
+			})
+		}
+	})
+	return listening
+}
+
+const Try = function(name: string, f: () -> unknown) {
+	const ok, result = pcall(f)
+	const shown = string.gsub(tostring(result), "^[^:]*:%d+: ", "")
+	print(name, ok, shown)
+}
+
+// A line of exactly the limit, with \r\n after it, is taken; one byte more
+// is not.
+const lines = Sending("abc\r\nabcd\r\nabc\n")
+{
+	const socket = net.connect("127.0.0.1", lines.port)
+	Try("readLine(3) of abc\\r\\n", function(): unknown {
+		return socket:readLine(3)
+	})
+	Try("readLine(3) of abcd\\r\\n", function(): unknown {
+		return socket:readLine(3)
+	})
+	Try("readLine(4) of abcd\\r\\n", function(): unknown {
+		return socket:readLine(4)
+	})
+	Try("readLine(math.huge)", function(): unknown {
+		return socket:readLine(math.huge)
+	})
+	socket:close()
+}
+
+// Limits and times that are not numbers of anything.
+{
+	const socket = net.connect("127.0.0.1", lines.port)
+	Try("readLine(0/0)", function(): unknown {
+		return socket:readLine(0 / 0)
+	})
+	Try("read(1.5)", function(): unknown {
+		return socket:read(1.5)
+	})
+	Try("setTimeout(0/0)", function(): unknown {
+		socket:setTimeout(0 / 0)
+		return nil
+	})
+	Try("setDeadline(-1)", function(): unknown {
+		socket:setDeadline(-1)
+		return nil
+	})
+	Try("connect timeout 0/0", function(): unknown {
+		return net.connect("127.0.0.1", lines.port, { timeout = 0 / 0 })
+	})
+	socket:close()
+}
+
+// After close(), what was read before is still given out, then nothing.
+{
+	const partial = Sending("first line\nsecond, without a line break")
+	const socket = net.connect("127.0.0.1", partial.port)
+	print("before close", socket:read(5))
+	task.wait(0.2)
+	socket:close()
+	for (_, name in { "readLine", "readLine", "read" }) {
+		Try(`{name} after close`, function(): unknown {
+			return if (name == "read") socket:read() else socket:readLine()
+		})
+	}
+	partial:close()
+}
+
+// A peer that sends a byte every 50 ms never trips a timeout of 0.3 s a
+// wait, but it does a deadline, which holds for the whole call.
+const dripping = Sending("0123456789abcdefghijklmnopqrstuvwxyz\n", 0.05)
+{
+	const socket = net.connect("127.0.0.1", dripping.port)
+	socket:setTimeout(0.3)
+	socket:setDeadline(0.5)
+	const started = time.monotonic()
+	Try("deadline", function(): unknown {
+		return socket:readLine()
+	})
+	const took = time.monotonic() - started
+	print("deadline took about half a second", took > 0.4 && took < 1.5)
+	socket:setDeadline(nil)
+	Try("no deadline", function(): unknown {
+		return socket:readLine()
+	})
+	socket:close()
+}
+dripping:close()
+
+// A long line arrives whole (read as it comes, not searched again from its
+// start each time).
+const long = Sending(string.rep("x", 4 * 1024 * 1024) .. "\nafter\n")
+{
+	const socket = net.connect("127.0.0.1", long.port)
+	print("long line", #(socket:readLine() or ""), socket:readLine())
+	socket:close()
+}
+long:close()
+lines:close()
+
+// The echo server of the docs: a client that sends and leaves without
+// reading ends its connection, not the server.
+{
+	const listening = net.listen("127.0.0.1", 0)
+	task.spawn(function() {
+		while (true) {
+			const accepted, client = pcall(function(): net.Socket {
+				return listening:accept()
+			})
+			if (!accepted) {
+				break
+			}
+			task.spawn(function() {
+				pcall(function() {
+					for (line in client:lines()) {
+						client:write(string.upper(line), "\n")
+					}
+				})
+				client:close()
+			})
+		}
+	})
+	for (i = 1, 3) {
+		const leaving = net.connect("127.0.0.1", listening.port)
+		leaving:write(string.rep("abc\n", 2000))
+		leaving:close()
+	}
+	task.wait(0.2)
+	const staying = net.connect("127.0.0.1", listening.port)
+	staying:write("still here\n")
+	print("echo", staying:readLine())
+	staying:close()
+	listening:close()
+}

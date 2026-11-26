@@ -24,6 +24,7 @@
 #include <cmath>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -163,6 +164,9 @@ namespace cluau::runtime::detail {
 			mbedtls_entropy_context Entropy;
 			mbedtls_ctr_drbg_context Random;
 			std::mutex Lock;
+			// Why the socket's last send or receive failed (the system's
+			// words), set under Lock.
+			std::string IoError;
 
 			TlsState()
 			{
@@ -198,6 +202,9 @@ namespace cluau::runtime::detail {
 		};
 #endif
 
+		// Seconds on the steady clock (a deadline's unit).
+		double Now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
 		// A socket shared by the script's handle and the jobs using it: it is
 		// closed when the last of them lets go; Close ends the waits on it.
 		struct Socket
@@ -208,7 +215,8 @@ namespace cluau::runtime::detail {
 			std::mutex Writing;
 			std::string Buffer; // read, not yet given out
 			bool Ended = false;
-			double Timeout = 0; // seconds a wait may take (0: no limit)
+			std::atomic<double> Timeout{ 0 };  // seconds a wait may take (0: no limit)
+			std::atomic<double> Deadline{ 0 }; // when every wait ends (Now(); 0: none)
 			std::string LocalHost, RemoteHost;
 			int LocalPort = 0, RemotePort = 0;
 			std::unique_ptr<TlsState> Tls; // a TLS connection's
@@ -240,8 +248,9 @@ namespace cluau::runtime::detail {
 				if (Closed.load())
 					return;
 #ifdef CLUAU_HAS_MBEDTLS
-				// The peer is told (when no wait is using the connection).
-				if (Tls && Users == 0)
+				// The peer is told (when no wait is using the connection: one
+				// that is may be making the handshake, which sets Tls).
+				if (Users == 0 && Tls)
 				{
 					std::lock_guard<std::mutex> tls(Tls->Lock);
 					mbedtls_ssl_close_notify(&Tls->Ssl);
@@ -292,7 +301,14 @@ namespace cluau::runtime::detail {
 			}
 		};
 
-		enum class Ready { Yes, TimedOut, Closed, Failed };
+		// Late: the socket's deadline passed.
+		enum class Ready { Yes, TimedOut, Late, Closed, Failed };
+
+		bool PastDeadline(const Socket& socket)
+		{
+			const double deadline = socket.Deadline;
+			return deadline > 0 && Now() >= deadline;
+		}
 
 		// A job's hold on a socket while it waits on it.
 		struct Use
@@ -311,14 +327,23 @@ namespace cluau::runtime::detail {
 			}
 		};
 
-		// Until the socket can be read (or written), in steps of 100 ms.
-		Ready WaitFor(const Socket& socket, bool write, double timeout)
+		// Until the socket can be read (or written), in steps of 100 ms: for
+		// at most `timeout` seconds (0: no limit), and no later than `limit`
+		// (a time from Now(), 0: none; also TimedOut) or the socket's deadline.
+		Ready WaitFor(const Socket& socket, bool write, double timeout, double limit = 0)
 		{
-			const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout);
+			const double started = Now();
+			double until = timeout > 0 ? started + timeout : 0;
+			if (limit > 0 && (until == 0 || limit < until))
+				until = limit;
 			for (;;)
 			{
 				if (socket.Closed)
 					return Ready::Closed;
+				// Before the poll too: data that keeps coming does not put
+				// the deadline off.
+				if (PastDeadline(socket))
+					return Ready::Late;
 				pollfd entry{};
 				entry.fd = socket.Handle;
 				entry.events = write ? POLLOUT : POLLIN;
@@ -333,7 +358,7 @@ namespace cluau::runtime::detail {
 #endif
 					return Ready::Failed;
 				}
-				if (timeout > 0 && std::chrono::steady_clock::now() >= until)
+				if (until > 0 && Now() >= until)
 					return Ready::TimedOut;
 				if (InterruptPending())
 					return Ready::Closed;
@@ -345,6 +370,7 @@ namespace cluau::runtime::detail {
 			switch (ready)
 			{
 			case Ready::TimedOut: return "no answer within " + std::to_string(timeout).substr(0, 6) + " seconds";
+			case Ready::Late: return "the time setDeadline gave has passed";
 			case Ready::Closed: return "the socket is closed";
 			default: return LastError();
 			}
@@ -396,7 +422,7 @@ namespace cluau::runtime::detail {
 			double timeout = 0;
 			if (!lua_isnil(L, -1))
 			{
-				if (!lua_isnumber(L, -1) || lua_tonumber(L, -1) <= 0)
+				if (!lua_isnumber(L, -1) || !(lua_tonumber(L, -1) > 0))
 					luaL_error(L, "%s: options.timeout is a number of seconds", fn);
 				timeout = lua_tonumber(L, -1);
 			}
@@ -426,7 +452,8 @@ namespace cluau::runtime::detail {
 
 #ifdef CLUAU_HAS_MBEDTLS
 
-		// mbedTLS's view of the (non-blocking) socket.
+		// mbedTLS's view of the (non-blocking) socket. A failure keeps the
+		// system's reason, for the error the script sees.
 		int TlsSend(void* context, const unsigned char* data, size_t size)
 		{
 			Socket& socket = *static_cast<Socket*>(context);
@@ -436,7 +463,12 @@ namespace cluau::runtime::detail {
 			const ssize_t n = ::send(socket.Handle, data, size, kSendFlags);
 #endif
 			if (n < 0)
-				return WouldBlock() ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
+			{
+				if (WouldBlock())
+					return MBEDTLS_ERR_SSL_WANT_WRITE;
+				socket.Tls->IoError = LastError();
+				return MBEDTLS_ERR_NET_SEND_FAILED;
+			}
 			return (int)n;
 		}
 
@@ -445,24 +477,40 @@ namespace cluau::runtime::detail {
 			Socket& socket = *static_cast<Socket*>(context);
 			const auto n = ::recv(socket.Handle, reinterpret_cast<char*>(data), (int)std::min<size_t>(size, 1 << 30), 0);
 			if (n < 0)
-				return WouldBlock() ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_NET_RECV_FAILED;
+			{
+				if (WouldBlock())
+					return MBEDTLS_ERR_SSL_WANT_READ;
+				socket.Tls->IoError = LastError();
+				return MBEDTLS_ERR_NET_RECV_FAILED;
+			}
 			return (int)n;
 		}
 
 		// One TLS call, retried as the socket becomes ready: its result, or
-		// false with the reason the wait ended.
+		// false with the reason the wait ended (or the socket failed). The
+		// waits end by `limit` too (a time from Now(), 0: none).
 		template <typename Call>
-		bool TlsCall(Socket& socket, double timeout, Call call, int& rc, std::string& why)
+		bool TlsCall(Socket& socket, double timeout, Call call, int& rc, std::string& why, double limit = 0)
 		{
 			for (;;)
 			{
+				if (PastDeadline(socket))
+				{
+					why = Why(Ready::Late, timeout);
+					return false;
+				}
 				{
 					std::lock_guard<std::mutex> lock(socket.Tls->Lock);
 					rc = call(socket.Tls->Ssl);
+					if ((rc == MBEDTLS_ERR_NET_RECV_FAILED || rc == MBEDTLS_ERR_NET_SEND_FAILED) && !socket.Tls->IoError.empty())
+					{
+						why = socket.Tls->IoError;
+						return false;
+					}
 				}
 				if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE)
 					return true;
-				const Ready ready = WaitFor(socket, rc == MBEDTLS_ERR_SSL_WANT_WRITE, timeout);
+				const Ready ready = WaitFor(socket, rc == MBEDTLS_ERR_SSL_WANT_WRITE, timeout, limit);
 				if (ready != Ready::Yes)
 				{
 					why = Why(ready, timeout);
@@ -472,9 +520,11 @@ namespace cluau::runtime::detail {
 		}
 
 		// The handshake, as a client (`options`) or a server (`server`'s
-		// certificate and key): "" when it succeeded, else the reason.
+		// certificate and key): "" when it succeeded, else the reason. It has
+		// `timeout` seconds in all, however its messages arrive.
 		std::string Handshake(Socket& socket, double timeout, const TlsOptions* options, const Socket* server, const std::string& host)
 		{
+			const double limit = Now() + timeout;
 			auto tls = std::make_unique<TlsState>();
 			int rc = mbedtls_ctr_drbg_seed(&tls->Random, mbedtls_entropy_func, &tls->Entropy, nullptr, 0);
 			if (rc == 0)
@@ -518,7 +568,7 @@ namespace cluau::runtime::detail {
 			SetBlocking(socket.Handle, false);
 			socket.Tls = std::move(tls);
 			std::string why;
-			if (!TlsCall(socket, timeout, [](mbedtls_ssl_context& ssl) { return mbedtls_ssl_handshake(&ssl); }, rc, why))
+			if (!TlsCall(socket, timeout, [](mbedtls_ssl_context& ssl) { return mbedtls_ssl_handshake(&ssl); }, rc, why, limit))
 				return why;
 			if (rc != 0)
 			{
@@ -617,16 +667,31 @@ namespace cluau::runtime::detail {
 					socket->Handle = s;
 					if (pending)
 					{
-						const Ready ready = WaitFor(*socket, true, timeout);
 						int error = 0;
 						socklen_t length = sizeof(error);
+#ifdef _WIN32
+						// Before Windows 10 2004, WSAPoll does not report a
+						// connect that failed: its error is looked at each step.
+						const double until = timeout > 0 ? Now() + timeout : 0;
+						Ready ready;
+						for (;;)
+						{
+							ready = WaitFor(*socket, true, 0.1);
+							length = sizeof(error);
+							getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length);
+							if (ready != Ready::TimedOut || error != 0 || (until > 0 && Now() >= until))
+								break;
+						}
+#else
+						const Ready ready = WaitFor(*socket, true, timeout);
 						getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length);
+#endif
 						if (ready != Ready::Yes || error != 0)
 						{
 #ifdef _WIN32
-							why = ready != Ready::Yes ? Why(ready, timeout) : (WSASetLastError(error), LastError());
+							why = error != 0 ? (WSASetLastError(error), LastError()) : Why(ready, timeout);
 #else
-							why = ready != Ready::Yes ? Why(ready, timeout) : std::strerror(error);
+							why = error != 0 ? std::strerror(error) : Why(ready, timeout);
 #endif
 							CloseHandle(s);
 							socket->Handle = kNoSocket;
@@ -738,27 +803,38 @@ namespace cluau::runtime::detail {
 			if (!certFile.empty())
 			{
 				StartMbedtls();
-				// Read now, so a missing or broken file is this call's error.
+				// Read now, so a missing or broken file, or a key that is not the
+				// certificate's, is this call's error (not every handshake's).
 				mbedtls_x509_crt cert;
 				mbedtls_x509_crt_init(&cert);
-				const int rc = mbedtls_x509_crt_parse_file(&cert, certFile.c_str());
-				mbedtls_x509_crt_free(&cert);
-				if (rc < 0)
-					luaL_error(L, "net.listen: cannot read the certificate '%s': %s", certFile.c_str(), TlsError(rc).c_str());
 				mbedtls_pk_context key;
 				mbedtls_pk_init(&key);
 				mbedtls_ctr_drbg_context random;
 				mbedtls_ctr_drbg_init(&random);
 				mbedtls_entropy_context entropy;
 				mbedtls_entropy_init(&entropy);
-				int keyRc = mbedtls_ctr_drbg_seed(&random, mbedtls_entropy_func, &entropy, nullptr, 0);
-				if (keyRc == 0)
-					keyRc = mbedtls_pk_parse_keyfile(&key, keyFile.c_str(), nullptr, mbedtls_ctr_drbg_random, &random);
+				std::string failed;
+				if (const int rc = mbedtls_x509_crt_parse_file(&cert, certFile.c_str()); rc < 0)
+					failed = "cannot read the certificate '" + certFile + "': " + TlsError(rc);
+				else
+				{
+					int keyRc = mbedtls_ctr_drbg_seed(&random, mbedtls_entropy_func, &entropy, nullptr, 0);
+					if (keyRc == 0)
+						keyRc = mbedtls_pk_parse_keyfile(&key, keyFile.c_str(), nullptr, mbedtls_ctr_drbg_random, &random);
+					if (keyRc < 0)
+						failed = "cannot read the key '" + keyFile + "': " + TlsError(keyRc);
+					else if (mbedtls_pk_check_pair(&cert.pk, &key, mbedtls_ctr_drbg_random, &random) != 0)
+						failed = "the key '" + keyFile + "' is not the key of the certificate '" + certFile + "'";
+				}
+				mbedtls_x509_crt_free(&cert);
 				mbedtls_pk_free(&key);
 				mbedtls_ctr_drbg_free(&random);
 				mbedtls_entropy_free(&entropy);
-				if (keyRc < 0)
-					luaL_error(L, "net.listen: cannot read the key '%s': %s", keyFile.c_str(), TlsError(keyRc).c_str());
+				if (!failed.empty())
+				{
+					server->Close();
+					luaL_error(L, "net.listen: %s", failed.c_str());
+				}
 			}
 #endif
 			PushSocket(L, server, kServerMeta);
@@ -851,7 +927,8 @@ namespace cluau::runtime::detail {
 			if (!socket.HandshakeDone)
 			{
 				socket.HandshakeDone = true;
-				socket.HandshakeFailed = Handshake(socket, socket.Timeout > 0 ? socket.Timeout : 30, nullptr, socket.HandshakeWith.get(), {});
+				const double timeout = socket.Timeout;
+				socket.HandshakeFailed = Handshake(socket, timeout > 0 ? timeout : 30, nullptr, socket.HandshakeWith.get(), {});
 				socket.HandshakeWith.reset();
 			}
 			if (!socket.HandshakeFailed.empty())
@@ -905,6 +982,11 @@ namespace cluau::runtime::detail {
 				}
 			}
 #endif
+			if (PastDeadline(socket))
+			{
+				why = Why(Ready::Late, socket.Timeout);
+				return false;
+			}
 			char chunk[16384];
 			auto n = ::recv(socket.Handle, chunk, (int)sizeof(chunk), 0);
 			while (n < 0 && WouldBlock())
@@ -938,8 +1020,14 @@ namespace cluau::runtime::detail {
 			return Await(L, [socket, kind, count, fn]() -> JobResult {
 				std::lock_guard<std::mutex> reading(socket->Reading);
 				Use use(*socket);
-				if (!use.Entered && socket->Buffer.empty())
-					return Failure(std::string(fn) + ": the socket is closed");
+				if (!use.Entered)
+				{
+					// Closed: what was read before is still given out, and no
+					// more is read (the handle may be gone).
+					if (socket->Buffer.empty())
+						return Failure(std::string(fn) + ": the socket is closed");
+					socket->Ended = true;
+				}
 				std::string why;
 				auto text = std::make_shared<std::string>();
 				bool got = false;
@@ -957,15 +1045,30 @@ namespace cluau::runtime::detail {
 				}
 				else if (kind == ReadKind::Line)
 				{
-					// `count`: the longest line taken (0: no limit); a longer
-					// one is an error, and stays unread.
+					// `count`: the longest line taken, without its line break
+					// (0: no limit); a longer one is an error, and stays
+					// unread. Each search starts where the last one ended.
+					const std::string& buffer = socket->Buffer;
 					size_t newline;
-					while ((newline = socket->Buffer.find('\n')) == std::string::npos && (count == 0 || socket->Buffer.size() <= count) &&
-						Fill(*socket, why))
+					size_t searched = 0;
+					auto room = [&] {
+						// A line of `count` bytes may still be followed by \r\n.
+						return count == 0 || buffer.size() <= count || (buffer.size() == count + 1 && buffer.back() == '\r');
+					};
+					while ((newline = buffer.find('\n', searched)) == std::string::npos && room())
 					{
+						searched = buffer.size();
+						if (!Fill(*socket, why))
+							break;
 					}
-					if (count > 0 && (newline == std::string::npos ? socket->Buffer.size() > count : newline > count))
-						return Failure(std::string(fn) + ": a line longer than " + std::to_string(count) + " bytes");
+					if (count > 0)
+					{
+						const size_t length = newline == std::string::npos ? buffer.size()
+											  : newline > 0 && buffer[newline - 1] == '\r' ? newline - 1
+																						   : newline;
+						if (length > count)
+							return Failure(std::string(fn) + ": a line longer than " + std::to_string(count) + " bytes");
+					}
 					if (newline != std::string::npos)
 					{
 						*text = socket->Buffer.substr(0, newline);
@@ -1005,8 +1108,8 @@ namespace cluau::runtime::detail {
 		int SocketRead(lua_State* L)
 		{
 			std::shared_ptr<Socket> socket = Check(L, 1, kSocketMeta);
-			const int count = (int)luaL_optinteger(L, 2, 65536);
-			if (count < 1)
+			const double count = luaL_optnumber(L, 2, 65536);
+			if (!(count >= 1 && count <= INT_MAX) || count != std::floor(count))
 				luaL_argerror(L, 2, "a number of bytes from 1");
 			return AwaitRead(L, socket, ReadKind::Some, (size_t)count, "socket:read");
 		}
@@ -1015,9 +1118,11 @@ namespace cluau::runtime::detail {
 		{
 			std::shared_ptr<Socket> socket = Check(L, 1, kSocketMeta);
 			const double limit = luaL_optnumber(L, 2, 0);
-			if (limit < 0 || limit != std::floor(limit))
+			if (!(limit >= 0) || limit != std::floor(limit))
 				luaL_argerror(L, 2, "the longest line, a whole number of bytes (none: no limit)");
-			return AwaitRead(L, socket, ReadKind::Line, (size_t)limit, "socket:readLine");
+			// One beyond any line a buffer could hold is no limit at all.
+			const size_t count = limit >= 9007199254740992.0 ? 0 : (size_t)limit;
+			return AwaitRead(L, socket, ReadKind::Line, count, "socket:readLine");
 		}
 
 		int SocketReadAll(lua_State* L) { return AwaitRead(L, Check(L, 1, kSocketMeta), ReadKind::All, 0, "socket:readAll"); }
@@ -1104,9 +1209,26 @@ namespace cluau::runtime::detail {
 		{
 			std::shared_ptr<Socket> socket = Check(L, 1, kSocketMeta);
 			const double seconds = luaL_optnumber(L, 2, 0);
-			if (seconds < 0)
+			if (!(seconds >= 0))
 				luaL_argerror(L, 2, "a number of seconds (none, or 0: no limit)");
-			socket->Timeout = seconds;
+			socket->Timeout = std::isinf(seconds) ? 0 : seconds;
+			return 0;
+		}
+
+		// Every wait on the socket (the ones under way too) ends `seconds`
+		// from now, however often data comes; none (or nil): no deadline.
+		int SocketSetDeadline(lua_State* L)
+		{
+			std::shared_ptr<Socket> socket = Check(L, 1, kSocketMeta);
+			if (lua_isnoneornil(L, 2))
+			{
+				socket->Deadline = 0;
+				return 0;
+			}
+			const double seconds = luaL_checknumber(L, 2);
+			if (!(seconds >= 0))
+				luaL_argerror(L, 2, "a number of seconds (none: no deadline)");
+			socket->Deadline = std::isinf(seconds) ? 0 : Now() + std::max(seconds, 1e-9);
 			return 0;
 		}
 
@@ -1144,7 +1266,7 @@ namespace cluau::runtime::detail {
 			for (const luaL_Reg* m = methods; m->name; m++)
 			{
 				const bool waits = awaiting && std::strcmp(m->name, "close") != 0 && std::strcmp(m->name, "lines") != 0 &&
-								   std::strcmp(m->name, "setTimeout") != 0;
+								   std::strcmp(m->name, "setTimeout") != 0 && std::strcmp(m->name, "setDeadline") != 0;
 				if (waits)
 					lua_pushcclosurek(L, m->func, m->name, 0, AwaitContinue);
 				else
@@ -1160,7 +1282,8 @@ namespace cluau::runtime::detail {
 	void OpenNet(lua_State* L)
 	{
 		const luaL_Reg socketMethods[] = { { "read", SocketRead }, { "readLine", SocketReadLine }, { "readAll", SocketReadAll },
-			{ "lines", SocketLines }, { "write", SocketWrite }, { "close", SocketClose }, { "setTimeout", SocketSetTimeout }, { nullptr, nullptr } };
+			{ "lines", SocketLines }, { "write", SocketWrite }, { "close", SocketClose }, { "setTimeout", SocketSetTimeout },
+			{ "setDeadline", SocketSetDeadline }, { nullptr, nullptr } };
 		const luaL_Reg serverMethods[] = { { "accept", ServerAccept }, { "close", ServerClose }, { nullptr, nullptr } };
 		Type(L, kSocketMeta, "Socket", SocketIndex, socketMethods, true);
 		Type(L, kServerMeta, "Server", ServerIndex, serverMethods, true);

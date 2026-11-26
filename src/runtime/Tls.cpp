@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -26,20 +27,52 @@ namespace cluau::runtime::detail {
 	namespace {
 
 #ifdef _WIN32
-		// The machine's and the user's trusted roots (and intermediates), as PEM.
+		// Whether Windows lets a root vouch for servers: its enhanced key
+		// usage (the certificate's own and the store's restrictions together)
+		// is any use, or includes server authentication.
+		bool TrustedForServers(PCCERT_CONTEXT cert)
+		{
+			DWORD size = 0;
+			if (!CertGetEnhancedKeyUsage(cert, 0, nullptr, &size))
+				return false;
+			std::vector<BYTE> data(size);
+			PCERT_ENHKEY_USAGE usage = reinterpret_cast<PCERT_ENHKEY_USAGE>(data.data());
+			if (!CertGetEnhancedKeyUsage(cert, 0, usage, &size))
+				return false;
+			// No usages: good for all when the error is CRYPT_E_NOT_FOUND,
+			// else good for none.
+			if (usage->cUsageIdentifier == 0)
+				return GetLastError() == static_cast<DWORD>(CRYPT_E_NOT_FOUND);
+			for (DWORD i = 0; i < usage->cUsageIdentifier; i++)
+				if (std::strcmp(usage->rgpszUsageIdentifier[i], szOID_PKIX_KP_SERVER_AUTH) == 0)
+					return true;
+			return false;
+		}
+
+		// The machine's and the user's trusted roots, as PEM: only the roots
+		// (mbedTLS would take any certificate given as one to trust, an
+		// intermediate too), only those trusted for servers, and none that is
+		// in the Disallowed store.
 		std::string WindowsStorePem()
 		{
 			std::string pem;
-			for (const wchar_t* name : { L"ROOT", L"CA" })
+			HCERTSTORE disallowed = CertOpenSystemStoreW(0, L"Disallowed");
+			HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
+			if (store)
 			{
-				HCERTSTORE store = CertOpenSystemStoreW(0, name);
-				if (!store)
-					continue;
 				PCCERT_CONTEXT cert = nullptr;
 				while ((cert = CertEnumCertificatesInStore(store, cert)) != nullptr)
 				{
-					if (cert->dwCertEncodingType != X509_ASN_ENCODING)
+					if (cert->dwCertEncodingType != X509_ASN_ENCODING || !TrustedForServers(cert))
 						continue;
+					if (disallowed)
+					{
+						if (PCCERT_CONTEXT found = CertFindCertificateInStore(disallowed, X509_ASN_ENCODING, 0, CERT_FIND_EXISTING, cert, nullptr))
+						{
+							CertFreeCertificateContext(found);
+							continue;
+						}
+					}
 					DWORD length = 0;
 					if (!CryptBinaryToStringA(cert->pbCertEncoded, cert->cbCertEncoded, CRYPT_STRING_BASE64HEADER | CRYPT_STRING_NOCR, nullptr,
 							&length))
@@ -54,6 +87,8 @@ namespace cluau::runtime::detail {
 				}
 				CertCloseStore(store, 0);
 			}
+			if (disallowed)
+				CertCloseStore(disallowed, 0);
 			return pem;
 		}
 #endif
@@ -166,7 +201,9 @@ namespace cluau::runtime::detail {
 			mbedtls_x509_crt_parse(&chain, reinterpret_cast<const unsigned char*>(system.Pem.c_str()), system.Pem.size() + 1) >= 0)
 			any = true;
 		if (!any)
-			error = "no trusted certificates were found on this system: set SSL_CERT_FILE to a CA bundle";
+			error = !system.File.empty() || !system.Dir.empty()
+				? "no trusted certificates were found in " + system.Where
+				: "no trusted certificates were found on this system: set SSL_CERT_FILE to a CA bundle";
 		return any;
 	}
 

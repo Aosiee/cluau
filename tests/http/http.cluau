@@ -107,3 +107,61 @@ for (_, each in secures) {
 	table.insert(bodies, task.join(each))
 }
 print("https tasks:", table.concat(bodies, ","))
+
+// Redirects change the method as RFC 9110 has it: a 303 is followed with
+// GET (and without the body), a 301 or 302 after a POST too; 307 keeps both.
+print("303 after PUT:", Echoed(http.request({ url = `{base}/go?status=303&to=/echo`, method = "PUT", body = "kept?" })))
+print("303 after DELETE:", Echoed(http.request({ url = `{base}/go?status=303&to=/echo`, method = "DELETE" })))
+print("301 after POST:", Echoed(http.post(`{base}/go?status=301&to=/echo`, "kept?", { headers = { ["Content-Type"] = "text/plain" } })))
+print("307 after PUT:", Echoed(http.request({ url = `{base}/go?status=307&to=/echo`, method = "PUT", body = "kept" })))
+
+// The request's own headers go on to the same host; to another, only those
+// that say what is sent and wanted (credentials stay behind).
+type Seen = { method: string, host: string, headers: { [string]: string? } }
+const ShowSeen = function(response: http.Response): string {
+	const seen = json.decode(response.body) :: Seen
+	const names: { string } = {}
+	for (name, value in seen.headers) {
+		table.insert(names, `{name}={value}`)
+	}
+	table.sort(names)
+	return `{seen.method} {seen.host} {table.concat(names, " ")}`
+}
+const other = string.gsub(base, "127%.0%.0%.1", "localhost")
+const credentials = { Authorization = "Bearer secret", ["X-Api-Key"] = "secret", Accept = "text/plain" }
+print("same host:", ShowSeen(http.get(`{base}/go?status=302&to=/seen`, { headers = credentials })))
+print("other host:", ShowSeen(http.get(`{base}/go?status=302&to={other}/seen`, { headers = credentials })))
+print("empty header:", ShowSeen(http.get(`{base}/seen`, { headers = { ["X-Empty"] = "" } })))
+
+// What could end a header or the request line early is refused; so is an
+// address with a NUL in it.
+for (_, attempt in {
+	function() { return http.get(`{base}/seen`, { headers = { ["X-A"] = "1\r\nX-Injected: yes" } }) },
+	function() { return http.get(`{base}/seen`, { headers = { ["X-B\r\nX-Injected: yes"] = "1" } }) },
+	function() { return http.request({ url = `{base}/seen`, method = "GET /evil HTTP/1.1\r\nX-Injected: yes\r\nX:" }) },
+	function() { return http.get(`{base}/seen\0/other`) },
+}) {
+	const done, problem = pcall(attempt)
+	print("refused:", done, (string.gsub(string.match(tostring(problem), "(http%.%a+: .*)$") or tostring(problem), "[\r\n]", " ")))
+}
+
+// A time limit under a millisecond is still a limit; an error does not show
+// the address's password.
+const started2 = time.monotonic()
+const quick, quickWhy = pcall(http.get, `{base}/slow`, { timeout = 0.0001 })
+print("tiny timeout:", quick, string.find(tostring(quickWhy), "no answer within", 1, true) != nil, time.monotonic() - started2 < 2)
+const hidden, hiddenWhy = pcall(http.get, "http://user:secret@127.0.0.1:1/")
+print("password hidden:", hidden, string.find(tostring(hiddenWhy), "secret", 1, true) == nil)
+
+// A redirect's own body is not part of a download.
+const redirected = path.join(fs.tempDir(), `cluau-http-redirected-{math.floor(os.clock() * 1e6)}.txt`)
+r = http.download(`{base}/go?status=302&to=/hello`, redirected)
+print("download after a redirect:", r.status, fs.read(redirected))
+fs.remove(redirected)
+
+// A download onto a directory is an error, and the directory stays.
+const directory = path.join(fs.tempDir(), `cluau-http-dir-{math.floor(os.clock() * 1e6)}`)
+fs.mkdir(directory)
+const into, intoWhy = pcall(http.download, `{base}/hello`, directory)
+print("download onto a directory:", into, fs.isDir(directory), string.find(tostring(intoWhy), "cannot write", 1, true) != nil)
+fs.remove(directory)

@@ -177,6 +177,7 @@ export type Socket = {
 	lines: (self: Socket) -> () -> string?,
 	write: (self: Socket, ...string) -> (),
 	setTimeout: (self: Socket, seconds: number?) -> (),
+	setDeadline: (self: Socket, seconds: number?) -> (),
 	close: (self: Socket) -> (),
 }
 export type Server = {

@@ -51,3 +51,28 @@ unverified:write("unverified\n")
 print(unverified:readLine())
 unverified:close()
 server:close()
+
+// A key that is not the certificate's is listen's error, not every
+// handshake's.
+const mismatched, mismatch = pcall(net.listen, "127.0.0.1", 0, { tls = { certFile = cert, keyFile = "../http/other-key.pem" } })
+print("mismatched key", mismatched, string.find(tostring(mismatch), "is not the key of the certificate", 1, true) != nil)
+
+// A connection closed by one task while another's read is making its
+// handshake, with a client that has sent only part of its hello.
+const listening = net.listen("127.0.0.1", 0, { tls = { certFile = cert, keyFile = key } })
+for (i = 1, 5) {
+	const client = net.connect("127.0.0.1", listening.port)
+	client:write("\22\3\1\0\200\1\0\0\124\3\3")
+	const accepted = listening:accept()
+	const reader = task.spawn(function(): boolean {
+		return pcall(function(): string? {
+			return accepted:read()
+		})
+	})
+	task.wait(0.02 * i)
+	accepted:close()
+	task.join(reader)
+	client:close()
+}
+print("closed while making the handshake")
+listening:close()

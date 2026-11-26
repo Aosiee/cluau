@@ -57,6 +57,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(int(path.split("/")[2]), "status")
         if path == "/redirect":
             return self.reply(302, "", headers={"Location": "/hello"})
+        if path == "/go":
+            # /go?status=303&to=/echo: a redirect of that status.
+            query = dict(p.split("=", 1) for p in self.path.split("?", 1)[1].split("&"))
+            self.body()
+            return self.reply(int(query["status"]), "moved", headers={"Location": query["to"].replace("%3A", ":")})
+        if path == "/seen":
+            # The request's own headers that a redirect may drop.
+            seen = {name: self.headers.get(name) for name in ("Authorization", "X-Api-Key", "Accept", "X-Empty")}
+            info = {"method": self.command, "host": (self.headers.get("Host") or "").split(":")[0], "headers": seen}
+            return self.reply(200, json.dumps(info, sort_keys=True), "application/json")
         if path == "/slow":
             time.sleep(3)
             return self.reply(200, "late")
@@ -87,6 +97,22 @@ def main():
     env["CLUAU_TEST_CA"] = os.path.join(HERE, "test-cert.pem")
     result = subprocess.run([cluau, "http.cluau"], cwd=HERE, env=env, capture_output=True, text=True, timeout=120)
     out = (result.stdout + result.stderr).replace("\r\n", "\n") + f"exit: {result.returncode}\n"
+    # SSL_CERT_FILE names the certificates to trust instead of the system's
+    # (read once, at the start): the test certificate, then a missing file.
+    check = (
+        'const net = require("@std/net")\n'
+        'const http = require("@std/http")\n'
+        'const secure = (require("@std/process").env("CLUAU_TEST_HTTPS") or "") :: string\n'
+        'const port = tonumber(string.match(secure, ":(%d+)$")) :: number\n'
+        'const ok, r = pcall(http.get, secure .. "/hello")\n'
+        'print("http", ok, if (ok) (r :: http.Response).body else string.match(tostring(r), "trusted certificates: .*$"))\n'
+        'const connected, why = pcall(net.connect, "localhost", port, { tls = true, timeout = 5 })\n'
+        'print("net", connected, if (connected) "connected" else string.match(tostring(why), "no trusted.*$"))\n'
+    )
+    for bundle in ("test-cert.pem", "missing.pem"):
+        env["SSL_CERT_FILE"] = bundle
+        result = subprocess.run([cluau, "-e", check], cwd=HERE, env=env, capture_output=True, text=True, timeout=60)
+        out += f"SSL_CERT_FILE={bundle}\n" + (result.stdout + result.stderr).replace("\r\n", "\n")
     expected_path = os.path.join(HERE, "http.expected")
     if update:
         with open(expected_path, "w", newline="\n") as f:
