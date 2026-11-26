@@ -16,6 +16,9 @@
 
 #ifdef CLUAU_HAS_RUNTIME
 #include "cluau/runtime.h"
+
+#include "Luau/Ast.h"
+#include "Luau/Parser.h"
 #endif
 
 #include <algorithm>
@@ -42,6 +45,12 @@ namespace {
 
 	bool Read(const std::string& path, std::string& text)
 	{
+		std::error_code ec;
+		if (std::filesystem::is_directory(path, ec))
+		{
+			std::fprintf(stderr, "cluau: cannot read '%s': it is a directory\n", path.c_str());
+			return false;
+		}
 		std::ifstream in(path, std::ios::binary);
 		if (!in)
 		{
@@ -244,6 +253,185 @@ namespace {
 		return failed || (check && changed) ? 1 : 0;
 	}
 
+#ifdef CLUAU_HAS_RUNTIME
+	// The shape of a parsed Luau chunk, for comparing a conversion's round
+	// trip with its input: every node's kind with the names, constants and
+	// operators it holds, each node's children bracketed. Parentheses
+	// (`(c)`, which conditions gain) and a doubled `not` (`until c` comes
+	// back as `until not (not (c))`) are no part of it, nor are positions
+	// and whether a local is `const` (Luau's `const` comes back `local`).
+	class AstShape : public Luau::AstVisitor
+	{
+	public:
+		using Luau::AstVisitor::visit;
+
+		struct Item
+		{
+			std::string Text;
+			int Line = 0;
+		};
+		std::vector<Item> Items;
+
+		bool visit(Luau::AstNode* node) override
+		{
+			if (node == m_Current)
+				return true; // its children, through the default traversal
+			if (node->is<Luau::AstExprGroup>() || node->is<Luau::AstTypeGroup>())
+				return true;
+			if (Luau::AstExprUnary* outer = node->as<Luau::AstExprUnary>(); outer && outer->op == Luau::AstExprUnary::Op::Not)
+				if (Luau::AstExprUnary* inner = Ungrouped(outer->expr)->as<Luau::AstExprUnary>(); inner && inner->op == Luau::AstExprUnary::Op::Not)
+				{
+					inner->expr->visit(this);
+					return false;
+				}
+			Items.push_back({ Describe(node), (int)node->location.begin.line });
+			Luau::AstNode* parent = m_Current;
+			m_Current = node;
+			node->visit(this);
+			m_Current = parent;
+			Items.push_back({ ")", (int)node->location.end.line });
+			return false;
+		}
+		bool visit(Luau::AstType* node) override { return visit(static_cast<Luau::AstNode*>(node)); }
+		bool visit(Luau::AstTypePack* node) override { return visit(static_cast<Luau::AstNode*>(node)); }
+
+	private:
+		static Luau::AstExpr* Ungrouped(Luau::AstExpr* e)
+		{
+			while (Luau::AstExprGroup* g = e->as<Luau::AstExprGroup>())
+				e = g->expr;
+			return e;
+		}
+
+		static std::string Chars(const Luau::AstArray<char>& a) { return std::string(a.data, a.size); }
+		static std::string Name(const Luau::AstName& n) { return n.value ? n.value : ""; }
+
+		static std::string Describe(Luau::AstNode* node)
+		{
+			std::string d = "(" + std::to_string(node->classIndex);
+			auto add = [&](const std::string& part) {
+				d += ' ';
+				d += part;
+			};
+			if (auto* n = node->as<Luau::AstExprConstantBool>())
+				add(n->value ? "true" : "false");
+			else if (auto* n = node->as<Luau::AstExprConstantNumber>())
+			{
+				char buffer[40];
+				std::snprintf(buffer, sizeof(buffer), "%.17g", n->value);
+				add(buffer);
+			}
+			else if (auto* n = node->as<Luau::AstExprConstantString>())
+				add(Chars(n->value));
+			else if (auto* n = node->as<Luau::AstExprLocal>())
+				add(Name(n->local->name));
+			else if (auto* n = node->as<Luau::AstExprGlobal>())
+				add(Name(n->name));
+			else if (auto* n = node->as<Luau::AstExprIndexName>())
+				add(std::string(1, n->op) + Name(n->index));
+			else if (auto* n = node->as<Luau::AstExprCall>())
+				add(n->self ? "self" : "");
+			else if (auto* n = node->as<Luau::AstExprUnary>())
+				add(std::to_string((int)n->op));
+			else if (auto* n = node->as<Luau::AstExprBinary>())
+				add(std::to_string((int)n->op));
+			else if (auto* n = node->as<Luau::AstStatCompoundAssign>())
+				add(std::to_string((int)n->op));
+			else if (auto* n = node->as<Luau::AstExprFunction>())
+			{
+				for (Luau::AstLocal* arg : n->args)
+					add(Name(arg->name));
+				add(n->vararg ? "..." : "");
+				add(n->self ? "self" : "");
+			}
+			else if (auto* n = node->as<Luau::AstStatLocal>())
+			{
+				for (Luau::AstLocal* var : n->vars)
+					add(Name(var->name));
+				add(n->isExported ? "export" : "");
+			}
+			else if (auto* n = node->as<Luau::AstStatFor>())
+				add(Name(n->var->name));
+			else if (auto* n = node->as<Luau::AstStatForIn>())
+			{
+				for (Luau::AstLocal* var : n->vars)
+					add(Name(var->name));
+			}
+			else if (auto* n = node->as<Luau::AstStatLocalFunction>())
+				add(Name(n->name->name));
+			else if (auto* n = node->as<Luau::AstExprTable>())
+			{
+				for (const Luau::AstExprTable::Item& item : n->items)
+					add(std::to_string((int)item.kind));
+			}
+			else if (auto* n = node->as<Luau::AstExprInterpString>())
+			{
+				for (const Luau::AstArray<char>& part : n->strings)
+					add(Chars(part));
+			}
+			else if (auto* n = node->as<Luau::AstAttr>())
+				add(std::to_string((int)n->type) + Name(n->name));
+			else if (auto* n = node->as<Luau::AstStatTypeAlias>())
+				add(Name(n->name) + (n->exported ? " export" : ""));
+			else if (auto* n = node->as<Luau::AstTypeReference>())
+				add((n->prefix ? Name(*n->prefix) + "." : std::string()) + Name(n->name));
+			else if (auto* n = node->as<Luau::AstTypeTable>())
+			{
+				for (const Luau::AstTableProp& prop : n->props)
+					add(Name(prop.name) + ":" + std::to_string((int)prop.access));
+				add(n->indexer ? "[]" : "");
+			}
+			else if (auto* n = node->as<Luau::AstTypeSingletonString>())
+				add(Chars(n->value));
+			else if (auto* n = node->as<Luau::AstTypeSingletonBool>())
+				add(n->value ? "true" : "false");
+			else if (auto* n = node->as<Luau::AstGenericType>())
+				add(Name(n->name));
+			else if (auto* n = node->as<Luau::AstGenericTypePack>())
+				add(Name(n->name));
+			else if (auto* n = node->as<Luau::AstTypePackGeneric>())
+				add(Name(n->genericName));
+			return d;
+		}
+
+		Luau::AstNode* m_Current = nullptr;
+	};
+
+	// Parses `source` as Luau into `shape`: "" or the first syntax error.
+	std::string ParseShape(const std::string& source, std::vector<AstShape::Item>& shape)
+	{
+		Luau::Allocator allocator;
+		Luau::AstNameTable names(allocator);
+		const Luau::ParseResult result = Luau::Parser::parse(source.data(), source.size(), names, allocator, Luau::ParseOptions());
+		if (!result.errors.empty())
+			return "line " + std::to_string(result.errors[0].getLocation().begin.line + 1) + ": " + result.errors[0].getMessage();
+		AstShape visitor;
+		result.root->visit(&visitor);
+		shape = std::move(visitor.Items);
+		return {};
+	}
+
+	// `--verify` with Luau at hand: the input and the Luau the conversion
+	// translates back to parse, and to the same program.
+	std::string CompareParsed(std::string luau, const std::string& roundTrip)
+	{
+		if (luau.rfind("\xEF\xBB\xBF", 0) == 0)
+			luau.erase(0, 3);
+		std::vector<AstShape::Item> a, b;
+		if (std::string error = ParseShape(luau, a); !error.empty())
+			return "the input does not parse as Luau: " + error;
+		if (std::string error = ParseShape(roundTrip, b); !error.empty())
+			return "the round trip does not parse: " + error;
+		for (size_t i = 0; i < a.size() || i < b.size(); i++)
+			if (i >= a.size() || i >= b.size() || a[i].Text != b[i].Text)
+			{
+				const int line = i < a.size() ? a[i].Line : a.empty() ? 0 : a.back().Line;
+				return "line " + std::to_string(line + 1) + ": the round trip parses to a different program";
+			}
+		return {};
+	}
+#endif
+
 	int Convert(int argc, char** argv)
 	{
 		bool verify = false;
@@ -267,7 +455,12 @@ namespace {
 		Report(path, result.Diagnostics);
 		if (verify)
 		{
-			const std::string problem = cluau::VerifyConversion(text, result.Cluau);
+			std::string roundTrip;
+			std::string problem = cluau::VerifyConversion(text, result.Cluau, &roundTrip);
+#ifdef CLUAU_HAS_RUNTIME
+			if (problem.empty())
+				problem = CompareParsed(text, roundTrip);
+#endif
 			if (!problem.empty())
 			{
 				std::fprintf(stderr, "%s: round trip: %s\n", path.c_str(), problem.c_str());

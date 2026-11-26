@@ -1,0 +1,43 @@
+// cluau convert and convert --verify, run on Luau files made here.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const cluau = process.executable
+const dir = path.join(fs.tempDir(), `cluau-convert-{process.platform}-{math.floor(time.now() * 1000)}`)
+fs.mkdir(dir)
+
+// Output without carriage returns (Windows writes them).
+function Clean(text: string): string {
+	return (string.gsub(text, "\r", ""))
+}
+
+function Convert(name: string, luau: string) {
+	fs.write(path.join(dir, name), luau)
+	const r = process.run({ cluau, "convert", name }, { cwd = dir, stderr = "capture" })
+	print(`{name}: convert [exit {r.code}]`)
+	print(Clean(r.output))
+	print(Clean(r.error))
+	const v = process.run({ cluau, "convert", "--verify", name }, { cwd = dir, stderr = "capture" })
+	print(`{name}: --verify [exit {v.code}]`)
+	print(Clean(v.error))
+}
+
+// Conditions over several lines, a byte order mark and CRLF line ends.
+Convert("until.luau", "\xEF\xBB\xBFlocal n = 0\r\nrepeat\r\n\tn += 1\r\nuntil n >= 3 and\r\n\tn < 10\r\nprint(n)\r\n")
+Convert("strings.luau", "local s = \"one\\\r\ntwo and three\"\r\nlocal y = 10 /--[[ half ]] 2\r\nprint(s, y)\r\n")
+// StyLua's layout of an if-expression.
+Convert("stylua.luau", "local a = true\nlocal v = if a\n\tthen 1\n\telse 2\nprint(v)\n")
+// What has no cluau form is reported.
+Convert("iflocal.luau", "if local y = 5 then print(y) end\n")
+// The round trip is compared as parsed Luau: input that does not parse
+// cannot be verified.
+Convert("invalid.luau", "local x = = 1\n")
+
+// A directory is no file to read.
+fs.mkdir(path.join(dir, "folder"))
+const r = process.run({ cluau, "convert", "folder" }, { cwd = dir, stderr = "capture" })
+print(`folder: [exit {r.code}]`, Clean(r.error))
+
+fs.remove(dir, true)

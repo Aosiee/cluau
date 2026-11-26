@@ -241,20 +241,39 @@ the file is declarations only.
 `cluau convert [--verify] <file.luau>` rewrites standard Luau as cluau,
 keeping every line on its line: block words become braces, conditions get
 parentheses, `local` becomes `let`, the operators and comments take their
-cluau spelling (`--` comments become `//`, `--[[ ]]` becomes `/* */`), and
-`--!` mode comments are dropped. `repeat ... until c` becomes
-`do { ... } while (!(c));`. It does not restructure code: a module table
-stays a module table.
+cluau spelling (`--` comments become `//`, `--[[ ]]` becomes `/* */`).
+`repeat ... until c` becomes `do { ... } while (!(c));`, however many
+lines the condition takes. It does not restructure code: a module table
+stays a module table. Luau's `const x = 1` and `const function f()` stay
+as they are (cluau's `const` is the same). A byte order mark is kept.
+
+Mode comments before the code (`--!strict`, `--!native`, `--!optimize 2`,
+...) are dropped: cluau hosts decide the mode. cluau accepts no `//!` at
+the start of a line, so any other `--!` comment there becomes `// !`.
 
 An if-expression becomes cluau's (`if a then b elseif c then d else e`
 -> `if (a) b else if (c) d else e`), in an interpolated string's `{}`
-segments too. A call whose table argument starts the next line (`f` then
-`{ x = 1 }`) gets its parentheses (`f(` then `{ x = 1 })`), since in cluau
-that `{` would open a block. An identifier that is a cluau keyword
-(`let`, `const`, `class`) has no cluau form and is reported, left as
-written; so is a call to a function named `throw` or `try` at a
-statement's start (`throw(x)` would read as cluau's `throw`).
+segments too. A comment inside a segment is dropped (with a warning). A
+call whose table argument starts the next line (`f` then `{ x = 1 }`)
+gets its parentheses (`f(` then `{ x = 1 })`), since in cluau that `{`
+would open a block; for the same reason a do-block after a value or a
+type on its line (`local x: number? do`) is written `; {`.
+
+What has no cluau form is reported as an error and left as written: an
+identifier that is a cluau keyword (`let`, `class`, and `const` other than
+Luau's declaration); `if local` and `while local`; a function, or a long
+string holding braces, quotes or backticks, inside an interpolated
+string's segment; and a call to a function named `throw` or `try` where
+cluau reads a statement's start (at the start of a line, or after `;` or
+a block's brace: `throw(x)` there would read as cluau's `throw`).
 
 `--verify` translates the result back and checks it is the input's tokens
-again (comments, parentheses and doubled `not`s aside).
+again, each on its line (comments, parentheses, `;` and doubled `not`s
+aside; an if-expression's `then` may move to the condition's line). The
+`cluau` tool then parses the input and the round trip with Luau's parser
+and checks they are the same program (parentheses and doubled `not`s
+aside), so a passing `--verify` means the result translates back to Luau
+that parses to the input's program. Input that Luau does not parse fails
+it. A host that embeds only the translator gets the token check
+(`VerifyConversion`), which cannot see brackets in the wrong place.
 
