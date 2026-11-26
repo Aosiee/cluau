@@ -376,6 +376,24 @@ class Running {
 	}
 }
 
+// After answering a request that was not read to its end: what the client
+// is still sending is read and dropped for a moment before closing. Closing
+// with it unread would reset the connection, and the client could lose the
+// answer.
+const Linger = function(socket: net.Socket) {
+	pcall(function() {
+		socket:setTimeout(0.5)
+		let dropped = 0
+		while (dropped < 1024 * 1024) {
+			const chunk = socket:read()
+			if (chunk == nil) {
+				break
+			}
+			dropped += #chunk
+		}
+	})
+}
+
 const Serve = function(socket: net.Socket, handler: Handler, options: Options, running: Running) {
 	socket:setTimeout(options.idle or 60)
 	const maxBody = options.maxBody or 16 * 1024 * 1024
@@ -390,6 +408,7 @@ const Serve = function(socket: net.Socket, handler: Handler, options: Options, r
 			if (typeof(request) == "table" && getmetatable(request) == Failure) {
 				const failure = request :: Failure
 				pcall(Write, socket, nil, { status = failure.Status, body = failure.Message }, false)
+				Linger(socket)
 			}
 			break
 		}

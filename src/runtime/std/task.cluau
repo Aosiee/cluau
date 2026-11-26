@@ -165,8 +165,11 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 				Idle(if (deadline != nil) deadline - now else nil)
 				continue
 			}
+			// Until the deadline: a job finishing (even one no task waits on
+			// any more) can end an idle early.
 			if (deadline != nil && deadline > now) {
 				Idle(deadline - now)
+				continue
 			}
 			return
 		}

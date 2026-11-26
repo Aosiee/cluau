@@ -30,10 +30,11 @@ fs.write(file, "seven b")
 const handle = fs.open(file)
 print("read", handle:read(1e9))
 handle:close()
+const counted = fs.open(file)
 print("bad count", (pcall(function() {
-	const h = fs.open(file)
-	h:read(0 / 0)
+	counted:read(0 / 0)
 })))
+counted:close()
 fs.remove(file)
 
 // A command argument cannot hold a NUL byte.

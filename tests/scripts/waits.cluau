@@ -68,8 +68,13 @@ const silent = net.connect("127.0.0.1", server.port)
 const peer = server:accept()
 silent:setTimeout(0.5)
 const start = time.monotonic()
+// (Some systems take a great deal into the send buffer: written in pieces
+// until the limit is reached.)
+const piece = string.rep("z", 4 * 1024 * 1024)
 const wrote, writeWhy = pcall(function() {
-	silent:write(string.rep("z", 64 * 1024 * 1024))
+	for (i = 1, 256) {
+		silent:write(piece)
+	}
 })
 print("write timed out", wrote, string.find(tostring(writeWhy), "no answer", 1, true) != nil, time.monotonic() - start < 5)
 silent:close()

@@ -336,10 +336,12 @@ namespace cluau::runtime::detail {
 		// An entry's sizes must fit together before it is read: what it claims
 		// to hold is allocated whole, and deflate expands at most about 1032
 		// to 1 (a stored entry, not at all).
-		void CheckSizes(lua_State* L, const mz_zip_archive_file_stat& stat, const char* fn)
+		// The compressed size cannot be more than the archive holds.
+		void CheckSizes(lua_State* L, const Archive& a, const mz_zip_archive_file_stat& stat, const char* fn)
 		{
 			const bool stored = stat.m_method == 0;
-			const bool fits = stored ? stat.m_uncomp_size == stat.m_comp_size : stat.m_uncomp_size <= stat.m_comp_size * 1040 + 65536;
+			const bool fits = stat.m_comp_size <= a.Data.size() &&
+				(stored ? stat.m_uncomp_size == stat.m_comp_size : stat.m_uncomp_size <= stat.m_comp_size * 1040 + 65536);
 			if (!fits)
 				luaL_error(L, "%s: '%s' claims %.0f bytes from %.0f: the archive is damaged", fn, stat.m_filename, (double)stat.m_uncomp_size,
 					(double)stat.m_comp_size);
@@ -355,13 +357,13 @@ namespace cluau::runtime::detail {
 			mz_zip_archive_file_stat stat;
 			if (!mz_zip_reader_file_stat(&a.Zip, (mz_uint)index, &stat))
 				luaL_error(L, "archive:read: cannot read '%s': %s", name, mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
-			CheckSizes(L, stat, "archive:read");
+			CheckSizes(L, a, stat, "archive:read");
 			size_t size = 0;
-			void* data = mz_zip_reader_extract_to_heap(&a.Zip, (mz_uint)index, &size, 0);
+			// Freed however this ends (pushing it can raise, out of memory).
+			std::unique_ptr<void, void (*)(void*)> data(mz_zip_reader_extract_to_heap(&a.Zip, (mz_uint)index, &size, 0), mz_free);
 			if (!data)
 				luaL_error(L, "archive:read: cannot read '%s': %s", name, mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
-			lua_pushlstring(L, static_cast<const char*>(data), size);
-			mz_free(data);
+			lua_pushlstring(L, static_cast<const char*>(data.get()), size);
 			return 1;
 		}
 
@@ -394,13 +396,13 @@ namespace cluau::runtime::detail {
 					continue;
 				}
 				fs::create_directories(target.parent_path(), ec);
-				CheckSizes(L, stat, "archive:extract");
+				CheckSizes(L, a, stat, "archive:extract");
 				size_t size = 0;
-				void* data = mz_zip_reader_extract_to_heap(&a.Zip, i, &size, 0);
+				std::unique_ptr<void, void (*)(void*)> data(mz_zip_reader_extract_to_heap(&a.Zip, i, &size, 0), mz_free);
 				if (!data)
 					luaL_error(L, "archive:extract: cannot read '%s': %s", name.c_str(), mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
-				const bool ok = WriteFile(target, std::string_view(static_cast<const char*>(data), size));
-				mz_free(data);
+				const bool ok = WriteFile(target, std::string_view(static_cast<const char*>(data.get()), size));
+				data.reset();
 				if (!ok)
 					luaL_error(L, "archive:extract: cannot write '%s'", name.c_str());
 				written++;
