@@ -863,10 +863,11 @@ const sorted = process.run({ "sort" }, { input = "b\na\n" }).output
 A program that cannot be started (not found, not executable, a missing
 `cwd`) is an error; a program that starts and fails is its exit code.
 
-On Windows the program is looked for on `PATH` (the child's, when `env`
-sets it), trying the extensions in `PATHEXT` (`{ "npm", "install" }` finds
-`npm.cmd`); the current directory is not searched unless the name says so
-(`.\tool.exe`). A batch file (`.bat`, `.cmd`) runs through `cmd.exe`, and
+On Windows the program is looked for in the system's directories
+(`System32`, then the Windows directory), then on `PATH` (the child's, when
+`env` sets it), trying the extensions in `PATHEXT` (`{ "npm", "install" }`
+finds `npm.cmd`); the current directory is not searched unless the name
+says so (`.\tool.exe`). A batch file (`.bat`, `.cmd`) runs through `cmd.exe`, and
 its arguments are quoted so that each reaches it as it is, with nothing in
 them (`&`, `|`, `%NAME%`) taken as `cmd.exe`'s syntax; an argument with a
 line break cannot be passed to one, and is an error.

@@ -492,13 +492,17 @@ namespace cluau::runtime::detail {
 			}
 			else
 			{
-				// The program from PATH (and PATHEXT), not CreateProcess's own
-				// search, which looks in the current directory first.
+				// The program from the system's directories, then PATH (with
+				// PATHEXT): CreateProcess's own order, but for the current
+				// directory, which it looks in first. (The system's own
+				// programs, such as its tar, come before others of the same
+				// name on PATH, as they always have.)
 				const std::string& name = request.Args[0];
-				std::string path = ChildVariable(request, "PATH");
+				std::string path;
 				for (const std::string& dir : { Directory(GetSystemDirectoryW), Directory(GetWindowsDirectoryW) })
 					if (!dir.empty())
-						path += ";" + dir;
+						path += dir + ";";
+				path += ChildVariable(request, "PATH");
 				std::string program = FindProgram(name, path, ChildVariable(request, "PATHEXT"), IsFile);
 				if (program.empty())
 				{

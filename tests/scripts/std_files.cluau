@@ -102,12 +102,15 @@ if (process.platform == "linux" and fs.isDir(shm)) {
 }
 
 // fs.modified is right past 2262 (touch -t takes local time: in UTC here,
-// so the systems' rules for local time that far ahead play no part).
+// so the systems' rules for local time that far ahead play no part). APFS
+// keeps a time in nanoseconds that end in 2262 too: on macOS a year it can
+// hold.
 if (process.platform != "windows") {
+	const year = if (process.platform == "macos") 2200 else 2300
 	const future = path.join(dir, "future.txt")
 	fs.write(future, "")
-	process.run({ "touch", "-t", "230001010000", future }, { env = { TZ = "UTC" } })
-	print(fs.modified(future) == time.fromParts({ year = 2300 }, { utc = true }))
+	process.run({ "touch", "-t", `{year}01010000`, future }, { env = { TZ = "UTC" } })
+	print(fs.modified(future) == time.fromParts({ year = year }, { utc = true }))
 } else {
 	print(true)
 }
