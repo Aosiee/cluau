@@ -1,0 +1,10 @@
+ann	nil	bo	nil
+b	nil	hi, ann	nil
+bo	nil	yo, ann	3
+fallback	ann	1	false	3
+ann	2
+3	3	anonymous	2
+10	10
+1	one
+bo
+exit: 0

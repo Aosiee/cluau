@@ -53,6 +53,9 @@ A UTF-8 byte order mark at the start of a file is ignored.
 | `!x` | `not x` |
 | `a ~/ b`, `a ~/= b` | `a // b`, `a //= b` (floor division) |
 | `x++`, `x--` (statements) | `x += 1`, `x -= 1` |
+| `a ?? b` | `a` unless it is `nil`, then `b` |
+| `x ??= v` (a statement) | `if x == nil then x = v end` |
+| `a?.b`, `a?[k]`, `a?:m()` | `nil` when `a` is, otherwise `a.b`, `a[k]`, `a:m()` |
 
 `and`, `or` and `not` are also accepted.
 
@@ -61,6 +64,33 @@ cluau expressions: `` `{a != b}` ``, `` `{if (n == 1) "one" else "many"}` ``,
 a function with a `{ }` body, comments and long strings all work there as
 anywhere else. Floor division there is `~/` too, since `//` starts a
 comment (which would run to the end of the line, past the string's end).
+
+### Nil: `??` and optional chains
+
+```
+let name = user?.profile?.name ?? "anonymous"
+let first = list?[1]
+logger?:info("started")            // a call only when there is a logger
+options.retries ??= 3
+```
+
+- `a ?? b` is `a` unless `a` is `nil` (`false` stays `false`); `b` is
+  evaluated only when it is needed. `??` binds more loosely than any other
+  operator: `a ?? b + 1` is `a ?? (b + 1)`, and `a ?? b ?? c` takes the
+  first that is not `nil`.
+- `a?.b` is `nil` when `a` is, and `a.b` otherwise; the rest of the chain
+  is not read (`a?.b.c` does not index `nil`). `a?[k]` indexes and `a?:m()`
+  calls a method the same way. A chain is a value: it cannot be assigned to.
+  As a statement, `a?:m()` is a call only when `a` is not `nil`.
+- `x ??= v` assigns `v` to `x` only when `x` is `nil` (`x` is a name or a
+  field: `options.retries`).
+- The types follow: `a ?? b` is `a`'s type without `nil`, or `b`'s, and a
+  chain's value is its last step's type, made optional.
+- Whatever `a` is, it is evaluated once. A name (or names joined by dots)
+  is tested where it is, `(if a ~= nil then a else b)`; any other value
+  goes through a small function the translation defines on the file's
+  first line. That function's arguments are read in a function of their
+  own, so they cannot use `...`.
 
 ### If-expressions
 
@@ -140,6 +170,89 @@ let c: Color = Color.Red
 - The enum is a frozen table: `for (name, value in Status) { }` lists its
   members, and assigning to it is an error.
 - Members are separated by commas or line breaks.
+
+## Parameters with defaults
+
+```
+function greet(name: string, greeting: string = "Hello", times = 1): string {
+	return string.rep(`{greeting}, {name}! `, times)
+}
+
+greet("Ann")             // "Hello, Ann! "
+greet("Bo", "Hi", 2)
+greet("Cy", nil, 3)      // nil takes the default too
+```
+
+- A parameter with a default may be left out, or given `nil`, and takes
+  its default. The default is evaluated at each call that needs it, and
+  may use the parameters before it (`function span(a: number, b = a + 10)`).
+- To its callers the parameter is optional (`greeting: string?`); in the
+  body it has its type (`string`). An unannotated parameter whose default
+  is a number, string or boolean has that type.
+- A default is written on the parameter's line. Methods take defaults too.
+
+## Destructuring
+
+```
+const { name, age } = person          // local name, age = person.name, person.age
+let [first, second] = splitPair(text)  // its first two items
+```
+
+- `{ a, b }` takes fields by their names, `[a, b]` takes items in order;
+  each name becomes a local (`const` ones may not be assigned again).
+- The value is evaluated once. The names are plain names: no renaming,
+  nesting or defaults.
+
+## Switch
+
+```
+switch (command) {
+	case "start", "run":
+		start()
+	case "stop": stop()
+	default:
+		print(`unknown command {command}`)
+}
+```
+
+- The value is evaluated once and compared with each case's values in
+  turn, with `==`; the first case that matches runs, and only it. When none
+  matches, `default` runs (if there is one: it is the last clause).
+- A case's values are expressions, separated by commas and ended by a
+  colon; a method call in one is parenthesised (`case (item:kind()):`).
+- A case ends where the next begins: there is no fall-through, and a
+  `break` in a case is an error (it could only leave the loop around the
+  switch). `continue` goes on with the loop around it.
+- When the value is a name, the cases narrow its type, as an `if` on
+  `==` does.
+
+## Generators
+
+```
+function* countdown(from: number): number {
+	for (i = from, 1, -1) {
+		yield i
+	}
+}
+
+for (n in countdown(3)) {
+	print(n)          // 3, 2, 1
+}
+```
+
+- A `function*` is a generator: calling it returns an iterator, and its
+  body runs only as a loop asks for values, up to each `yield`. `yield a,
+  b` gives several values; `return` (without a value) ends it, and so does
+  reaching the end of its body.
+- The generator's declared type is what it yields: `function* f(): number`
+  is a function returning `() -> number?`, an iterator whose value is
+  `nil` once it is done, and every `yield` is checked against it.
+  `function* f(): (string, number)` yields pairs.
+- The iterator can also be called directly: `local next = countdown(2)`,
+  then `next()` is `2`, `1`, then `nil`.
+- `yield` is a keyword only in a generator's body (not in a function
+  inside it); elsewhere it is a name. A generator is a coroutine: what it
+  yields goes to its loop even from inside a `try`, a `switch` or a loop.
 
 ## Comments
 

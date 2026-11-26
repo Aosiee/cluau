@@ -121,7 +121,7 @@
 					}
 				},
 				{
-					"match": "\\b(?:(abstract)\\s+)?(function)\\s+((?:[A-Za-z_]\\w*\\s*[.:]\\s*)*)([A-Za-z_]\\w*)\\s*(<[^<>()]*>)?\\s*(?=\\()",
+					"match": "\\b(?:(abstract)\\s+)?(function\\*?)\\s*(?<=\\*|\\s)((?:[A-Za-z_]\\w*\\s*[.:]\\s*)*)([A-Za-z_]\\w*)\\s*(<[^<>()]*>)?\\s*(?=\\()",
 					"captures": {
 						"1": { "name": "storage.modifier.abstract.cluau" },
 						"2": { "name": "storage.type.function.cluau" },
@@ -164,7 +164,7 @@
 		"keywords": {
 			"patterns": [
 				{
-					"match": "\\b(?:if|else|while|for|do|in|return|break|continue|try|catch|finally|throw)\\b",
+					"match": "\\b(?:if|else|while|for|do|in|return|break|continue|try|catch|finally|throw|switch|case|default|yield)\\b",
 					"name": "keyword.control.cluau"
 				},
 				{
@@ -240,6 +240,9 @@
 		},
 		"operators": {
 			"patterns": [
+				{ "match": "\\?\\?=", "name": "keyword.operator.assignment.compound.cluau" },
+				{ "match": "\\?\\?", "name": "keyword.operator.nil.cluau" },
+				{ "match": "\\?(?=[.:\\[])", "name": "keyword.operator.optional.cluau" },
 				{ "match": "\\+\\+|--", "name": "keyword.operator.increment.cluau" },
 				{ "match": "&&|\\|\\||!(?!=)", "name": "keyword.operator.logical.cluau" },
 				{ "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.cluau" },

@@ -853,6 +853,9 @@ namespace cluau {
 					(At(i + 1).Is("{") || (w == "throw" && (At(i + 1).Is("(") || At(i + 1).K == Kind::String))))
 					Error(t, "a call to '" + std::string(w) + "' here reads as cluau's " + std::string(w) +
 						" statement: rename the function (left as written)");
+				else if (w == "switch" && CluauStatementStart(i) && At(i + 1).Is("(") && m_Match[i + 1] != npos &&
+					At(m_Match[i + 1] + 1).Is("{"))
+					Error(t, "a call to 'switch' here reads as cluau's switch statement: rename the function (left as written)");
 			}
 
 			// A do-block at token i is written `; {`, so that cluau does not

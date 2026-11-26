@@ -2,6 +2,31 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.30.0: defaults, nil operators, destructuring, switch and generators
+
+Language:
+- Parameters take defaults: `function greet(name: string, greeting:
+  string = "Hello")`. A left-out or nil argument takes the default,
+  evaluated at that call; to callers the parameter is optional, in the
+  body it has its type. Methods take them too.
+- `a ?? b` is `a` unless it is nil, then `b` (evaluated only then), and
+  `x ??= value` assigns only a nil. `a?.b`, `a?[k]` and `a?:m()` are nil
+  when `a` is, without reading further; as a statement, `a?:m()` calls
+  only when there is something to call. Both are typed: `a ?? b` has
+  `a`'s type without nil, or `b`'s.
+- `const { name, age } = person` and `let [first, second] = list` declare
+  a local for each field or item, the value evaluated once.
+- `switch (value) { case a, b: ... default: ... }` compares with `==`,
+  runs the first case that matches and no other, and narrows a name's
+  type as an `if` does. A `break` in a case is an error, since there is
+  no fall-through for it to stop.
+- `function*` declares a generator: its body runs as a loop asks for
+  values, up to each `yield`. Its declared type is what it yields, and
+  each `yield` is checked against it.
+- `cluau fmt` indents a switch's cases and the statements under them; the
+  VS Code grammar knows the new keywords and operators; the converter
+  reports a Luau call that would read as a switch statement.
+
 ## 0.29.1: what the second review left
 
 - On Windows, a program the script starts is given its standard input,

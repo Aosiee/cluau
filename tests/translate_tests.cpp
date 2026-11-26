@@ -926,3 +926,74 @@ TEST("tables: an if-expression after a `;` separator; form feeds are whitespace"
 	CHECK_EQ(Luau("let x =\f1\v+ 2"), std::string("local x =\f1\v+ 2"));
 	CHECK(!cluau::Translate("let x =\f1\v+ 2\n").HasErrors());
 }
+
+TEST("nil operators: ?? and ?. test a name where it is, and call a helper for anything else")
+{
+	CHECK_EQ(Luau("let x = a ?? b"), std::string("local x = (if a  ~= nil then a else  b)"));
+	CHECK_EQ(Luau("let x = a?.b.c"), std::string("local x = (if a == nil then nil else a.b.c)"));
+	CHECK_EQ(Luau("a?:close()"), std::string("if a ~= nil then a:close() end"));
+	CHECK_EQ(Luau("x ??= 1"), std::string("if x  == nil then x = 1 end"));
+	const std::string called = Luau("let x = f() ?? 0\nlet y = g()?.z\n");
+	CHECK(called.find("(__cluau_or(f() ,  0) :: typeof(assert(f())) | typeof(0))") != std::string::npos);
+	CHECK(called.find("__cluau_chain(g(), function(__cluau_v: typeof(assert(g()))) return __cluau_v.z end)") != std::string::npos);
+	// The helpers are defined on the first line; every line stays on its line.
+	CHECK_EQ(Lines(called), 2);
+	CHECK(called.rfind("local function __cluau_chain", 0) == 0 || called.rfind("local function __cluau_or", 0) == 0);
+	CHECK_EQ(Lines(Luau("let x = f()\n\t?? g()\n\t?? 3\n")), 3);
+	CHECK(HasError(cluau::Translate("a?.b = 1"), "cannot be assigned to"));
+	CHECK(HasError(cluau::Translate("let x = ?? 1"), "?? goes between two values"));
+	CHECK(HasError(cluau::Translate("f(x) ??= 1"), "??= is a statement"));
+	// A type's `?` is not a chain.
+	CHECK(!cluau::Translate("let x: string? = nil\nfunction f(a: number?): {string}? { return nil }\n").HasErrors());
+}
+
+TEST("parameters: a default makes the parameter optional and is given at the body's start")
+{
+	CHECK_EQ(Luau("function f(a: number, b: number = 2) { return a + b }"),
+		std::string("function f(a: number, b: number?  )  local b: number = if b == nil then 2 else b; return a + b end"));
+	CHECK_EQ(Luau("function f(n = 1, s = \"x\", u: A | B = g()) { }"),
+		std::string("function f(n: number?  , s: string?  , u: (A | B)?  )  local n: number = if n == nil then 1 else n; local s: string = if "
+					"s == nil then \"x\" else s; local u: A | B = if u == nil then g() else u; end"));
+	CHECK(HasError(cluau::Translate("function f(a = 1,\n\tb = (\n2)) { }"), "written on one line"));
+	CHECK(HasError(cluau::Translate("function f(... = 1) { }"), "... has no default"));
+}
+
+TEST("generators: function* returns an iterator, and yield hands it a value")
+{
+	const std::string luau = Luau("function* f(n: number): number {\n\tyield n\n}\n");
+	CHECK(luau.find("function f(n: number): () -> number?  return __cluau_generator(function(__cluau_yield: (number) -> ())\n\t__cluau_yield( n)\nend) end") !=
+		std::string::npos);
+	CHECK(Luau("function* f(): (string, number) { }").find("(): () -> (string?, number)   return __cluau_generator(function(__cluau_yield: (string, number) -> ()) end) end") != std::string::npos);
+	CHECK(HasError(cluau::Translate("function* f() { return 1 }"), "a generator returns no value"));
+	CHECK(HasError(cluau::Translate("function* f() {\n\tyield\n}"), "yield gives a value"));
+	// Outside a generator, yield is a name.
+	CHECK_EQ(Luau("yield(1)"), std::string("yield(1)"));
+	CHECK_EQ(Luau("function f() { yield(1) }"), std::string("function f()  yield(1) end"));
+}
+
+TEST("destructuring: fields by name and items in order, a value read once")
+{
+	CHECK_EQ(Luau("const { a, b } = t"), std::string("local  a, b  = t.a, t.b"));
+	CHECK_EQ(Luau("let [x, y] = p.list"), std::string("local x, y = p.list[1], p.list[2]"));
+	CHECK_EQ(Luau("const { a } = f()"), std::string("local  a  = (function(__cluau_t: typeof(f())) return __cluau_t.a end)( f())"));
+	const cluau::TranslateResult r = cluau::Translate("const { a, b } = t\n");
+	CHECK_EQ(r.ConstNames.size(), (size_t)2);
+	CHECK(HasError(cluau::Translate("const { a: b } = t"), "destructuring takes names"));
+	CHECK(HasError(cluau::Translate("const [a] = x, y"), "one value"));
+	CHECK(HasError(cluau::Translate("const { a }"), "it needs its value after ="));
+}
+
+TEST("switch: an if chain over the value, which a name is compared as")
+{
+	CHECK_EQ(Luau("switch (x) {\ncase 1, 2: f()\ncase 3:\ng()\ndefault: h()\n}"),
+		std::string("do local __cluau_switch0 = (x) \nif x == ( 1) or x == ( 2) then f()\nelseif x == ( 3) then\ng()\nelse h()\nend end"));
+	CHECK(Luau("switch (f()) { case 1: g() }").find("if __cluau_switch0 == ( 1) then g() end end") != std::string::npos);
+	CHECK(HasError(cluau::Translate("for (i = 1, 2) { switch (i) { case 1: break } }"), "a switch needs no break"));
+	CHECK(!cluau::Translate("for (i = 1, 2) { switch (i) { case 1: for (j = 1, 2) { break } } }").HasErrors());
+	CHECK(HasError(cluau::Translate("switch (x) { f() case 1: }"), "a switch holds cases"));
+	CHECK(HasError(cluau::Translate("switch (x) { default: case 1: }"), "default is a switch's last clause"));
+	CHECK(HasError(cluau::Translate("switch (x) { case 1 }"), "a case is values and a colon"));
+	// Elsewhere, switch, case and default are names.
+	CHECK_EQ(Luau("local case, default = 1, 2"), std::string("local case, default = 1, 2"));
+	CHECK_EQ(Formatted("switch (x) {\ncase 1:\nf()\ndefault:\ng()\n}\n"), std::string("switch (x) {\n\tcase 1:\n\t\tf()\n\tdefault:\n\t\tg()\n}\n"));
+}

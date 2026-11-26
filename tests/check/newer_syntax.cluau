@@ -1,0 +1,15 @@
+// Type errors in defaults, generators, ?? and ?., destructuring and switch
+// (each line is one).
+type Point = { x: number, y: number }
+function Move(p: Point, by: number = 1): Point { return { x = p.x + by, y = p.y } }
+function* Ints(): number { yield 1 }
+function Maybe(): Point? { return nil }
+
+Move({ x = 1, y = 2 }, "far")
+function* Words(): string { yield 1 }
+const n: string = Maybe()?.x ?? 0
+const s: number = Maybe()?.x
+const { x, y } = Maybe()
+for (i in Ints()) { const t: string = i }
+function Bad(label: string = 3) {}
+switch (Maybe()) { case 1: print(x, y, n, s) }

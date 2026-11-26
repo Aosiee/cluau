@@ -1,0 +1,66 @@
+// ?? (the left side unless it is nil), ??= (assign when nil) and optional
+// chains (?. ?[ ?:): nil when what they step from is, read once when that
+// is not a name.
+type User = { name: string, friend: User?, tags: { string }?, greet: (self: User, greeting: string) -> string }
+
+let calls = 0
+function Greet(self: User, greeting: string): string {
+	return `{greeting}, {self.name}`
+}
+function Find(id: number): User? {
+	calls += 1
+	if (id == 1) {
+		return { name = "ann", friend = { name = "bo", friend = nil, tags = nil, greet = Greet }, tags = { "a", "b" }, greet = Greet }
+	}
+	return nil
+}
+
+const ann = Find(1)
+const nobody = Find(2)
+print(ann?.name, nobody?.name, ann?.friend?.name, ann?.friend?.friend?.name)
+print(ann?.tags?[2], ann?.friend?.tags?[1], ann?:greet("hi"), nobody?:greet("hi"))
+
+// What a chain steps from is evaluated once.
+calls = 0
+print(Find(1)?.friend?.name, Find(2)?.name, Find(1)?:greet("yo"), calls)
+
+// ?? takes the right side only for nil (false stays), and evaluates it
+// only then.
+let evaluated = 0
+function Fallback(): string {
+	evaluated += 1
+	return "fallback"
+}
+const named: string = nobody?.name ?? Fallback()
+const kept: string = ann?.name ?? Fallback()
+print(named, kept, evaluated, false ?? true, nil ?? nil ?? 3)
+calls = 0
+const found: string = Find(2)?.name ?? Find(1)?.name ?? "none"
+print(found, calls)
+
+// ?? binds more loosely than any other operator.
+const count: number? = nil
+print(count ?? 1 + 2, (count ?? 1) + 2, `{nobody?.name ?? "anonymous"}`, #(if (ann != nil) ann.tags ?? {} else {}))
+
+// ??= assigns only a nil.
+let total: number? = nil
+total ??= 10
+total ??= 20
+const box: { value: number? } = { value = nil }
+box.value ??= total ?? 0
+print(total, box.value)
+
+// A chain as a statement calls only when there is something to call.
+type Logger = { add: (self: Logger, text: string) -> () }
+const log: { string } = {}
+const logger: Logger? = { add = function(self: Logger, text: string) { table.insert(log, text) } }
+const none: Logger? = nil
+logger?:add("one")
+none?:add("two")
+print(#log, log[1])
+
+// A multi-line expression.
+const label = nobody?.name
+	?? ann?.friend?.name
+	?? "unknown"
+print(label)

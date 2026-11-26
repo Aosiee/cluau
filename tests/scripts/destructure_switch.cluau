@@ -1,0 +1,71 @@
+// Destructuring declarations, and switch statements.
+
+// Fields by name, items in order; a value that is not a name is read once.
+const point = { x = 3, y = 4, label = "p" }
+const { x, y } = point
+let [first, second, third] = { "a", "b" }
+let reads = 0
+function Make(): { name: string, size: number } {
+	reads += 1
+	return { name = "box", size = 2 }
+}
+const { name, size } = Make()
+const [one, two] = { 10 ?? 0, 20 }
+print(x, y, first, second, third, name, size, reads, one, two)
+first = "changed"
+print(first)
+
+// A switch compares its value with == (once), runs the first case that
+// matches and no other, and default when none does.
+type Shape = "circle" | "square" | "line"
+function Area(kind: Shape, side: number): number {
+	switch (kind) {
+		case "circle":
+			return math.floor(math.pi * side * side)
+		case "square": return side * side
+		default:
+			return 0
+	}
+}
+print(Area("circle", 2), Area("square", 3), Area("line", 4))
+
+let evaluated = 0
+function Roll(n: number): number {
+	evaluated += 1
+	return n % 4
+}
+function Describe(n: number): string {
+	switch (Roll(n)) {
+		case 0: return "zero"
+		case 1, 2:
+			if (n > 5) {
+				return "big"
+			}
+			return "small"
+	}
+	return "other"
+}
+print(Describe(4), Describe(1), Describe(6), Describe(3), evaluated)
+
+// continue goes on with the loop around a switch.
+const seen: { number } = {}
+for (i = 1, 6) {
+	switch (i % 3) {
+		case 0:
+			continue
+		case 1: table.insert(seen, i * 10)
+		default: table.insert(seen, i)
+	}
+}
+print(table.concat(seen, " "))
+
+// Cases may hold any expression; a switch may be empty or only a default.
+const limit = 2
+switch (limit + 1) {
+	case limit, limit * 2: print("no")
+	case limit + 1: print("yes")
+}
+switch (1) {
+	default: print("only default")
+}
+switch (name) {}

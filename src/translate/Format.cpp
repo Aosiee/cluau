@@ -29,7 +29,7 @@ namespace cluau {
 			if (t.Kind != TokenKind::Op)
 				return false;
 			static constexpr const char* kOps[] = { "=", "+", "-", "*", "/", "%", "^", "..", "==", "!=", "~=", "<", "<=", ">", ">=", "&&",
-				"||", "~/", "+=", "-=", "*=", "/=", "%=", "^=", "..=", "~/=", "->", "|", "&" };
+				"||", "~/", "+=", "-=", "*=", "/=", "%=", "^=", "..=", "~/=", "->", "|", "&", "??", "??=" };
 			for (const char* op : kOps)
 				if (t.Text == op)
 					return true;
@@ -45,7 +45,7 @@ namespace cluau {
 				return t.Is("and") || t.Is("or");
 			if (t.Kind != TokenKind::Op)
 				return false;
-			static constexpr const char* kOps[] = { ".", ":", "..", "+", "*", "/", "%", "^", "==", "!=", "~=", "<=", ">=", "&&", "||", "~/" };
+			static constexpr const char* kOps[] = { ".", ":", "..", "+", "*", "/", "%", "^", "==", "!=", "~=", "<=", ">=", "&&", "||", "~/", "??" };
 			for (const char* op : kOps)
 				if (t.Text == op)
 					return true;
@@ -161,6 +161,8 @@ namespace cluau {
 		{
 			int LineLevel = 0; // the level of the line it opened on
 			size_t Line = 0;
+			bool Switch = false; // a switch's block: its cases' statements are one level in
+			bool InCase = false; // a case or default has begun
 		};
 		std::vector<Open> stack;
 		const Token* previousLast = nullptr; // the last code token of the line before
@@ -190,6 +192,13 @@ namespace cluau {
 				{
 					const Token* lead = toks.empty() ? nullptr : toks.front();
 					int level = stack.empty() ? 0 : stack.back().LineLevel + 1;
+					// A switch's `case x:` and `default:` lines, and the statements
+					// under each one level further in.
+					const bool clause = lead && (lead->Is("case") || lead->Is("default"));
+					if (!stack.empty() && stack.back().Switch && clause)
+						stack.back().InCase = true;
+					else if (!stack.empty() && stack.back().Switch && stack.back().InCase && lead && !IsCloser(*lead))
+						level += 1;
 					if (lead && IsCloser(*lead) && !stack.empty())
 						level = stack.back().LineLevel;
 					// A continued statement: one level more, unless a bracket the
@@ -225,7 +234,18 @@ namespace cluau {
 				if (t->IsComment())
 					continue;
 				if (IsOpener(*t))
-					stack.push_back({ lineLevel, l });
+				{
+					// A `{` ending a line that starts with `switch`.
+					const Token* first = nullptr;
+					const Token* last = nullptr;
+					for (const Token* c : toks)
+						if (!c->IsComment())
+						{
+							first = first ? first : c;
+							last = c;
+						}
+					stack.push_back({ lineLevel, l, t->Is("{") && first->Is("switch") && t == last, false });
+				}
 				else if (IsCloser(*t) && !stack.empty())
 					stack.pop_back();
 				previousLast = t;

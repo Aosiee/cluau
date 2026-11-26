@@ -6,7 +6,8 @@
 [![Release](https://img.shields.io/github/v/release/Aosiee/cluau)](https://github.com/Aosiee/cluau/releases/latest)
 
 **C-syntax-flavoured Luau.** cluau is a Luau dialect: braces, C operators,
-`let` / `const`, classes, `try` / `catch` and enums, translated to standard
+`let` / `const`, classes, `try` / `catch`, enums, `switch`, generators,
+`??` and optional chains, translated to standard
 Luau before Luau's type checker and compiler run. Luau's types, semantics,
 VM and libraries are unchanged, and every translated line stays on its
 line, so Luau's error messages and line-based debuggers point at the
@@ -130,8 +131,8 @@ Each release also has Debian and RPM packages for Linux, which install
 `/usr/bin/cluau` for every user:
 
 ```sh
-sudo apt install ./cluau_0.29.1_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
-sudo dnf install --nogpgcheck ./cluau-0.29.1-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
+sudo apt install ./cluau_0.30.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
+sudo dnf install --nogpgcheck ./cluau-0.30.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
 ```
 
 The packages are not signed yet (`--nogpgcheck` lets dnf install one); the

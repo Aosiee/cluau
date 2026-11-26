@@ -1,7 +1,7 @@
 #pragma once
 
 // cluau's lexer: Luau's tokens with cluau's comments (`//`, `/* */`) and
-// operators (`!=`, `&&`, `||`, `!`, `~/`, `++`, `--`). Every token keeps its
+// operators (`!=`, `&&`, `||`, `!`, `~/`, `++`, `--`, `??`). Every token keeps its
 // byte span and its start / end line and column, so the translator can copy
 // the text between tokens verbatim (which keeps the lines).
 

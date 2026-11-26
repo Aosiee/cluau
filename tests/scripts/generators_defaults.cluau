@@ -1,0 +1,100 @@
+// Parameters with defaults, and generators (function*, yield).
+
+// A default is used for a missing or nil argument, evaluated at each call,
+// and may use the parameters before it.
+let made = 0
+function Fresh(): { number } {
+	made += 1
+	return {}
+}
+function Greet(name: string, greeting: string = "Hello", times = 1, mark: string | number = "!"): string {
+	local parts: { string } = {}
+	for (i = 1, times) {
+		table.insert(parts, `{greeting}, {name}{mark}`)
+	}
+	return table.concat(parts, " ")
+}
+function Span(from: number, to: number = from + 10, list: { number } = Fresh()): string {
+	return `{from}-{to} {#list}`
+}
+print(Greet("ann"), Greet("bo", "Hi", 2), Greet("cy", nil, 1, 3))
+print(Span(1), Span(1, 2), Span(5, nil, { 1, 2 }), made)
+const Scale = function(x: number, by = 2, offset: number = -1): number {
+	return x * by + offset
+}
+print(Scale(3), Scale(3, 10), Scale(3, 10, 0))
+
+// A generator's body runs as the loop asks for its values: what it yields
+// is what each step of the loop gets, and its type is what it declares.
+function* Count(from: number, to: number, step = 1): number {
+	for (i = from, to, step) {
+		yield i
+	}
+}
+const counted: { number } = {}
+for (n in Count(1, 9, 3)) {
+	table.insert(counted, n)
+}
+print(table.concat(counted, " "))
+
+function* Pairs(t: { [string]: number }): (string, number) {
+	const keys: { string } = {}
+	for (k in t) {
+		table.insert(keys, k)
+	}
+	table.sort(keys)
+	for (_, k in keys) {
+		yield k, t[k]
+	}
+}
+for (k, v in Pairs({ b = 2, a = 1 })) {
+	print(k, v)
+}
+
+// Lazily: only as far as the loop goes, and an early return ends it.
+let produced = 0
+function* Naturals(): number {
+	let n = 0
+	while (true) {
+		n += 1
+		produced += 1
+		if (n > 1000) {
+			return
+		}
+		yield n
+	}
+}
+for (n in Naturals()) {
+	if (n == 3) {
+		break
+	}
+}
+print("produced", produced)
+
+// A generator method; yield inside try and switch.
+class Bag {
+	Items: { string } = {}
+	function Init(...: string) {
+		self.Items = { ... }
+	}
+	function* each(prefix: string = ""): string {
+		for (_, item in self.Items) {
+			try {
+				switch (item) {
+					case "skip": continue
+					default: yield prefix .. item
+				}
+			} catch (e) {
+				print("failed", e)
+			}
+		}
+	}
+}
+const bag = Bag("x", "skip", "y")
+for (item in bag:each("- ")) {
+	print(item)
+}
+
+// Called step by step: nil once it is done.
+const next = Count(1, 2)
+print(next(), next(), next())

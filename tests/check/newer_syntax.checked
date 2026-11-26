@@ -1,0 +1,19 @@
+newer_syntax.cluau:8:24: Expected this to be 'number?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be 'number', but got 'string'
+newer_syntax.cluau:9:35: Expected this to be 'string', but got 'number'
+newer_syntax.cluau:10:1: Expected this to be 'string', but got 'number | number'
+caused by:
+  Not all union options are compatible.
+Expected this to be 'string', but got 'number'
+newer_syntax.cluau:11:1: Expected this to be 'number', but got 'number?'
+newer_syntax.cluau:12:17: Value of type 'Point?' could be nil
+newer_syntax.cluau:13:21: Expected this to be 'string', but got 'number'
+newer_syntax.cluau:14:34: Expected this to be 'string', but got 'number | string'
+caused by:
+  Not all union options are compatible.
+Expected this to be 'string', but got 'number'
+newer_syntax.cluau:15:23: Type Point? cannot be compared with number
+cluau check: 8 error(s), 0 warning(s)
+exit: 1

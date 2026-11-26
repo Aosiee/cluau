@@ -181,6 +181,13 @@ const cases = [
 	["let s = \"line one \\\nline two\"\nlet after = 1", "line two", 1, "string.quoted.double.cluau"],
 	["let s = \"line one \\\nline two\"\nlet after = 1", "let", 2, "storage.type.cluau"],
 	["let s = \"unterminated\nlet after = 1", "let", 1, "storage.type.cluau"],
+	["let n = a?.b ?? 0", "??", 0, "keyword.operator.nil.cluau"],
+	["let n = a?.b ?? 0", "?", 0, "keyword.operator.optional.cluau"],
+	["x ??= 1", "??=", 0, "keyword.operator.assignment.compound.cluau"],
+	["switch (x) { case 1: default: }", "case", 0, "keyword.control.cluau"],
+	["function* count(n: number): number { yield n }", "count", 0, "entity.name.function.cluau"],
+	["function* count(n: number): number { yield n }", "yield", 0, "keyword.control.cluau"],
+	["function count(n: number) { }", "count", 0, "entity.name.function.cluau"],
 ];
 
 let failures = 0;
