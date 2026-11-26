@@ -76,6 +76,12 @@ Language and tools:
   for and its failure reported against that case.
 - `cluau profile` gives a blocking call's time to the line that made it
   and names task and coroutine bodies.
+- `cluau check` types `for (k, v in SomeClass)` over a class the file
+  declares; a class field typed by a string continued onto the next line
+  no longer shifts the lines after it; `cluau fmt` is idempotent on a
+  carriage return inside a line.
+- The standard modules written in cluau pass `cluau check` themselves,
+  and the tests keep them so.
 
 Language server and debugger:
 - Opening a table holding a list of more than six items no longer ends
@@ -89,6 +95,10 @@ Language server and debugger:
   last line with code.
 - Every debugger message is valid UTF-8 JSON; expressions see a local
   holding nil over a global of the same name.
+- Stepping and breakpoints in `try`, `catch` and `finally` land on the
+  script's own lines: a breakpoint on `} catch (e) {` pauses in the catch
+  block when it catches.
+- The JSON the editor servers read follows RFC 8259.
 - The language server's strict-typing diagnostics have stable ranges;
   `require` paths are completed; hover works on a declaration's own name.
 
@@ -103,7 +113,12 @@ Runtime and standard library:
   script waiting on standard input in a task exits at once; programs a
   script started are killed when it is interrupted; `cluau x | head -1`
   stops at the closed pipe; a cancelled task's pending child or stdin read
-  no longer swallows a line.
+  no longer swallows a line. A run that a Ctrl-C ends also ends the
+  programs it started that nothing was waiting on.
+- A cancelled task's socket read gives back what it had read, and a
+  connection accepted for a cancelled `accept` goes to the next one.
+- Output that cannot be written at exit (a full disk, a closed pipe) is
+  an error: cluau says so on stderr and exits 1 instead of 0.
 - `db:transaction` rolls back and raises when its commit fails (later
   writes were lost); `db:close()` finalizes statements and ends an open
   transaction.
