@@ -101,7 +101,7 @@
 				"cluau.path": {
 					"type": "string",
 					"default": "cluau",
-					"markdownDescription": "The `cluau` program: a path, or a name found on `PATH` (0.17.0 or later)."
+					"markdownDescription": "The `cluau` program: a path (a relative one, or one with `${workspaceFolder}`, from the workspace folder), or a name found on `PATH` (0.17.0 or later)."
 				},
 				"cluau.modules": {
 					"type": "object",

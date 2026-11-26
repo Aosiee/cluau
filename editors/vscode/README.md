@@ -9,8 +9,9 @@ files:
 - the checker's errors and warnings as you type (`cluau check`: Luau's type
   checker in strict mode and cluau's strict rules), for the file and the
   modules it requires;
-- completion of names, members, methods and the standard modules
-  (`@std/fs`, `@std/json`, ...), with their types;
+- completion of names, members, methods and the standard modules'
+  members (`fs.read`, `json.encode`, ...), with their types, and of the
+  paths in `require("...")` (`@std/fs`, `./helper`);
 - hover (a name's type and the comment above its declaration) and signature
   help in calls;
 - go to definition (locals, functions, class members across modules, and
@@ -26,8 +27,8 @@ files:
   log messages, pausing on errors, stepping, the paused frames' variables,
   and expressions evaluated in them; F5 debugs the current file (a
   `*_test.cluau` file's test cases);
-- **cluau: Run File**, which runs the file in a terminal, and **cluau:
-  Debug File**.
+- **cluau: Run File**, which runs the file in a terminal of its own (in the
+  file's directory), and **cluau: Debug File**.
 
 ## Requirements
 
@@ -46,8 +47,8 @@ irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
 
 | setting | is |
 |---|---|
-| `cluau.path` | the `cluau` program, when it is not on `PATH` |
-| `cluau.modules` | a host's modules, typed from files: `{ "@game/world": "types/world.luau" }` (as `cluau check --module`) |
+| `cluau.path` | the `cluau` program, when it is not on `PATH` (a relative path is the workspace folder's, for the language server, the debugger and Run File alike) |
+| `cluau.modules` | a host's modules, typed from files: `{ "@game/world": "types/world.luau" }` (as `cluau check --module`; paths are the workspace folder's, and a file that cannot be read is left out) |
 | `cluau.trace.server` | logs the messages to and from the language server |
 
 Bare `require` names are looked for as `cluau` looks for them: the script's

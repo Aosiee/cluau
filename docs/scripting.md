@@ -288,9 +288,12 @@ reported and left alone.
 `cluau lsp` is a language server: an editor starts it and gets, for each
 open `.cluau` file, what `cluau check` reports for it as you type (checked
 with the modules it requires as the editor has them, or as they are on
-disk; a required module's own problems show once it is open), completion with the types of names, members
-and the standard modules, hover (a name's type and the comment above its
-declaration), signature help, go to definition (locals, functions, class
+disk; a required module's own problems show once it is open), completion
+with the types of names, members and the standard modules' members, and
+of the paths in `require("...")` (the standard modules, and the modules
+and directories beside the script for `./` and `../`), hover (a name's
+type and the comment above its declaration, at a use or at the
+declaration itself), signature help, go to definition (locals, functions, class
 members in other modules, `require` paths), references and renaming
 (a local's in its file; a class member's or a module's exported name's in
 every file of the workspace that uses it), the outline of classes,
@@ -302,13 +305,18 @@ calls), quick fixes (a misspelt name's likely names, the `require` of a
 standard module used without one, a line's `allow-any` exemption), and
 formatting (`cluau fmt`). It finds modules as `cluau` does, and takes the
 same `--module <name>=<file>` options as `cluau check` for a host's
-modules.
+modules (a file it cannot read is said on standard error, and the server
+starts without that module). A file the editor opens with the `cluau`
+language is a cluau script whatever its name (a script without an
+extension that starts with a `#!` line naming cluau).
 
 The VS Code extension (in `editors/vscode`; on the VS Code Marketplace and
 Open VSX as *cluau*, and as a `.vsix` with each release) starts it, and
 adds highlighting, the debugger (see [Debugging](#debugging)) and *Run
 File* and *Debug File* commands. It needs `cluau` on `PATH` (or the
-`cluau.path` setting).
+`cluau.path` setting; a relative path there, and in `cluau.modules`, is
+the workspace folder's). *Run File* runs `cluau` on the file in a terminal
+of its own, in the file's directory.
 
 Another editor runs `cluau lsp` on standard input and output for the
 `cluau` file type. In Neovim (0.11 or later):
@@ -358,26 +366,41 @@ What it does:
   a cluau expression (`count > 10 && name != "x"`); a hit count pauses from
   that hit on (`5`), or at `== 5`, `> 5`, `< 5`, `<= 5`, or every fifth hit
   (`% 5`); a log message prints instead of pausing, with each
-  `{expression}` replaced by its value. A breakpoint on a line without code
-  moves to the next line that has some; one past the file's last line is
-  not verified.
+  `{expression}` replaced by its value. Each breakpoint on a line counts
+  its hits and logs, and a pause names every one that paused there. A
+  breakpoint is verified once the script loads its file (until then the
+  editor shows it unverified); on a blank or comment line it moves to the
+  next line with code, and on a line that only closes a block (`}`) to the
+  block's last line with code, so that one on a loop's closing brace
+  pauses on each pass. One past the file's last line, one with no code at
+  or after it, and one whose condition or hit count does not compile (a
+  hit count is at most 2147483647) are not verified, with the reason.
 - Pausing on an error that ends the script (on by default), or on every
   error, including those a `try` or `coroutine.resume` catches (*All
-  Errors*).
+  Errors*; not the errors a standard module raises and catches within
+  itself, such as a server's read that times out). An error that ends a
+  `@std/task` task pauses in the task, with its frames.
 - Stepping over, into and out of calls, including into a module's top
   level from its `require`, and into and out of coroutines: a step into
   `coroutine.resume` (or a function `coroutine.wrap` made) stops in the
   coroutine, and a step that leaves it, at a yield or its end, stops where
-  it was resumed. Pausing a running script, and ending it (*Stop*: it ends
-  as asked, not as a failure).
+  it was resumed. A step over `task.wait` (or a blocking call) in a task
+  stops at the task's next line once it runs again. Pausing a running
+  script, and ending it (*Stop*: it ends as asked, not as a failure).
+  `process.exit` ends the script with its status, and the session goes on
+  to the editor's end of it.
 - Breakpoints, pauses and *Stop* take effect while the script waits in
-  `task.wait` or in a blocking call made with `@std/task` loaded; a pause
-  then stops at the next line that runs.
+  `task.wait` or in a blocking call (`process.sleep`, `process.run`, a
+  socket's read, a download), with or without `@std/task`; a pause then
+  stops at the next line that runs.
 - The paused stack: each frame's locals and upvalues, with tables and class
-  instances opened field by field (an instance shows its class), and
+  instances opened field by field (an instance shows its class; a table of
+  more than 500 entries shows the first 500 and how many more), and
   expressions (the watch list, hovers, the debug console) evaluated in the
-  selected frame. They read the script's variables; an assignment there
-  changes nothing in the script.
+  selected frame, with its locals, upvalues and `...`. An expression
+  cannot assign the frame's locals, but it runs for real: a function it
+  calls can change the tables the script holds. One that runs longer than
+  two seconds (a loop, a slow `__tostring`) is stopped with an error.
 - The script's output, and that of the programs it runs, in the debug
   console. Its standard input is empty.
 

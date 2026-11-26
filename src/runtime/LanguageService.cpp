@@ -2,6 +2,7 @@
 
 #include "cluau/format.h"
 #include "Resolve.h"
+#include "Std.h"
 
 #include "Luau/AstQuery.h"
 #include "Luau/Autocomplete.h"
@@ -50,6 +51,64 @@ namespace cluau::runtime::detail {
 		}
 
 		// Luau's block words, which cluau does not use.
+		// The standard modules this runtime has (as `require("@std/...")`
+		// finds them): "fs", "json", ...
+		const std::vector<std::string>& StdModuleNames()
+		{
+			static const std::vector<std::string> names = [] {
+				std::vector<std::string> out;
+				const std::string all = detail::StdNames();
+				for (size_t at = 0; (at = all.find("@std/", at)) != std::string::npos;)
+				{
+					at += 5;
+					const size_t end = all.find(',', at);
+					out.push_back(all.substr(at, end == std::string::npos ? std::string::npos : end - at));
+				}
+				return out;
+			}();
+			return names;
+		}
+
+		// The word before `col` on the line ("" for none): `class` in `class Point`.
+		std::string WordBefore(const std::string& line, int col)
+		{
+			int end = std::min(col, (int)line.size());
+			while (end > 0 && std::isspace((unsigned char)line[(size_t)end - 1]))
+				end--;
+			int begin = end;
+			while (begin > 0 && (std::isalnum((unsigned char)line[(size_t)begin - 1]) || line[(size_t)begin - 1] == '_'))
+				begin--;
+			return line.substr((size_t)begin, (size_t)(end - begin));
+		}
+
+		// Inside `require("...` on the line, before `col`: where the path's text begins (-1 otherwise).
+		int RequirePathAt(const std::string& line, int col)
+		{
+			col = std::min(col, (int)line.size());
+			for (int i = col - 1; i >= 0; i--)
+			{
+				const char c = line[(size_t)i];
+				if (c == '"' || c == '\'')
+				{
+					int j = i - 1;
+					while (j >= 0 && std::isspace((unsigned char)line[(size_t)j]))
+						j--;
+					if (j < 0 || line[(size_t)j] != '(')
+						return -1;
+					j--;
+					while (j >= 0 && std::isspace((unsigned char)line[(size_t)j]))
+						j--;
+					const int end = j + 1;
+					while (j >= 0 && (std::isalnum((unsigned char)line[(size_t)j]) || line[(size_t)j] == '_'))
+						j--;
+					return line.compare((size_t)(j + 1), (size_t)(end - j - 1), "require") == 0 && end - j - 1 == 7 ? i + 1 : -1;
+				}
+				if (c == '(' || c == ')')
+					return -1;
+			}
+			return -1;
+		}
+
 		bool IsLuauOnlyKeyword(const std::string& word)
 		{
 			return word == "then" || word == "end" || word == "elseif" || word == "repeat" || word == "until" || word == "local";
@@ -317,6 +376,43 @@ namespace cluau::runtime::detail {
 		list.ReplaceFrom = start;
 		const bool cluau = IsCluauPath(name);
 
+		// The path in `require("...")`: the standard modules, and the
+		// modules and directories beside the script (./name, ../name).
+		if (const int from = RequirePathAt(lineText, col); from >= 0)
+		{
+			const std::string typed = lineText.substr((size_t)from, (size_t)(col - from));
+			list.ReplaceFrom = from;
+			for (const std::string& module : StdModuleNames())
+				if (("@std/" + module).rfind(typed, 0) == 0)
+					list.Items.push_back({ "@std/" + module, CompletionKind::Module, {}, {}, false });
+			if (typed.rfind("./", 0) == 0 || typed.rfind("../", 0) == 0)
+			{
+				const size_t slash = typed.rfind('/');
+				const std::string folder = typed.substr(0, slash + 1);
+				std::error_code ec;
+				const fs::path dir = fs::u8path(path).parent_path() / fs::u8path(folder);
+				std::vector<std::string> found;
+				for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+				{
+					const fs::path& entry = it->path();
+					const std::string file = PathText(entry.filename());
+					if (file.empty() || file[0] == '.')
+						continue;
+					const std::string ext = PathText(entry.extension());
+					std::error_code typeError;
+					if (it->is_directory(typeError))
+						found.push_back(folder + file + "/");
+					else if ((ext == ".cluau" || ext == ".luau") && entry != fs::u8path(path))
+						found.push_back(folder + PathText(entry.stem()));
+				}
+				std::sort(found.begin(), found.end());
+				for (const std::string& candidate : found)
+					if (candidate.rfind(typed, 0) == 0)
+						list.Items.push_back({ candidate, CompletionKind::Module, {}, {}, false });
+			}
+			return list;
+		}
+
 		Luau::AutocompleteResult result = Luau::autocomplete(m_Analysis.Frontend(), name, In(name, line, col),
 			[](std::string, std::optional<const Luau::ExternType*>, std::optional<std::string>) -> std::optional<Luau::AutocompleteEntryMap> {
 				return std::nullopt;
@@ -411,6 +507,86 @@ namespace cluau::runtime::detail {
 		};
 
 		HoverInfo info;
+		// A declaration's name shows what a use of it shows: a class, its
+		// methods and fields (as the class declares them), a function's
+		// name, a local's, a parameter's.
+		if (const TranslateResult* t = m_Analysis.Translation(name))
+		{
+			auto on = [&](const Range& r) { return r.Begin.Line == line && col >= r.Begin.Col && col <= r.End.Col; };
+			for (const ClassInfo& c : t->Classes)
+			{
+				if (on(c.At))
+				{
+					info.Text = classText(name, c.Name).value_or("class " + c.Name);
+					info.Documentation = DocAbove(*text, c.At.Begin.Line);
+					info.At = c.At;
+					return info;
+				}
+				for (const ClassMethod& m : c.Methods)
+					if (on(m.At))
+					{
+						info.Text = c.Name + ":" + m.Name + "(" + m.Params + ")" + (m.ReturnType.empty() ? "" : ": " + m.ReturnType);
+						info.Documentation = DocAbove(*text, m.At.Begin.Line);
+						info.At = m.At;
+						return info;
+					}
+				for (const ClassField& f : c.Fields)
+					if (on(f.At))
+					{
+						info.Text = f.Name + (f.Type.empty() ? "" : ": " + f.Type);
+						info.Documentation = DocAbove(*text, f.At.Begin.Line);
+						info.At = f.At;
+						return info;
+					}
+			}
+		}
+		for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, pos))
+		{
+			auto check = [&](Luau::AstLocal* local) -> bool {
+				if (!local || !local->location.containsClosed(pos))
+					return false;
+				std::optional<Luau::TypeId> type = bindingType(local);
+				info.Text = NameOf(local->name) + (type ? ": " + shown(*type) : "");
+				info.Documentation = DocAbove(*text, declLine(local->location));
+				info.At = Out(name, local->location);
+				return true;
+			};
+			// `function Name(...)`, `function M.Name(...)`: the name and the function's type.
+			if (Luau::AstStatFunction* fn = node->as<Luau::AstStatFunction>())
+			{
+				std::string symbol;
+				Luau::Location at;
+				if (Luau::AstExprGlobal* g = fn->name->as<Luau::AstExprGlobal>(); g && g->location.containsClosed(pos))
+					symbol = NameOf(g->name), at = g->location;
+				else if (Luau::AstExprIndexName* index = fn->name->as<Luau::AstExprIndexName>(); index && index->indexLocation.containsClosed(pos))
+					symbol = NameOf(index->index), at = index->indexLocation;
+				if (!symbol.empty())
+				{
+					const Luau::TypeId* type = module->astTypes.find(fn->func);
+					info.Text = symbol + (type ? ": " + shown(*type) : "");
+					info.Documentation = DocAbove(*text, declLine(at));
+					info.At = Out(name, at);
+					return info;
+				}
+			}
+			if (Luau::AstStatLocal* decl = node->as<Luau::AstStatLocal>())
+				for (Luau::AstLocal* local : decl->vars)
+					if (check(local))
+						return info;
+			if (Luau::AstExprFunction* fn = node->as<Luau::AstExprFunction>())
+				for (Luau::AstLocal* local : fn->args)
+					if (check(local))
+						return info;
+			if (Luau::AstStatLocalFunction* fn = node->as<Luau::AstStatLocalFunction>(); fn && check(fn->name))
+				return info;
+			if (Luau::AstStatFor* loop = node->as<Luau::AstStatFor>(); loop && check(loop->var))
+				return info;
+			if (Luau::AstStatForIn* loop = node->as<Luau::AstStatForIn>())
+				for (Luau::AstLocal* local : loop->vars)
+					if (check(local))
+						return info;
+		}
+
 		if (Luau::AstExpr* expr = Luau::findExprAtPosition(*source, pos))
 		{
 			const Luau::TypeId* type = module->astTypes.find(expr);
@@ -487,42 +663,28 @@ namespace cluau::runtime::detail {
 						}
 					}
 			}
-			else if (expr->is<Luau::AstExprConstantString>() || expr->is<Luau::AstExprConstantNumber>() || expr->is<Luau::AstExprConstantBool>())
+			else if (Luau::AstExprConstantString* key = expr->as<Luau::AstExprConstantString>())
+			{
+				// A field's name in a table (an enum's member): the field and its value's type.
+				for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, pos))
+					if (Luau::AstExprTable* table = node->as<Luau::AstExprTable>())
+						for (const Luau::AstExprTable::Item& item : table->items)
+							if (item.kind == Luau::AstExprTable::Item::Kind::Record && item.key == key)
+							{
+								const Luau::TypeId* value = module->astTypes.find(item.value);
+								info.Text = std::string(key->value.data, key->value.size) + (value ? ": " + shown(*value) : "");
+								info.Documentation = DocAbove(*text, declLine(key->location));
+								return info;
+							}
+				return std::nullopt;
+			}
+			else if (expr->is<Luau::AstExprConstantNumber>() || expr->is<Luau::AstExprConstantBool>())
 				return std::nullopt;
 			else
 				info.Text = shown(*type);
 			return info;
 		}
 
-		// A declaration: a local's or a parameter's own name.
-		for (Luau::AstNode* node : Luau::findAstAncestryOfPosition(*source, pos))
-		{
-			auto check = [&](Luau::AstLocal* local) -> bool {
-				if (!local || !local->location.containsClosed(pos))
-					return false;
-				std::optional<Luau::TypeId> type = bindingType(local);
-				info.Text = NameOf(local->name) + (type ? ": " + shown(*type) : "");
-				info.Documentation = DocAbove(*text, declLine(local->location));
-				info.At = Out(name, local->location);
-				return true;
-			};
-			if (Luau::AstStatLocal* decl = node->as<Luau::AstStatLocal>())
-				for (Luau::AstLocal* local : decl->vars)
-					if (check(local))
-						return info;
-			if (Luau::AstExprFunction* fn = node->as<Luau::AstExprFunction>())
-				for (Luau::AstLocal* local : fn->args)
-					if (check(local))
-						return info;
-			if (Luau::AstStatLocalFunction* fn = node->as<Luau::AstStatLocalFunction>(); fn && check(fn->name))
-				return info;
-			if (Luau::AstStatFor* loop = node->as<Luau::AstStatFor>(); loop && check(loop->var))
-				return info;
-			if (Luau::AstStatForIn* loop = node->as<Luau::AstStatForIn>())
-				for (Luau::AstLocal* local : loop->vars)
-					if (check(local))
-						return info;
-		}
 		return std::nullopt;
 	}
 
@@ -1180,6 +1342,11 @@ namespace cluau::runtime::detail {
 			const Range at = Out(name, var->location);
 			if (at.Begin.Line < fromLine || at.Begin.Line > toLine || !IdentifierAt(*text, at.Begin.Line, at.Begin.Col, symbol))
 				continue;
+			// A class or an enum names itself: the local the translation
+			// declares for it has no hint.
+			const std::string before = WordBefore(LineOf(*text, at.Begin.Line), at.Begin.Col);
+			if (before == "class" || before == "enum")
+				continue;
 			Luau::ScopePtr scope = Luau::findScopeAtPosition(*module, scopeAt);
 			std::optional<Luau::TypeId> type;
 			for (Luau::ScopePtr s = scope; s && !type; s = s->parent)
@@ -1192,7 +1359,7 @@ namespace cluau::runtime::detail {
 				label = *cls;
 			else
 				label = TypeString(*type);
-			if (label.empty() || label.find("error-type") != std::string::npos || label == "any" || label == "nil")
+			if (label.empty() || label.find("error-type") != std::string::npos || label == "any" || label == "unknown" || label == "nil")
 				continue;
 			if (label.size() > 48)
 				label = label.substr(0, 45) + "...";
@@ -1270,8 +1437,6 @@ namespace cluau::runtime::detail {
 			return -1;
 		}
 
-		const char* const kStdModules[] = { "fs", "path", "process", "io", "json", "time", "http", "net", "sqlite", "regex", "task", "crypto", "encoding",
-			"compress", "zip", "args", "csv", "test" };
 
 	} // namespace
 
@@ -1324,7 +1489,7 @@ namespace cluau::runtime::detail {
 			}
 			const Range at{ { d.At.Begin.Line, col }, { d.At.Begin.Line, col + (int)wrong.size() } };
 			if (global)
-				for (const char* module : kStdModules)
+				for (const std::string& module : StdModuleNames())
 					if (wrong == module)
 					{
 						// After the shebang and the requires the file starts with.
@@ -1337,8 +1502,8 @@ namespace cluau::runtime::detail {
 							break;
 						}
 						CodeAction action;
-						action.Title = std::string("Add const ") + module + " = require(\"@std/" + module + "\")";
-						action.Edits[path].push_back({ { { line, 0 }, { line, 0 } }, std::string("const ") + module + " = require(\"@std/" + module + "\")\n" });
+						action.Title = "Add const " + module + " = require(\"@std/" + module + "\")";
+						action.Edits[path].push_back({ { { line, 0 }, { line, 0 } }, "const " + module + " = require(\"@std/" + module + "\")\n" });
 						action.Preferred = true;
 						out.push_back(std::move(action));
 					}

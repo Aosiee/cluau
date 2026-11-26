@@ -49,8 +49,9 @@
 		"strings": {
 			"patterns": [
 				{
+					"comment": "A line that ends in a backslash (or \\z) goes on in the next line.",
 					"begin": "\"",
-					"end": "\"|$",
+					"end": "\"|(?<!\\\\|\\\\\\n|\\\\z|\\\\z\\n)$",
 					"name": "string.quoted.double.cluau",
 					"beginCaptures": { "0": { "name": "punctuation.definition.string.begin.cluau" } },
 					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } },
@@ -58,7 +59,7 @@
 				},
 				{
 					"begin": "'",
-					"end": "'|$",
+					"end": "'|(?<!\\\\|\\\\\\n|\\\\z|\\\\z\\n)$",
 					"name": "string.quoted.single.cluau",
 					"beginCaptures": { "0": { "name": "punctuation.definition.string.begin.cluau" } },
 					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } },
@@ -79,7 +80,7 @@
 							"beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.cluau" } },
 							"endCaptures": { "0": { "name": "punctuation.definition.template-expression.end.cluau" } },
 							"contentName": "source.cluau",
-							"patterns": [{ "include": "$self" }]
+							"patterns": [{ "include": "#braces" }, { "include": "$self" }]
 						}
 					]
 				},
@@ -91,6 +92,14 @@
 					"endCaptures": { "0": { "name": "punctuation.definition.string.end.cluau" } }
 				}
 			]
+		},
+		"braces": {
+			"comment": "A table inside an interpolation: its } does not end the expression.",
+			"begin": "\\{",
+			"end": "\\}",
+			"beginCaptures": { "0": { "name": "punctuation.section.braces.cluau" } },
+			"endCaptures": { "0": { "name": "punctuation.section.braces.cluau" } },
+			"patterns": [{ "include": "#braces" }, { "include": "$self" }]
 		},
 		"declarations": {
 			"patterns": [
@@ -112,12 +121,13 @@
 					}
 				},
 				{
-					"match": "\\b(?:(abstract)\\s+)?(function)\\s+((?:[A-Za-z_]\\w*\\s*[.:]\\s*)*)([A-Za-z_]\\w*)\\s*(?=[<(])",
+					"match": "\\b(?:(abstract)\\s+)?(function)\\s+((?:[A-Za-z_]\\w*\\s*[.:]\\s*)*)([A-Za-z_]\\w*)\\s*(<[^<>()]*>)?\\s*(?=\\()",
 					"captures": {
 						"1": { "name": "storage.modifier.abstract.cluau" },
 						"2": { "name": "storage.type.function.cluau" },
 						"3": { "name": "entity.name.namespace.cluau" },
-						"4": { "name": "entity.name.function.cluau" }
+						"4": { "name": "entity.name.function.cluau" },
+						"5": { "name": "meta.type.parameters.cluau", "patterns": [{ "include": "#type-parameters" }] }
 					}
 				},
 				{
@@ -142,6 +152,13 @@
 						"2": { "name": "variable.other.property.static.cluau" }
 					}
 				}
+			]
+		},
+		"type-parameters": {
+			"patterns": [
+				{ "match": "[A-Za-z_]\\w*", "name": "entity.name.type.parameter.cluau" },
+				{ "match": "[<>]", "name": "punctuation.definition.type-parameters.cluau" },
+				{ "match": ",", "name": "punctuation.separator.cluau" }
 			]
 		},
 		"keywords": {
@@ -226,12 +243,12 @@
 				{ "match": "\\+\\+|--", "name": "keyword.operator.increment.cluau" },
 				{ "match": "&&|\\|\\||!(?!=)", "name": "keyword.operator.logical.cluau" },
 				{ "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.cluau" },
+				{ "match": "->", "name": "keyword.operator.type.function.cluau" },
 				{ "match": "(?:\\+|-|\\*|/|~/|%|\\^|\\.\\.)=", "name": "keyword.operator.assignment.compound.cluau" },
 				{ "match": "=", "name": "keyword.operator.assignment.cluau" },
 				{ "match": "~/|\\+|-|\\*|/|%|\\^", "name": "keyword.operator.arithmetic.cluau" },
 				{ "match": "\\.\\.", "name": "keyword.operator.concatenation.cluau" },
 				{ "match": "#", "name": "keyword.operator.length.cluau" },
-				{ "match": "->", "name": "keyword.operator.type.function.cluau" },
 				{ "match": "[|&?]", "name": "keyword.operator.type.cluau" }
 			]
 		},

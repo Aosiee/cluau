@@ -44,17 +44,37 @@ function tokenize(text) {
 			for (let g = 1; g < m.indices.length; g++) {
 				const range = m.indices[g];
 				if (!range || !captures[g]) continue;
-				parts.push({ from: range[0], to: range[1], scope: captures[g].name });
+				parts.push({ from: range[0], to: range[1], scope: captures[g].name, patterns: captures[g].patterns });
 			}
 		parts.sort((a, b) => a.from - b.from);
 		const whole = captures && captures[0] ? [...base, captures[0].name] : base;
 		for (const part of parts) {
 			if (part.from < at) continue;
 			emit(line, m.input.slice(at, part.from), whole);
-			emit(line, m.input.slice(part.from, part.to), [...whole, part.scope]);
+			if (part.patterns) emitWithin(line, m.input.slice(part.from, part.to), [...whole, part.scope], expand(part.patterns));
+			else emit(line, m.input.slice(part.from, part.to), [...whole, part.scope]);
 			at = part.to;
 		}
 		emit(line, m.input.slice(at, m.index + m[0].length), whole);
+	};
+	// A capture's own patterns (match rules) over its text.
+	const emitWithin = (line, text, scopes, patterns) => {
+		let at = 0;
+		while (at < text.length) {
+			let best = null;
+			for (const rule of patterns) {
+				if (!rule.match) continue;
+				const re = rule.re || (rule.re = compile(rule.match));
+				re.lastIndex = at;
+				const m = re.exec(text);
+				if (m && m[0].length && (!best || m.index < best.m.index)) best = { m, rule };
+			}
+			if (!best) break;
+			emit(line, text.slice(at, best.m.index), scopes);
+			emit(line, best.m[0], [...scopes, best.rule.name]);
+			at = best.m.index + best.m[0].length;
+		}
+		emit(line, text.slice(at), scopes);
 	};
 	text.split("\n").forEach((lineText, lineNo) => {
 		let pos = 0;
@@ -151,6 +171,16 @@ const cases = [
 	["let v = if (ok) nil else true", "nil", 0, "constant.language.nil.cluau"],
 	["let t = math.floor(x)", "math", 0, "support.constant.library.cluau"],
 	["let r = count(x)", "count", 0, "entity.name.function.call.cluau"],
+	// A table inside an interpolation: its } does not end the expression.
+	["print(`n = { #{1, 2, 3} } items`)", "items", 0, "string.interpolated.cluau"],
+	["print(`n = { #{1, 2, 3} } items`)", "3", 0, "meta.template.expression.cluau"],
+	["type Fn = (number) -> boolean", "->", 0, "keyword.operator.type.function.cluau"],
+	["function Map<K, V>(k: K): V { }", "K", 0, "entity.name.type.parameter.cluau"],
+	["function Map<K, V>(k: K): V { }", "<", 0, "punctuation.definition.type-parameters.cluau"],
+	// A string continued in the next line by a backslash at the line's end.
+	["let s = \"line one \\\nline two\"\nlet after = 1", "line two", 1, "string.quoted.double.cluau"],
+	["let s = \"line one \\\nline two\"\nlet after = 1", "let", 2, "storage.type.cluau"],
+	["let s = \"unterminated\nlet after = 1", "let", 1, "storage.type.cluau"],
 ];
 
 let failures = 0;

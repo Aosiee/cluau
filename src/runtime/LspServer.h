@@ -12,6 +12,7 @@
 #include "LanguageService.h"
 
 #include <cstdio>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,8 +46,12 @@ namespace cluau::runtime::detail {
 		Json CallItemJson(const CallItem& item) const;
 		CallItem CallItemFrom(const Json& json) const;
 
+		bool Readable(const std::string& path) const;
+
 		LanguageService m_Service;
 		std::vector<std::string> m_Published; // files given diagnostics (a closed one is cleared)
+		std::set<std::string> m_Cluau; // opened with the cluau language, whatever their names (a script with a shebang)
+		bool m_Initialized = false;
 		bool m_ShutDown = false;
 		bool m_Exit = false;
 	};

@@ -332,8 +332,14 @@ namespace {
 			const std::string arg = argv[i];
 			if (arg == "--module")
 			{
-				if (const int status = ModuleOption(++i < argc ? argv[i] : "", options))
-					return status;
+				// A file that cannot be read leaves its module out: the
+				// server starts all the same (an editor's stale setting).
+				const std::string spec = ++i < argc ? argv[i] : "";
+				const size_t eq = spec.find('=');
+				if (eq == std::string::npos || eq == 0 || eq + 1 == spec.size())
+					return Usage();
+				if (ModuleOption(spec, options) != 0)
+					std::fprintf(stderr, "cluau lsp: serving without the module %s\n", spec.substr(0, eq).c_str());
 			}
 			else if (arg == "--stdio")
 				continue; // how editors' clients ask for standard input and output

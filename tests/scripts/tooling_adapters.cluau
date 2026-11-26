@@ -1,0 +1,92 @@
+// cluau lsp and cluau debug as editors start them: framed messages on
+// standard input, the answers on standard output.
+const fs = require("@std/fs")
+const json = require("@std/json")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const cluau = process.executable
+const dir = path.join(fs.tempDir(), `cluau-adapters-{process.platform}-{math.floor(time.now() * 1000)}`)
+fs.mkdir(dir)
+
+type Message = {
+	id: number?,
+	result: { serverInfo: { name: string }? }?,
+	event: string?,
+	command: string?,
+	success: boolean?,
+	body: { exitCode: number?, output: string? }?,
+}
+
+function Frame(message: unknown): string {
+	const body = json.encode(message)
+	return `Content-Length: {#body}\r\n\r\n{body}`
+}
+
+// The messages in an adapter's output, in order.
+function Messages(output: string): { Message } {
+	const out: { Message } = {}
+	let at = 1
+	while (true) {
+		const from, to, length = string.find(output, "Content%-Length: (%d+)\r\n\r\n", at)
+		if (from == nil || to == nil || length == nil) {
+			break
+		}
+		const body = string.sub(output, to + 1, to + (tonumber(length) or 0))
+		table.insert(out, json.decode(body) :: Message)
+		at = to + #body + 1
+	}
+	return out
+}
+
+// A module file that is not there: the language server starts without it.
+const lsp = process.run({ cluau, "lsp", "--module", "@game/world=nope.luau" }, {
+	cwd = dir,
+	stderr = "capture",
+	input = Frame({ jsonrpc = "2.0", id = 1, method = "initialize", params = json.object() })
+		.. Frame({ jsonrpc = "2.0", id = 2, method = "shutdown" })
+		.. Frame({ jsonrpc = "2.0", method = "exit" }),
+})
+const answers = Messages(lsp.output)
+const first = answers[1]
+const result = first and first.result
+const info = result and result.serverInfo
+print("lsp:", lsp.code, #answers, info and info.name, answers[2] and answers[2].id)
+
+// process.exit in the debugged script: its status is reported, and the
+// adapter answers the editor's disconnect and ends as it should.
+const script = path.join(dir, "exiter.cluau")
+fs.write(script, 'const process = require("@std/process")\nprint("bye")\nprocess.exit(3)\n')
+function Request(seq: number, command: string, arguments: { [string]: string }?): string {
+	return Frame({ seq = seq, type = "request", command = command, arguments = arguments or json.object() })
+}
+const debug = process.run({ cluau, "debug" }, {
+	cwd = dir,
+	stderr = "capture",
+	input = Request(1, "initialize", { adapterID = "cluau" })
+		.. Request(2, "launch", { program = script })
+		.. Request(3, "configurationDone")
+		.. Request(4, "disconnect"),
+})
+let exited: number? = nil
+let disconnected: boolean? = nil
+for (_, m in Messages(debug.output)) {
+	if (m.event == "exited" && m.body) {
+		exited = m.body.exitCode
+	} else if (m.command == "disconnect") {
+		disconnected = m.success
+	}
+}
+print("debug:", debug.code, exited, disconnected)
+
+// A length no editor sends: the adapter says so and ends.
+const huge = process.run({ cluau, "debug" }, { cwd = dir, stderr = "capture", input = "Content-Length: 99999999999\r\n\r\n{}" })
+let said = false
+for (_, m in Messages(huge.output)) {
+	const text = m.body and m.body.output
+	said = said || (m.event == "output" && text != nil && string.find(text, "256 MiB", 1, true) != nil)
+}
+print("huge:", huge.code, said)
+
+fs.remove(dir, true)
