@@ -5,9 +5,10 @@
 #   sh installer/packages.sh <version> <unpacked release dir> <out dir>
 #
 # The release directory is an unpacked cluau-<version>-linux-<arch>.tar.gz
-# (cluau, LICENSE, README.md, syntax.md, scripting.md). Needs dpkg-deb and
-# rpmbuild. The packages install /usr/bin/cluau and the documents under
-# /usr/share/doc/cluau.
+# (cluau, LICENSE, THIRD_PARTY_NOTICES.md, README.md, syntax.md,
+# scripting.md). Needs dpkg-deb and rpmbuild. The packages install
+# /usr/bin/cluau and the documents under /usr/share/doc/cluau (the licences:
+# the .deb's copyright file, the .rpm's licence files).
 
 set -eu
 
@@ -28,7 +29,7 @@ aarch64 | arm64) deb_arch=arm64 rpm_arch=aarch64 ;;
 	exit 1
 	;;
 esac
-for file in cluau LICENSE README.md syntax.md scripting.md; do
+for file in cluau LICENSE THIRD_PARTY_NOTICES.md README.md syntax.md scripting.md; do
 	[ -f "$dir/$file" ] || {
 		echo "packages.sh: $dir has no $file" >&2
 		exit 1
@@ -51,7 +52,13 @@ root="$work/deb"
 mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/cluau"
 install -m 755 "$dir/cluau" "$root/usr/bin/cluau"
 install -m 644 "$dir/README.md" "$dir/syntax.md" "$dir/scripting.md" "$root/usr/share/doc/cluau/"
-install -m 644 "$dir/LICENSE" "$root/usr/share/doc/cluau/copyright"
+# The copyright file: cluau's licence, then those of the libraries it contains.
+{
+	cat "$dir/LICENSE"
+	echo
+	cat "$dir/THIRD_PARTY_NOTICES.md"
+} >"$root/usr/share/doc/cluau/copyright"
+chmod 644 "$root/usr/share/doc/cluau/copyright"
 size="$(du -sk "$root/usr" | cut -f 1)"
 {
 	echo "Package: cluau"
@@ -59,7 +66,7 @@ size="$(du -sk "$root/usr" | cut -f 1)"
 	echo "Architecture: $deb_arch"
 	echo "Maintainer: cluau <https://github.com/Aosiee/cluau/issues>"
 	echo "Installed-Size: $size"
-	echo "Depends: libc6"
+	echo "Depends: libc6 (>= 2.28)" # the release builds' glibc
 	echo "Section: interpreters"
 	echo "Priority: optional"
 	echo "Homepage: https://github.com/Aosiee/cluau"
@@ -93,11 +100,13 @@ install -D -m 644 "$dir/README.md" %{buildroot}%{_docdir}/cluau/README.md
 install -D -m 644 "$dir/syntax.md" %{buildroot}%{_docdir}/cluau/syntax.md
 install -D -m 644 "$dir/scripting.md" %{buildroot}%{_docdir}/cluau/scripting.md
 install -D -m 644 "$dir/LICENSE" %{buildroot}%{_licensedir}/cluau/LICENSE
+install -D -m 644 "$dir/THIRD_PARTY_NOTICES.md" %{buildroot}%{_licensedir}/cluau/THIRD_PARTY_NOTICES.md
 
 %files
 %{_bindir}/cluau
 %{_docdir}/cluau
 %license %{_licensedir}/cluau/LICENSE
+%license %{_licensedir}/cluau/THIRD_PARTY_NOTICES.md
 EOF
 # xz too, for the older RPM systems (RHEL 8).
 rpmbuild -bb --quiet --target "$rpm_arch" --define "_topdir $work/rpm" --define "_binary_payload w9.xzdio" "$work/cluau.spec"

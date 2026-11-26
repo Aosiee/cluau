@@ -9,6 +9,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The jobs only read the repository.
+permissions:
+  contents: read
+
 concurrency:
   group: macos-${{ github.ref }}
   cancel-in-progress: true
@@ -29,9 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # For the oldest macOS the releases support (release.yml), so that a
+      # library call newer than that fails here.
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_TESTS=ON
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_TESTS=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
           cmake --build build --config Release -j 4
 
       - name: Test

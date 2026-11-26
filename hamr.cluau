@@ -2,7 +2,8 @@
 //
 // The translator's tests, the script tests and the checker's tests in a
 // release and a debug build (the builds fetch Luau for the runtime and the
-// checker), and the command-line tool on the docs' examples.
+// checker), the command-line tool on the docs' examples, and cluau in a
+// host's CMake build.
 
 const hamr = require("@hamr")
 type Context = hamr.Context
@@ -10,7 +11,7 @@ type Context = hamr.Context
 const suite = hamr.suite("cluau", { budgets = { fast = 60 } })
 const cxx = suite:var("cxx", "c++")
 
-const kPaths = { "include/**", "src/**", "tests/**", "tools/**", "CMakeLists.txt" }
+const kPaths = { "include/**", "src/**", "tests/**", "tools/**", "CMakeLists.txt", "cmake/**", "THIRD_PARTY_NOTICES.md" }
 
 for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 	const name = c[1]
@@ -51,17 +52,21 @@ for (_, c in { { "release", "Release" }, { "debug", "Debug" } }) {
 }
 
 // A Markdown file's fenced code blocks without a language (the guides'
-// cluau), in order: a labelled block (```toml, ...) is left out.
+// cluau), in order: a labelled block (```toml, ```sh, ...) is left out. A
+// fence may be indented (a block inside a list item); the block's lines
+// lose that indentation.
 function CodeBlocks(text: string): { string } {
 	const blocks: { string } = {}
 	let inside = false
 	let label = ""
+	let indent = ""
 	let lines: { string } = {}
 	for (line in string.gmatch(text .. "\n", "([^\n]*)\n")) {
-		const fence = string.match(line, "^```(.*)$")
+		const lead, fence = string.match(line, "^(%s*)```(.*)$")
 		if (fence != nil && !inside) {
 			inside = true
 			label = fence
+			indent = lead or ""
 			lines = {}
 		} else if (fence != nil && fence == "") {
 			inside = false
@@ -69,60 +74,148 @@ function CodeBlocks(text: string): { string } {
 				table.insert(blocks, table.concat(lines, "\n") .. "\n")
 			}
 		} else if (inside) {
-			table.insert(lines, line)
+			if (string.sub(line, 1, #indent) == indent) {
+				table.insert(lines, string.sub(line, #indent + 1))
+			} else {
+				table.insert(lines, line)
+			}
 		}
 	}
 	return blocks
 }
 
-// Every code block the syntax guide marks as cluau translates without an
-// error, and so does every script in the scripting guide (in script mode);
-// the guide's self-contained scripts type-check too.
+// The output a guide's script says it prints: the comments after its
+// print calls (`print(v, Vec.Count)   // Vec(4, 6)    3`), in order.
+function PromisedOutput(block: string): { string } {
+	const lines: { string } = {}
+	for (line in string.gmatch(block, "[^\n]+")) {
+		const promised = string.match(line, "^%s*print%(.*%)%s*//%s*(.-)%s*$")
+		if (promised != nil) {
+			table.insert(lines, promised)
+		}
+	}
+	return lines
+}
+
+// Text with each run of spaces and tabs as one space (a comment shows
+// print's tabs as spaces).
+function Words(text: string): string {
+	const words = string.gsub(text, "%s+", " ")
+	return string.match(words, "^ ?(.-) ?$") or words
+}
+
+// Every cluau example in the guides and the README translates without an
+// error; every script in the scripting guide and the README (in script
+// mode) type-checks too, and one that says what it prints (a comment after
+// each print) prints that when it runs, unless it needs the network.
 suite:step("docs-examples", {
-	doc = "Translates every cluau example in docs/syntax.md and docs/scripting.md with the built tool.",
+	doc = "Translates every cluau example in README.md, docs/syntax.md and docs/scripting.md, checks the scripts, and runs those that show their output.",
 	needs = { "build:release" },
 	timeout = 120,
 	budget = 5,
-	paths = { "docs/**", "src/**" },
+	paths = { "docs/**", "src/**", "README.md" },
 	run = function(ctx: Context) {
+		const cluau = host.join(ctx.root, "build-hamr-release", "cluau")
 		const text = host.read(host.join(ctx.root, "docs", "syntax.md")) or ""
 		let index = 0
 		for (_, block in CodeBlocks(text)) {
-			// The guide's tables of Luau equivalents are prose; its fenced
-			// blocks are cluau (the class and if-expression examples).
-			if (string.find(block, "class ", 1, true) || string.find(block, "let ", 1, true)) {
-				index += 1
-				const file = host.join(ctx.out, `syntax-example-{index}.cluau`)
-				host.write(file, block)
-				ctx:run({ "build-hamr-release/cluau", "translate", file })
-			}
+			index += 1
+			const file = host.join(ctx.out, `syntax-example-{index}.cluau`)
+			host.write(file, block)
+			ctx:run({ cluau, "translate", file })
 		}
 		if (index == 0) {
 			ctx:fail("found no cluau example in docs/syntax.md")
+		}
+		// The README's: a class (as a host's class file is) and a script.
+		const readme = host.read(host.join(ctx.root, "README.md")) or ""
+		for (i, block in CodeBlocks(readme)) {
+			const file = host.join(ctx.out, `readme-example-{i}.cluau`)
+			host.write(file, block)
+			if (string.sub(block, 1, 2) == "#!") {
+				ctx:run({ cluau, "translate", "--script", file })
+				ctx:run({ cluau, "check", file })
+			} else {
+				ctx:run({ cluau, "translate", file })
+			}
 		}
 		// The scripting guide's blocks are scripts, except its transcripts
 		// (a prompt session, a command and its output, an error's output).
 		const scripting = host.read(host.join(ctx.root, "docs", "scripting.md")) or ""
 		const blocks = CodeBlocks(scripting)
 		let scripts = 0
+		let ran = 0
 		for (i, block in blocks) {
 			const transcript = string.sub(block, 1, 2) == "> " || string.sub(block, 1, 2) == "$ " || string.match(block, "^[%w_%-%./]+%.cluau:%d+") != nil
 			if (!transcript) {
 				scripts += 1
 				const file = host.join(ctx.out, `scripting-example-{scripts}.cluau`)
 				host.write(file, block)
-				ctx:run({ "build-hamr-release/cluau", "translate", "--script", file })
+				ctx:run({ cluau, "translate", "--script", file })
 				// A self-contained script also type-checks, unless the guide
 				// shows its errors next (a `$ cluau check` block).
 				const next = blocks[i + 1] or ""
 				if (!string.find(block, "require(\"./", 1, true) && string.sub(next, 1, 13) != "$ cluau check") {
-					ctx:run({ "build-hamr-release/cluau", "check", file })
+					ctx:run({ cluau, "check", file })
+				}
+				const promised = PromisedOutput(block)
+				let network = false
+				for (_, module in { "@std/net", "@std/http", "@std/server", "@std/websocket" }) {
+					if (string.find(block, `"{module}"`, 1, true) != nil) {
+						network = true
+					}
+				}
+				if (#promised > 0 && !network) {
+					ran += 1
+					const code, output = host.capture({ cluau, file }, ctx.out)
+					const got: { string } = {}
+					for (line in string.gmatch(output, "[^\n]+")) {
+						table.insert(got, Words(line))
+					}
+					const expected: { string } = {}
+					for (_, line in promised) {
+						table.insert(expected, Words(line))
+					}
+					if (code != 0 || table.concat(got, "\n") != table.concat(expected, "\n")) {
+						ctx:fail(`scripting-example-{scripts}.cluau (exit status {code}) printed\n{output}\nnot what docs/scripting.md shows:\n{table.concat(promised, "\n")}`)
+					}
 				}
 			}
 		}
 		if (scripts == 0) {
 			ctx:fail("found no script in docs/scripting.md")
 		}
+		if (ran == 0) {
+			ctx:fail("found no script in docs/scripting.md that shows its output")
+		}
+		ctx:log(`ran {ran} of the scripting guide's scripts and compared their output\n`)
+	},
+})
+
+// cluau added to a host's CMake build with add_subdirectory and the runtime
+// on (cmake/host): the host's own settings stay as they were, and the
+// translator links into the host's shared library. The libraries come from
+// the release build's sources, so nothing is fetched again.
+suite:step("host", {
+	doc = "Configures a host project that adds cluau with add_subdirectory (the runtime on) and builds its shared library linking the translator.",
+	needs = { "build:release" },
+	resources = { exclusive = true },
+	timeout = 600,
+	budget = 20,
+	paths = { "CMakeLists.txt", "cmake/**", "src/translate/**", "src/convert/**", "include/**" },
+	run = function(ctx: Context) {
+		const release = host.join(ctx.root, "build-hamr-release")
+		const cache = host.read(host.join(release, "CMakeCache.txt")) or ""
+		const configure = { "cmake", "-S", "cmake/host", "-B", "build-hamr-host", "-G", "Ninja", `-DCMAKE_CXX_COMPILER={cxx}`,
+			"-DCLUAU_BUILD_RUNTIME=ON" }
+		for (_, name in { "luau", "curl", "mbedtls", "sqlite", "miniz", "pcre2" }) {
+			const upper = string.upper(name)
+			const given = string.match(cache, `FETCHCONTENT_SOURCE_DIR_{upper}:PATH=([^\n]*)`)
+			const dir = if (given != nil && given != "") given else host.join(release, "_deps", `{name}-src`)
+			table.insert(configure, `-DFETCHCONTENT_SOURCE_DIR_{upper}={dir}`)
+		}
+		ctx:run(configure)
+		ctx:run({ "cmake", "--build", "build-hamr-host", "--target", "cluau_host_plugin", "-j", tostring(host.cores()) })
 	},
 })
 

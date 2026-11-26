@@ -1,12 +1,14 @@
 # A release for each version tag (vX.Y.Z): the command-line tool built and
-# tested on Linux, macOS and Windows, packaged with the licence, the README,
-# the syntax guide and the scripting guide, the installers tried against
+# tested on Linux, macOS and Windows, packaged with the licence, the
+# third-party notices, the README, the syntax guide and the scripting guide,
+# the other build configurations a host uses, the installers tried against
 # those packages on each platform, and all of it published as a GitHub
 # release whose notes are the tag's message. A tag pushed from here on
 # releases by itself; an existing tag (one made before this workflow) is
 # released by running the workflow by hand with its name. A run by hand with
 # `publish` off builds and tests everything (from `ref`, a branch, when
-# given) and publishes nothing: a release's dry run.
+# given) and publishes nothing: a release's dry run. A release is always
+# built from its tag.
 name: Release
 
 on:
@@ -30,6 +32,12 @@ on:
 permissions:
   contents: read
 
+# One run per tag at a time: a tag push and a run by hand for the same tag
+# would race to create and upload the release.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
   REF: ${{ inputs.ref || inputs.tag || github.ref_name }}
@@ -39,6 +47,7 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
+    timeout-minutes: 60
     strategy:
       fail-fast: true
       matrix:
@@ -47,13 +56,24 @@ jobs:
           # build runs on every system from RHEL 8, Debian 10 and Ubuntu 20.04 on.
           - { name: linux-x86_64, os: ubuntu-26.04, container: 'quay.io/pypa/manylinux_2_28_x86_64', exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
           - { name: linux-arm64, os: ubuntu-26.04-arm, container: 'quay.io/pypa/manylinux_2_28_aarch64', exe: cluau, flags: '"-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"' }
-          - { name: macos-arm64, os: macos-latest, exe: cluau, flags: '' }
-          - { name: macos-x86_64, os: macos-15-intel, exe: cluau, flags: '' }
+          # macOS: built for macOS 11 (Big Sur) and later, whichever macOS
+          # the runner has.
+          - { name: macos-arm64, os: macos-latest, exe: cluau, flags: '-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' }
+          - { name: macos-x86_64, os: macos-15-intel, exe: cluau, flags: '-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' }
+          # Windows: the C and C++ runtime linked in (CMakeLists.txt), so no
+          # Visual C++ redistributable is needed.
           - { name: windows-x86_64, os: windows-latest, exe: Release/cluau.exe, flags: '' }
     defaults:
       run:
         shell: bash
     steps:
+      # A published release is what its tag holds: another ref is for a dry run.
+      - name: Check what is built
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.ref != '' && inputs.ref != inputs.tag
+        run: |
+          echo "a release is built from its tag ($TAG), not from $REF: run with publish off for a dry run of $REF"
+          exit 1
+
       - uses: actions/checkout@v5
         with:
           ref: ${{ env.REF }}
@@ -88,12 +108,37 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # What the program needs from the system that runs it: on macOS the
+      # oldest version it runs on, on Windows the DLLs it imports (the
+      # system's only, no Visual C++ runtime).
+      - name: Requirements
+        if: runner.os != 'Linux'
+        run: |
+          exe="build/${{ matrix.exe }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            otool -l "$exe" | grep -A4 LC_BUILD_VERSION
+            minos=$(otool -l "$exe" | sed -n '/LC_BUILD_VERSION/,/minos/s/.*minos //p' | head -n 1)
+            if [ "$minos" != "11.0" ]; then
+              echo "cluau needs macOS $minos, not 11.0"
+              exit 1
+            fi
+          else
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            dumpbin=$("$vswhere" -latest -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | head -n 1 | tr -d '\r')
+            dumpbin=$(cygpath -u "$dumpbin")
+            "$dumpbin" -nologo -dependents "$exe" | tee dependents.txt
+            if grep -iE 'vcruntime|msvcp|ucrtbase|api-ms-win-crt' dependents.txt; then
+              echo "cluau.exe needs the Visual C++ runtime"
+              exit 1
+            fi
+          fi
+
       - name: Package
         run: |
           dir="cluau-$TAG-${{ matrix.name }}"
           mkdir -p "$dir"
           cp "build/${{ matrix.exe }}" "$dir/"
-          cp LICENSE README.md "$dir/"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$dir/"
           cp docs/syntax.md docs/scripting.md "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$dir.zip" "$dir" > /dev/null
@@ -106,12 +151,48 @@ jobs:
           name: ${{ matrix.name }}
           path: cluau-*.*z*
 
+  # The configurations hosts build that the release does not: without the
+  # optional modules, the translator alone, and cluau added to a host's own
+  # build with add_subdirectory and the runtime on (cmake/host: the host's
+  # settings stay as they were, and the translator links into its shared
+  # library).
+  configurations:
+    name: other configurations
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+
+      - name: Without the optional modules
+        run: |
+          cmake -S . -B build-minimal -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_TESTS=ON \
+            -DCLUAU_HTTP=OFF -DCLUAU_CRYPTO=OFF -DCLUAU_SQLITE=OFF -DCLUAU_REGEX=OFF -DCLUAU_COMPRESS=OFF
+          cmake --build build-minimal -j 4
+          ctest --test-dir build-minimal --output-on-failure
+
+      - name: The translator alone
+        run: |
+          cmake -S . -B build-translator -DCLUAU_BUILD_RUNTIME=OFF
+          cmake --build build-translator -j 4
+          ctest --test-dir build-translator --output-on-failure
+
+      - name: In a host's build
+        run: |
+          cmake -S cmake/host -B build-host -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_RUNTIME=ON
+          cmake --build build-host -j 4
+
   # The Debian and RPM packages, from the Linux builds, each installed and run
   # on the oldest systems the builds support and on current ones.
   packages:
     name: packages (${{ matrix.arch }})
     needs: build
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -146,12 +227,12 @@ jobs:
           check='cluau --version && cluau /probe/check.cluau'
           for image in debian:11 debian:12 ubuntu:22.04 ubuntu:26.04; do
             echo "== $image"
-            docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "dpkg -i /packages/cluau_*.deb > /dev/null && $check && dpkg -r cluau > /dev/null && ! test -e /usr/bin/cluau"
+            docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "dpkg -i /packages/cluau_*.deb > /dev/null && $check && grep -q 'Third-party notices' /usr/share/doc/cluau/copyright && dpkg -r cluau > /dev/null && ! test -e /usr/bin/cluau"
           done
           # Not signed yet (Fedora and RHEL refuse an unsigned package unless told).
           for image in rockylinux:8 rockylinux:9 fedora:latest; do
             echo "== $image"
-            docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "rpm -i --nosignature /packages/cluau-*.rpm && $check && rpm -e cluau && ! test -e /usr/bin/cluau"
+            docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "rpm -i --nosignature /packages/cluau-*.rpm && $check && test -s /usr/share/licenses/cluau/THIRD_PARTY_NOTICES.md && rpm -e cluau && ! test -e /usr/bin/cluau"
           done
 
       - uses: actions/upload-artifact@v4
@@ -165,6 +246,7 @@ jobs:
     name: VS Code extension
     needs: build
     runs-on: ubuntu-26.04
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -220,6 +302,7 @@ jobs:
     name: installer (${{ matrix.os }})
     needs: build
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: true
       matrix:
@@ -243,11 +326,31 @@ jobs:
         shell: bash
         run: |
           CLUAU_DOWNLOAD_URL="$PWD/dist" CLUAU_VERSION="$TAG" sh installer/install.sh --prefix "$RUNNER_TEMP/cluau"
+          test -s "$RUNNER_TEMP/cluau/share/doc/cluau/THIRD_PARTY_NOTICES.md"
           printf '#!/usr/bin/env cluau\nprint("ran from", require("@std/process").platform)\n' > "$RUNNER_TEMP/hello.cluau"
           chmod +x "$RUNNER_TEMP/hello.cluau"
           (cd / && PATH="$RUNNER_TEMP/cluau/bin:$PATH" "$RUNNER_TEMP/hello.cluau")
+          # An update whose command does not run here changes nothing.
+          case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) platform=linux-x86_64 ;;
+          Linux-aarch64) platform=linux-arm64 ;;
+          Darwin-arm64) platform=macos-arm64 ;;
+          Darwin-x86_64) platform=macos-x86_64 ;;
+          esac
+          broken="$RUNNER_TEMP/broken" bad="cluau-v99.0.0-$platform"
+          mkdir -p "$broken/$bad"
+          printf '#!/bin/sh\necho "needs a newer system" >&2\nexit 1\n' > "$broken/$bad/cluau"
+          chmod +x "$broken/$bad/cluau"
+          (cd "$broken" && tar -czf "$bad.tar.gz" "$bad" && { sha256sum "$bad.tar.gz" 2>/dev/null || shasum -a 256 "$bad.tar.gz"; } > SHA256SUMS)
+          if CLUAU_DOWNLOAD_URL="$broken" CLUAU_VERSION=v99.0.0 sh installer/install.sh --prefix "$RUNNER_TEMP/cluau" 2> broken.txt; then
+            echo "the installer took a command that does not run"
+            exit 1
+          fi
+          cat broken.txt
+          grep -q "needs a newer system" broken.txt
+          "$RUNNER_TEMP/cluau/bin/cluau" --version | grep -q "${TAG#v}"
           sh installer/install.sh --prefix "$RUNNER_TEMP/cluau" --uninstall
-          test ! -e "$RUNNER_TEMP/cluau/bin/cluau"
+          test ! -e "$RUNNER_TEMP/cluau/bin"
 
       - name: install.ps1
         if: runner.os == 'Windows'
@@ -255,9 +358,28 @@ jobs:
         run: |
           $env:CLUAU_DOWNLOAD_URL = "$PWD\dist"
           $dir = Join-Path $env:RUNNER_TEMP 'cluau'
+          # The .cluau key may hold another program's entries, which stay.
+          New-Item -Force 'HKCU:\Software\Classes\.cluau\OpenWithProgids' | Out-Null
+          Set-ItemProperty 'HKCU:\Software\Classes\.cluau\OpenWithProgids' -Name 'other.program' -Value ''
           ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -AddToPathExt
           & (Join-Path $dir 'bin\cluau.exe') -e 'print("ran from", require("@std/process").platform)'
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path (Join-Path $dir 'doc\THIRD_PARTY_NOTICES.md'))) { throw 'the install has no THIRD_PARTY_NOTICES.md' }
+          # Again over itself (an update), then an update whose command does
+          # not run here, which changes nothing.
+          ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -NoModifyPath
+          $broken = Join-Path $env:RUNNER_TEMP 'broken'
+          $bad = Join-Path $broken 'cluau-v99.0.0-windows-x86_64'
+          New-Item -ItemType Directory -Force $bad | Out-Null
+          Set-Content -Path (Join-Path $bad 'cluau.exe') -Value 'not a program'
+          Compress-Archive -Path $bad -DestinationPath "$bad.zip"
+          "$((Get-FileHash -Algorithm SHA256 "$bad.zip").Hash.ToLowerInvariant())  cluau-v99.0.0-windows-x86_64.zip" | Set-Content (Join-Path $broken 'SHA256SUMS')
+          $env:CLUAU_DOWNLOAD_URL = $broken
+          $failed = $false
+          try { ./installer/install.ps1 -Version v99.0.0 -InstallDir $dir -NoModifyPath } catch { $failed = $true; Write-Host $_ }
+          $env:CLUAU_DOWNLOAD_URL = "$PWD\dist"
+          if (-not $failed) { throw 'the installer took a command that does not run' }
+          if (-not ((& (Join-Path $dir 'bin\cluau.exe') --version) -match $env:TAG.TrimStart('v'))) { throw 'the failed update changed the command' }
           if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq (Join-Path $dir 'bin') })) { throw 'the user PATH has no cluau' }
           # A script on PATH, run by its name alone (PATHEXT and the association).
           $scripts = Join-Path $env:RUNNER_TEMP 'scripts'
@@ -271,16 +393,23 @@ jobs:
           if (-not (Test-Path $mark)) { throw 'hello did not run by its name' }
           # Uninstalling takes only what the installer put there.
           Set-Content -Path (Join-Path $dir 'keep.txt') -Value 'not the installer''s'
+          Set-Content -Path (Join-Path $dir 'doc\notes.txt') -Value 'not the installer''s either'
           ./installer/install.ps1 -InstallDir $dir -Uninstall
           if (Test-Path (Join-Path $dir 'bin')) { throw 'the uninstall left the command' }
           if (-not (Test-Path (Join-Path $dir 'keep.txt'))) { throw 'the uninstall removed a file it did not install' }
+          if (-not (Test-Path (Join-Path $dir 'doc\notes.txt'))) { throw 'the uninstall removed a file in doc it did not install' }
+          if (Test-Path (Join-Path $dir 'doc\README.md')) { throw 'the uninstall left the guides' }
+          if (-not (Get-ItemProperty 'HKCU:\Software\Classes\.cluau\OpenWithProgids' -Name 'other.program' -ErrorAction SilentlyContinue)) { throw 'the uninstall removed another program''s .cluau entry' }
+          if ((Get-Item 'HKCU:\Software\Classes\.cluau').GetValue('')) { throw 'the uninstall left the .cluau association' }
+          if (Test-Path 'HKCU:\Software\Classes\cluau.script') { throw 'the uninstall left cluau.script' }
           if ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq (Join-Path $dir 'bin') }) { throw 'the uninstall left cluau on the user PATH' }
           if ([Environment]::GetEnvironmentVariable('PATHEXT', 'User') -match '\.CLUAU') { throw 'the uninstall left .CLUAU in PATHEXT' }
 
   release:
-    needs: [build, packages, installers, vscode]
+    needs: [build, configurations, packages, installers, vscode]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -333,6 +462,7 @@ jobs:
   marketplaces:
     needs: release
     runs-on: ubuntu-26.04
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash

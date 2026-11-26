@@ -9,6 +9,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The jobs only read the repository.
+permissions:
+  contents: read
+
 concurrency:
   group: linux-${{ github.ref }}
   cancel-in-progress: true
@@ -22,8 +26,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: gcc, cxx: g++ }
-          - { name: clang, cxx: clang++ }
+          - { name: gcc, cc: gcc, cxx: g++ }
+          - { name: clang, cc: clang, cxx: clang++ }
     defaults:
       run:
         shell: bash
@@ -32,7 +36,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_TESTS=ON -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCLUAU_BUILD_TESTS=ON -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
           cmake --build build --config Release -j 4
 
       - name: Test

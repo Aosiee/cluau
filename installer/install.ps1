@@ -3,11 +3,14 @@
 # the user's PATH. No administrator rights are needed.
 #
 #   irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
-#   .\install.ps1 [-Version vX.Y.Z] [-InstallDir <dir>] [-NoModifyPath] [-AssociateFiles] [-AddToPathExt] [-Uninstall]
+#   & ([scriptblock]::Create((irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1))) -Uninstall
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-Version vX.Y.Z] [-InstallDir <dir>] [-NoModifyPath] [-AssociateFiles] [-AddToPathExt] [-Uninstall]
 #
-# The command goes to <InstallDir>\bin (InstallDir is
+# (Windows runs a downloaded script file only when the execution policy
+# allows it: -ExecutionPolicy Bypass, or the scriptblock form, which takes
+# the options too.) The command goes to <InstallDir>\bin (InstallDir is
 # %LOCALAPPDATA%\Programs\cluau unless -InstallDir names another), the guides
-# to <InstallDir>\doc. -AddToPathExt (which implies -AssociateFiles) adds
+# and the licences to <InstallDir>\doc. -AddToPathExt (which implies -AssociateFiles) adds
 # .CLUAU to the user's PATHEXT, so a script on PATH runs by its name alone
 # (`deploy` for deploy.cluau) in cmd.exe and PowerShell; -Uninstall takes it
 # out again. -AssociateFiles also opens .cluau files with cluau
@@ -33,13 +36,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest is far slower drawing its progress bar
 $Repository = if ($env:CLUAU_REPOSITORY) { $env:CLUAU_REPOSITORY.TrimEnd('/') } else { 'https://github.com/Aosiee/cluau' }
-$RepositoryUri = [Uri]$Repository
-$Repo = $RepositoryUri.AbsolutePath.Trim('/') # owner/name
-$Server = "$($RepositoryUri.Scheme)://$($RepositoryUri.Authority)"
+# owner/name are the address's last two parts; the server is what comes
+# before them (a Forgejo or Gitea server may live under a path of its own).
+$NameAt = $Repository.LastIndexOf('/')
+$OwnerAt = if ($NameAt -gt 0) { $Repository.LastIndexOf('/', $NameAt - 1) } else { -1 }
+if ($OwnerAt -lt 0) { throw "cluau: CLUAU_REPOSITORY is not a repository's address (https://host/owner/name): $Repository" }
+$Repo = $Repository.Substring($OwnerAt + 1) # owner/name
+$Server = $Repository.Substring(0, $OwnerAt) # https://host, or https://host/path
 $BinDir = Join-Path $InstallDir 'bin'
 $DocDir = Join-Path $InstallDir 'doc'
-$FileTypeKey = 'HKCU:\Software\Classes\.cluau'
-$ProgIdKey = 'HKCU:\Software\Classes\cluau.script'
+# The documents a release holds, installed in $DocDir.
+$Docs = 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'syntax.md', 'scripting.md'
+# The file association, under HKEY_CURRENT_USER.
+$FileTypeKey = 'Software\Classes\.cluau'
+$ProgIdKey = 'Software\Classes\cluau.script'
+$ProgId = 'cluau.script'
 
 function Say([string]$Message) { Write-Host "cluau: $Message" }
 function Fail([string]$Message) { throw "cluau: $Message" }
@@ -67,6 +78,46 @@ function Test-InPath([string]$Entry, [string]$Dir) {
 
 function Test-SameDir([string]$A, [string]$B) {
     return $A.TrimEnd('\') -ieq $B.TrimEnd('\')
+}
+
+# A free name to rename a command aside to (a running cluau.exe cannot be
+# removed or overwritten, but it can be renamed): one left from an earlier
+# update while it ran keeps its name.
+function Get-OldName([string]$Path) {
+    $old = "$Path.old"
+    for ($n = 1; (Test-Path $old); $n++) { $old = "$Path.$n.old" }
+    return $old
+}
+
+# Earlier commands renamed aside (cluau.exe.old, cluau.exe.<n>.old), removed
+# when they are no longer running.
+function Remove-OldCommands {
+    Get-ChildItem -Force -Path $BinDir -Filter 'cluau.exe*.old' -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
+}
+
+# What `cluau --version` prints, or $null with the reason in $script:RunError
+# when the program does not run here.
+function Get-CommandVersion([string]$Path) {
+    $script:RunError = ''
+    # Its error output is collected, not raised (in this function only).
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Path --version 2>&1
+        $code = $LASTEXITCODE
+    } catch {
+        $script:RunError = $_.Exception.Message
+        return $null
+    }
+    if ($code -ne 0) {
+        $text = (@($output) | ForEach-Object { "$_" }) -join "`n"
+        # A program Windows cannot start ends with an NTSTATUS (0xC0000135:
+        # a DLL it needs is missing), clearer in hexadecimal.
+        $status = if ($code -lt 0) { '0x{0:X8}' -f $code } else { "$code" }
+        $script:RunError = "exit status $status$(if ($text) { ": $text" })"
+        return $null
+    }
+    return "$output".Trim()
 }
 
 # PATHEXT: a user's value replaces the machine's (it is not added to it), so
@@ -101,14 +152,21 @@ if ($Uninstall) {
     $removed = $false
     $Command = Join-Path $BinDir 'cluau.exe'
     if (Test-Path $Command) {
-        Remove-Item -Force $Command
+        try { Remove-Item -Force $Command } catch { Move-Item $Command (Get-OldName $Command) }
         $removed = $true
     }
-    if (Test-Path $DocDir) {
-        Remove-Item -Recurse -Force $DocDir
-        $removed = $true
+    Remove-OldCommands
+    if (Get-ChildItem -Force -Path $BinDir -Filter 'cluau.exe*.old' -ErrorAction SilentlyContinue) {
+        Say "a cluau.exe that is still running stays in $BinDir until it ends: remove it then"
     }
-    foreach ($dir in $BinDir, $InstallDir) {
+    foreach ($doc in $Docs) {
+        $path = Join-Path $DocDir $doc
+        if (Test-Path $path) {
+            Remove-Item -Force $path
+            $removed = $true
+        }
+    }
+    foreach ($dir in $BinDir, $DocDir, $InstallDir) {
         if ((Test-Path $dir) -and -not (Get-ChildItem -Force $dir | Select-Object -First 1)) {
             Remove-Item -Force $dir
         }
@@ -119,8 +177,24 @@ if ($Uninstall) {
         Set-UserPath $kept
         Say "removed $BinDir from your PATH"
     }
-    foreach ($key in $FileTypeKey, $ProgIdKey) {
-        if (Test-Path $key) { Remove-Item -Recurse -Force $key }
+    # .cluau's default value, only when it is cluau's (the key may hold other
+    # programs' entries, such as OpenWithProgids), and the key itself once
+    # it holds nothing else; cluau.script is cluau's own.
+    $classes = [Microsoft.Win32.Registry]::CurrentUser
+    $fileType = $classes.OpenSubKey($FileTypeKey, $true)
+    if ($fileType) {
+        try {
+            if ($fileType.GetValue('') -eq $ProgId) { $fileType.DeleteValue('', $false) }
+            $empty = $fileType.ValueCount -eq 0 -and $fileType.SubKeyCount -eq 0
+        } finally {
+            $fileType.Close()
+        }
+        if ($empty) { $classes.DeleteSubKey($FileTypeKey, $false) }
+    }
+    $progIdEntry = $classes.OpenSubKey($ProgIdKey)
+    if ($progIdEntry) {
+        $progIdEntry.Close()
+        $classes.DeleteSubKeyTree($ProgIdKey, $false)
     }
     Remove-PathExt
     if ($removed) { Say "removed cluau from $InstallDir" } else { Say "cluau is not installed in $InstallDir" }
@@ -181,34 +255,52 @@ try {
     $Exe = Join-Path $Unpacked 'cluau.exe'
     if (-not (Test-Path $Exe)) { Fail "$Archive holds no cluau.exe" }
 
+    # The new command runs here before anything is replaced.
+    if (-not (Get-CommandVersion $Exe)) { Fail "cluau $Version does not run on this system ($script:RunError): nothing was changed" }
+
     New-Item -ItemType Directory -Force $BinDir, $DocDir | Out-Null
     $Target = Join-Path $BinDir 'cluau.exe'
-    # A running cluau.exe cannot be overwritten, but it can be renamed aside.
+    Remove-OldCommands
+    # The earlier command is renamed aside (it may be running) and comes back
+    # if the new one does not run once in place.
+    $Old = $null
     if (Test-Path $Target) {
-        $old = "$Target.old"
-        if (Test-Path $old) { Remove-Item -Force $old -ErrorAction SilentlyContinue }
-        Move-Item -Force $Target $old
+        $Old = Get-OldName $Target
+        Move-Item $Target $Old
     }
-    Copy-Item $Exe $Target
-    Remove-Item -Force "$Target.old" -ErrorAction SilentlyContinue
-    foreach ($doc in 'README.md', 'LICENSE', 'syntax.md', 'scripting.md') {
+    try {
+        Copy-Item $Exe $Target
+        $installed = Get-CommandVersion $Target
+        if (-not $installed) { Fail "the installed $Target does not run ($script:RunError)" }
+    } catch {
+        # The earlier command goes back in place.
+        Remove-Item -Force $Target -ErrorAction SilentlyContinue
+        if ($Old) { Move-Item $Old $Target }
+        throw
+    }
+    if ($Old) { Remove-Item -Force $Old -ErrorAction SilentlyContinue }
+    foreach ($doc in $Docs) {
         $from = Join-Path $Unpacked $doc
         if (Test-Path $from) { Copy-Item $from $DocDir }
     }
 } finally {
     Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
-
-$installed = & $Target --version
-if ($LASTEXITCODE -ne 0) { Fail "the installed $Target does not run on this system" }
 Say "installed $installed to $Target"
 
 if ($AssociateFiles -or $AddToPathExt) {
-    New-Item -Force $FileTypeKey | Out-Null
-    Set-Item $FileTypeKey 'cluau.script'
-    New-Item -Force "$ProgIdKey\shell\open\command" | Out-Null
-    Set-Item $ProgIdKey 'cluau script'
-    Set-Item "$ProgIdKey\shell\open\command" "`"$Target`" `"%1`" %*"
+    # Opened or created, never replaced: the .cluau key may hold other
+    # programs' entries.
+    $classes = [Microsoft.Win32.Registry]::CurrentUser
+    $fileType = $classes.CreateSubKey($FileTypeKey)
+    $fileType.SetValue('', $ProgId)
+    $fileType.Close()
+    $progIdEntry = $classes.CreateSubKey($ProgIdKey)
+    $progIdEntry.SetValue('', 'cluau script')
+    $progIdEntry.Close()
+    $command = $classes.CreateSubKey("$ProgIdKey\shell\open\command")
+    $command.SetValue('', "`"$Target`" `"%1`" %*")
+    $command.Close()
     Say '.cluau files now open with cluau'
 }
 if ($AddToPathExt) { Add-PathExt }

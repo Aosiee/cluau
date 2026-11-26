@@ -88,7 +88,8 @@ namespace {
 		"`cluau check` is Luau's type checker in strict mode plus cluau's strict rules (exit status 1 on an error);\n"
 		"--loose leaves out cluau's strict rules, --lint adds Luau's lint warnings, --module types a host's module\n"
 		"(a .luau file returning a value of its type, or the module's .cluau source).\n"
-		"--sandbox runs without file, network or process access (no @std/fs, @std/http, or programs run);\n"
+		"--sandbox runs without file, network or process access (no @std/fs, @std/http, @std/net, @std/sqlite,\n"
+		"@std/zip, @std/tar or what is built on them, and no programs run);\n"
 		"--no-native interprets the bytecode instead of compiling it to native code. Either goes before the\n"
 		"command (cluau --sandbox -e '...', cluau --sandbox test).\n"
 		"Scripts `require` .cluau / .luau files (\"./name\" from the requiring file, a bare name from the\n"
@@ -633,7 +634,7 @@ namespace {
 
 	[[maybe_unused]] int NoRuntime()
 	{
-		std::fprintf(stderr, "cluau: this build has no runtime (it was built without Luau): only translate and convert are available\n");
+		std::fprintf(stderr, "cluau: this build has no runtime (it was built without Luau): only translate, convert and fmt are available\n");
 		return 2;
 	}
 

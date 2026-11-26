@@ -11,6 +11,28 @@ project(cluau CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# A fetched archive's files are dated when they are extracted (CMake 3.24 and
+# later; older versions keep the archive's dates), so that a new pin rebuilds
+# what changed.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
+if(PROJECT_IS_TOP_LEVEL)
+    # The standalone build is an optimised tool unless a build type is given
+    # (a multi-config generator picks it at build time instead).
+    get_property(cluau_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(NOT cluau_multi_config AND NOT CMAKE_BUILD_TYPE)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "The build type (Debug, Release, RelWithDebInfo, MinSizeRel)" FORCE)
+    endif()
+    # With MSVC, the C and C++ runtime is linked in (/MT), in cluau and in
+    # every library it builds, so that cluau.exe needs no Visual C++
+    # redistributable. A host that embeds cluau chooses its own.
+    if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endif()
+
 add_library(cluau_translator STATIC
     src/translate/Lexer.cpp
     src/translate/Translate.cpp
@@ -18,6 +40,9 @@ add_library(cluau_translator STATIC
     src/translate/Format.cpp
 )
 target_include_directories(cluau_translator PUBLIC include PRIVATE src/translate)
+# A host may link the translator into a shared library (a plugin, an editor
+# module); it has no dependencies, so this costs nothing elsewhere.
+set_target_properties(cluau_translator PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 set(CLUAU_LUAU_DIR "" CACHE PATH "A Luau checkout, 0.748 or later (the runtime's Luau; without the runtime, builds cluau_check)")
 
@@ -39,12 +64,45 @@ if(CLUAU_LUAU_VERSION)
 else()
     set(cluau_luau_tag ${CLUAU_LUAU_PINNED})
 endif()
+
+# Adds a library cluau builds on (fetched with FetchContent, or DIR's
+# checkout) with its options set to the NAME=VALUE pairs after SETTINGS. The
+# settings are normal variables of this function, which the library's
+# option() and set(CACHE) take in place of their defaults: none of them is
+# written to the cache, and a host's own values (BUILD_SHARED_LIBS,
+# BUILD_TESTING, ...) are the same afterwards. Sets <name>_SOURCE_DIR.
+function(cluau_add_dependency name)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "" "DIR" "SETTINGS")
+    foreach(setting IN LISTS arg_SETTINGS)
+        string(FIND "${setting}" "=" at)
+        string(SUBSTRING "${setting}" 0 ${at} key)
+        math(EXPR at "${at} + 1")
+        string(SUBSTRING "${setting}" ${at} -1 value)
+        set(${key} "${value}")
+    endforeach()
+    # The policies that make a library with an older CMake minimum take
+    # those variables (option(), set(CACHE), find_*), and choose its MSVC
+    # runtime from CMAKE_MSVC_RUNTIME_LIBRARY as cluau's own targets do.
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
+    set(CMAKE_POLICY_DEFAULT_CMP0125 NEW)
+    set(CMAKE_POLICY_DEFAULT_CMP0126 NEW)
+    if(arg_DIR)
+        add_subdirectory(${arg_DIR} ${CMAKE_BINARY_DIR}/${name} EXCLUDE_FROM_ALL)
+        set(${name}_SOURCE_DIR ${arg_DIR} PARENT_SCOPE)
+    else()
+        FetchContent_MakeAvailable(${name})
+        set(${name}_SOURCE_DIR ${${name}_SOURCE_DIR} PARENT_SCOPE)
+        # Only what cluau links is built.
+        set_property(DIRECTORY ${${name}_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+endfunction()
+
 if(CLUAU_BUILD_RUNTIME)
     if(NOT TARGET Luau.VM)
-        set(LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE)
-        set(LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(cluau_luau_settings LUAU_BUILD_CLI=OFF LUAU_BUILD_TESTS=OFF)
         if(CLUAU_LUAU_DIR)
-            add_subdirectory(${CLUAU_LUAU_DIR} ${CMAKE_BINARY_DIR}/luau EXCLUDE_FROM_ALL)
+            cluau_add_dependency(luau DIR ${CLUAU_LUAU_DIR} SETTINGS ${cluau_luau_settings})
             set(cluau_luau_source ${CLUAU_LUAU_DIR})
         else()
             include(FetchContent)
@@ -56,13 +114,10 @@ if(CLUAU_BUILD_RUNTIME)
             else()
                 FetchContent_Declare(luau
                     URL https://github.com/luau-lang/luau/archive/refs/tags/${CLUAU_LUAU_PINNED}.tar.gz
-                    URL_HASH SHA256=${CLUAU_LUAU_PINNED_SHA256}
-                    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+                    URL_HASH SHA256=${CLUAU_LUAU_PINNED_SHA256})
             endif()
-            FetchContent_MakeAvailable(luau)
+            cluau_add_dependency(luau SETTINGS ${cluau_luau_settings})
             set(cluau_luau_source ${luau_SOURCE_DIR})
-            # Only what the runtime links is built.
-            set_property(DIRECTORY ${luau_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
         endif()
     endif()
     # @std/http: libcurl (HTTP and HTTPS only) over mbedTLS, both fetched at
@@ -77,23 +132,16 @@ if(CLUAU_BUILD_RUNTIME)
         # With its threading (cmake/mbedtls/cluau_config.h): transfers and
         # connections run on several threads at once. Whatever includes its
         # headers sees the same configuration through its targets.
-        set(MBEDTLS_USER_CONFIG_FILE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls/cluau_config.h CACHE FILEPATH "" FORCE)
-        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
-        set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-        set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
-        set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
-        set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
-        set(GEN_FILES OFF CACHE BOOL "" FORCE)
-        set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
         FetchContent_Declare(mbedtls
             URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.8/mbedtls-3.6.8.tar.bz2
-            URL_HASH SHA256=bc54b818e87f49c0b3281dd85d24adaede0e63b4e822e3fbd49c005a38b9595b
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        # mbedTLS 3.6 asks for an old CMake minimum, which CMake 4 warns about.
-        set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
-        FetchContent_MakeAvailable(mbedtls)
-        unset(CMAKE_POLICY_VERSION_MINIMUM)
-        set_property(DIRECTORY ${mbedtls_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+            URL_HASH SHA256=bc54b818e87f49c0b3281dd85d24adaede0e63b4e822e3fbd49c005a38b9595b)
+        # mbedTLS 3.6 asks for an old CMake minimum, which CMake 4 warns about
+        # (CMAKE_POLICY_VERSION_MINIMUM).
+        cluau_add_dependency(mbedtls SETTINGS
+            MBEDTLS_USER_CONFIG_FILE=${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls/cluau_config.h
+            ENABLE_PROGRAMS=OFF ENABLE_TESTING=OFF MBEDTLS_FATAL_WARNINGS=OFF USE_SHARED_MBEDTLS_LIBRARY=OFF
+            USE_STATIC_MBEDTLS_LIBRARY=ON GEN_FILES=OFF DISABLE_PACKAGE_CONFIG_AND_INSTALL=ON
+            CMAKE_POLICY_VERSION_MINIMUM=3.10)
         find_package(Threads REQUIRED)
         foreach(library mbedcrypto mbedx509 mbedtls)
             target_include_directories(${library} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mbedtls) # threading_alt.h
@@ -101,34 +149,30 @@ if(CLUAU_BUILD_RUNTIME)
         endforeach()
     endif()
     if(CLUAU_HTTP)
-
-        # curl finds this mbedTLS through these (its targets, not installed files).
-        set(MBEDTLS_INCLUDE_DIR ${mbedtls_SOURCE_DIR}/include CACHE PATH "" FORCE)
-        set(MBEDTLS_LIBRARY mbedtls CACHE STRING "" FORCE)
-        set(MBEDX509_LIBRARY mbedx509 CACHE STRING "" FORCE)
-        set(MBEDCRYPTO_LIBRARY mbedcrypto CACHE STRING "" FORCE)
-        set(HAVE_MBEDTLS_DES_CRYPT_ECB 1 CACHE INTERNAL "") # a link test that cannot run before mbedTLS is built
-        foreach(setting
-                CURL_USE_MBEDTLS=ON CURL_USE_OPENSSL=OFF CURL_USE_SCHANNEL=OFF CURL_USE_WOLFSSL=OFF CURL_USE_GNUTLS=OFF
-                HTTP_ONLY=ON BUILD_CURL_EXE=OFF BUILD_SHARED_LIBS=OFF BUILD_STATIC_LIBS=ON BUILD_TESTING=OFF
-                BUILD_LIBCURL_DOCS=OFF BUILD_MISC_DOCS=OFF ENABLE_CURL_MANUAL=OFF CURL_DISABLE_INSTALL=ON
-                CURL_USE_PKGCONFIG=OFF CURL_ZLIB=OFF CURL_BROTLI=OFF CURL_ZSTD=OFF USE_NGHTTP2=OFF USE_LIBIDN2=OFF
-                CURL_USE_LIBPSL=OFF CURL_USE_LIBSSH2=OFF CURL_USE_LIBSSH=OFF CURL_USE_GSSAPI=OFF ENABLE_ARES=OFF
-                CURL_DISABLE_LDAP=ON CURL_DISABLE_LDAPS=ON PICKY_COMPILER=OFF CURL_LTO=OFF)
-            string(REPLACE "=" ";" pair ${setting})
-            list(GET pair 0 name)
-            list(GET pair 1 value)
-            set(${name} ${value} CACHE BOOL "" FORCE)
-        endforeach()
-        # No bundle path from the build machine: the run decides (it differs by system).
-        set(CURL_CA_BUNDLE none CACHE STRING "" FORCE)
-        set(CURL_CA_PATH none CACHE STRING "" FORCE)
         FetchContent_Declare(curl
             URL https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.gz
-            URL_HASH SHA256=e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(curl)
-        set_property(DIRECTORY ${curl_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+            URL_HASH SHA256=e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49)
+        # No bundle path from the build machine: the run decides (it differs by
+        # system). curl takes these two from the cache only, and removes them
+        # from it again.
+        set(CURL_CA_BUNDLE none CACHE STRING "" FORCE)
+        set(CURL_CA_PATH none CACHE STRING "" FORCE)
+        cluau_add_dependency(curl SETTINGS
+            # curl finds this mbedTLS through these (its targets, not installed
+            # files); its link test for DES cannot run before mbedTLS is built.
+            MBEDTLS_INCLUDE_DIR=${mbedtls_SOURCE_DIR}/include MBEDTLS_LIBRARY=mbedtls MBEDX509_LIBRARY=mbedx509
+            MBEDCRYPTO_LIBRARY=mbedcrypto HAVE_MBEDTLS_DES_CRYPT_ECB=1
+            CURL_USE_MBEDTLS=ON CURL_USE_OPENSSL=OFF CURL_USE_SCHANNEL=OFF CURL_USE_WOLFSSL=OFF CURL_USE_GNUTLS=OFF
+            BUILD_CURL_EXE=OFF BUILD_SHARED_LIBS=OFF BUILD_STATIC_LIBS=ON BUILD_TESTING=OFF
+            BUILD_LIBCURL_DOCS=OFF BUILD_MISC_DOCS=OFF ENABLE_CURL_MANUAL=OFF CURL_DISABLE_INSTALL=ON
+            CURL_USE_PKGCONFIG=OFF CURL_ZLIB=OFF CURL_BROTLI=OFF CURL_ZSTD=OFF USE_NGHTTP2=OFF USE_LIBIDN2=OFF
+            CURL_USE_LIBPSL=OFF CURL_USE_LIBSSH2=OFF CURL_USE_LIBSSH=OFF CURL_USE_GSSAPI=OFF ENABLE_ARES=OFF
+            PICKY_COMPILER=OFF CURL_LTO=OFF
+            # HTTP and HTTPS only (the transfers allow no others either).
+            CURL_DISABLE_DICT=ON CURL_DISABLE_FILE=ON CURL_DISABLE_FTP=ON CURL_DISABLE_GOPHER=ON CURL_DISABLE_IMAP=ON
+            CURL_DISABLE_IPFS=ON CURL_DISABLE_LDAP=ON CURL_DISABLE_LDAPS=ON CURL_DISABLE_MQTT=ON CURL_DISABLE_POP3=ON
+            CURL_DISABLE_RTSP=ON CURL_DISABLE_SMTP=ON CURL_DISABLE_TELNET=ON CURL_DISABLE_TFTP=ON
+            CURL_DISABLE_WEBSOCKETS=ON)
     endif()
 
     # @std/sqlite: SQLite's amalgamation (one C file), fetched at a release
@@ -139,8 +183,7 @@ if(CLUAU_BUILD_RUNTIME)
         enable_language(C)
         FetchContent_Declare(sqlite
             URL https://sqlite.org/2026/sqlite-amalgamation-3540100.zip
-            URL_HASH SHA3_256=92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            URL_HASH SHA3_256=92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30)
         FetchContent_MakeAvailable(sqlite)
         add_library(cluau_sqlite STATIC ${sqlite_SOURCE_DIR}/sqlite3.c)
         target_include_directories(cluau_sqlite PUBLIC ${sqlite_SOURCE_DIR})
@@ -161,8 +204,7 @@ if(CLUAU_BUILD_RUNTIME)
         enable_language(C)
         FetchContent_Declare(miniz
             URL https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip
-            URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a)
         FetchContent_MakeAvailable(miniz) # the release is the one C file and its header
         add_library(cluau_miniz STATIC ${miniz_SOURCE_DIR}/miniz.c)
         target_include_directories(cluau_miniz PUBLIC ${miniz_SOURCE_DIR})
@@ -178,21 +220,13 @@ if(CLUAU_BUILD_RUNTIME)
     option(CLUAU_REGEX "Build @std/regex (fetches PCRE2)" ON)
     if(CLUAU_REGEX)
         include(FetchContent)
-        foreach(setting
-                PCRE2_BUILD_PCRE2_8=ON PCRE2_BUILD_PCRE2_16=OFF PCRE2_BUILD_PCRE2_32=OFF PCRE2_SUPPORT_UNICODE=ON
-                PCRE2_SUPPORT_JIT=OFF PCRE2_BUILD_PCRE2GREP=OFF PCRE2_BUILD_TESTS=OFF PCRE2_SHOW_REPORT=OFF
-                BUILD_SHARED_LIBS=OFF BUILD_STATIC_LIBS=ON PCRE2_STATIC_PIC=ON)
-            string(REPLACE "=" ";" pair ${setting})
-            list(GET pair 0 name)
-            list(GET pair 1 value)
-            set(${name} ${value} CACHE BOOL "" FORCE)
-        endforeach()
         FetchContent_Declare(pcre2
             URL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.bz2
-            URL_HASH SHA256=53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(pcre2)
-        set_property(DIRECTORY ${pcre2_SOURCE_DIR} PROPERTY EXCLUDE_FROM_ALL TRUE)
+            URL_HASH SHA256=53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384)
+        cluau_add_dependency(pcre2 SETTINGS
+            PCRE2_BUILD_PCRE2_8=ON PCRE2_BUILD_PCRE2_16=OFF PCRE2_BUILD_PCRE2_32=OFF PCRE2_SUPPORT_UNICODE=ON
+            PCRE2_SUPPORT_JIT=OFF PCRE2_BUILD_PCRE2GREP=OFF PCRE2_BUILD_TESTS=OFF PCRE2_SHOW_REPORT=OFF
+            BUILD_SHARED_LIBS=OFF BUILD_STATIC_LIBS=ON PCRE2_STATIC_PIC=ON)
     endif()
 
     # The strict rules, over Luau's analysis.
@@ -381,6 +415,16 @@ if(CLUAU_BUILD_RUNTIME)
                 set_tests_properties(http:local PROPERTIES TIMEOUT 180)
             endif()
         endif()
+        # THIRD_PARTY_NOTICES.md holds the licences of exactly the pinned
+        # releases: a build that fetched all of them checks it.
+        if(CLUAU_HTTP AND CLUAU_REGEX AND CLUAU_COMPRESS AND NOT CLUAU_LUAU_DIR AND NOT CLUAU_LUAU_VERSION
+                AND DEFINED luau_SOURCE_DIR)
+            add_test(NAME notices
+                COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/THIRD_PARTY_NOTICES.md
+                    -DCHECK=${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md -DLUAU=${luau_SOURCE_DIR}
+                    -DCURL=${curl_SOURCE_DIR} -DMBEDTLS=${mbedtls_SOURCE_DIR} -DPCRE2=${pcre2_SOURCE_DIR}
+                    -DMINIZ=${miniz_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/third_party_notices.cmake)
+        endif()
         file(GLOB CLUAU_CHECK_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/check/*.cluau)
         foreach(script ${CLUAU_CHECK_TESTS})
             get_filename_component(name ${script} NAME_WE)
@@ -392,10 +436,11 @@ if(CLUAU_BUILD_RUNTIME)
 endif()
 
 # `cmake --install build [--prefix <dir>]`: the tool (on PATH, so a script's
-# `#!/usr/bin/env cluau` line finds it) and its documentation. A host that
-# embeds cluau installs what it needs itself.
+# `#!/usr/bin/env cluau` line finds it), its documentation and the licences
+# of the libraries it contains. A host that embeds cluau installs what it
+# needs itself.
 if(PROJECT_IS_TOP_LEVEL)
     include(GNUInstallDirs)
     install(TARGETS cluau RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(FILES README.md LICENSE docs/syntax.md docs/scripting.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+    install(FILES README.md LICENSE THIRD_PARTY_NOTICES.md docs/syntax.md docs/scripting.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()
