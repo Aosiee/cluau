@@ -29,7 +29,10 @@
 // Expressions (conditions, log messages, watches, the console) are cluau
 // (or Luau, in a .luau file), compiled as `return (<expression>)` and run
 // in a fresh thread whose environment is the frame's locals, then its
-// upvalues, over its globals. They read; nothing is written back.
+// upvalues, over its globals (`...` is the frame's varargs). An
+// expression cannot assign the frame's locals, but what it calls runs for
+// real: a function it calls can change the tables the script holds. One
+// that runs longer than two seconds is stopped with an error.
 
 #include <atomic>
 #include <functional>
@@ -73,6 +76,9 @@ namespace cluau::runtime::detail {
 	// reads the editor's requests meanwhile (a pause asked for is taken at
 	// the next line that runs), and ends the script when asked to.
 	void DebugWaiting(lua_State* L);
+	// A debugger is attached: a blocking call waits on a job's thread, so
+	// that the waits call DebugWaiting (without @std/task as well).
+	bool DebuggerAttached(lua_State* L);
 
 	struct Breakpoint
 	{
@@ -84,8 +90,15 @@ namespace cluau::runtime::detail {
 		std::string LogMessage;  // logs ({expression} replaced by its value) instead of pausing
 		// Kept by the debugger:
 		int Hits = 0;
-		int ResolvedLine = 0;    // where Luau put it (the next line with code); 0 before the file loads
-		std::string Problem;     // the condition or hit count does not compile
+		// Where it was put: the line itself when it has code, the next line
+		// with code after a blank or comment line, the nearest line with
+		// code before a line that only closes a block (`}`). 0 until a
+		// chunk of the file is loaded: the breakpoint is not verified yet.
+		int ResolvedLine = 0;
+		bool Closing = false;    // the line only closes a block
+		std::string Problem;     // the condition or hit count does not compile; no code at the line
+
+		bool Verified() const { return Problem.empty() && ResolvedLine > 0; }
 	};
 
 	enum class PauseReason { Breakpoint, Step, Entry, Pause, Error, CaughtError };
@@ -93,7 +106,7 @@ namespace cluau::runtime::detail {
 	struct PauseInfo
 	{
 		PauseReason Reason = PauseReason::Breakpoint;
-		int Breakpoint = 0;
+		std::vector<int> Breakpoints; // those that paused at the line
 		std::string Message; // the error
 	};
 
@@ -127,7 +140,8 @@ namespace cluau::runtime::detail {
 			std::function<void(const std::string&)> Log;
 			// Called often while the script runs (to read requests).
 			std::function<void()> Poll;
-			// A breakpoint moved to the line with code, or found a problem.
+			// A breakpoint was verified as its file loaded (and moved to the
+			// line with code), or found a problem.
 			std::function<void(const Breakpoint&)> Changed;
 		};
 
@@ -139,7 +153,8 @@ namespace cluau::runtime::detail {
 		// Replaces `file`'s breakpoints; returns them with ids and lines.
 		std::vector<Breakpoint> SetBreakpoints(const std::string& file, std::vector<Breakpoint> breakpoints);
 		// Breakpoints set before a script starts: those past the end of the
-		// file (as it is now) have the problem said.
+		// file (as it is now), or whose condition or hit count does not
+		// compile, have the problem said.
 		static void MarkPastEnd(const std::string& file, std::vector<Breakpoint>& breakpoints);
 		void SetBreakOnErrors(bool uncaught, bool caught);
 		// Pause at the first line of the script.
@@ -179,6 +194,7 @@ namespace cluau::runtime::detail {
 			std::string File; // canonical
 			int Ref = 0;
 			int Lines = 0; // the file's, when it was read (0: not known)
+			std::vector<int> Armed; // the lines the editor's breakpoints armed in it
 		};
 		enum class Resume { None, Continue, Step };
 
@@ -201,8 +217,28 @@ namespace cluau::runtime::detail {
 		// whether it was coroutine.resume; null for another resumer (the
 		// runtime, @std/task's scheduler).
 		lua_State* ResumerOf(lua_State* co, bool* byResume = nullptr);
+		// The error being caught passed through the script's own code, or
+		// is caught there (not one a standard module raises and catches).
+		bool CaughtInScript(lua_State* L);
+		bool ResumedFromLua();
+		// The first frame of L in the script's own code (its level), or -1.
+		int UserFrame(lua_State* L);
 
-		void Arm(const std::string& file, int line);
+		// The file's breakpoints resolved and armed in each chunk loaded from
+		// it (or only in `chunk`, its function at `index` of L); returns those
+		// whose line or verification changed.
+		std::vector<Breakpoint*> ArmFile(const std::string& file, Chunk* chunk = nullptr, lua_State* L = nullptr, int index = 0);
+		// The breakpoint's line in the chunk's function (at `index` of L),
+		// armed; -1 when the chunk has no code there or after it. `stray`:
+		// lines armed while looking that no breakpoint may want.
+		int Resolve(lua_State* L, int index, const Breakpoint& b, std::vector<int>& stray);
+		// The editor's breakpoints armed again (a step's breakpoints, taken
+		// out, may have shared their lines), and the step's own.
+		void Rearm();
+		void RearmSteps();
+		// An expression or __tostring run while evaluating has a deadline.
+		bool BeginEvaluation();
+		void EndEvaluation(bool was);
 		// A step where the thread cannot leave the VM: by breakpoints, in
 		// the function at `level` (the first Lua frame there or below) and
 		// the Lua function it returns to; `here`: a step out stops in that
@@ -229,6 +265,7 @@ namespace cluau::runtime::detail {
 		bool RunExpression(lua_State* L, int level, const std::string& bytecode, std::string& text, bool* truthy, Variable* described = nullptr);
 		std::string FormatLog(lua_State* L, Breakpoint& b);
 		std::string Format(lua_State* S, int index);
+		std::string KeyName(lua_State* S, int index);
 		Variable Describe(const std::string& name);
 		void Release();
 
@@ -249,6 +286,7 @@ namespace cluau::runtime::detail {
 		// The threads being resumed, innermost last.
 		std::vector<lua_State*> m_Resuming;
 		int m_ResumeRef = 0; // coroutine.resume (registry ref)
+		int m_PcallRef = 0, m_XpcallRef = 0;
 
 		lua_State* m_Paused = nullptr;
 		PauseInfo m_Pause;
@@ -258,6 +296,11 @@ namespace cluau::runtime::detail {
 		int m_ScratchRef = 0;
 		std::vector<int> m_Handles; // the pause's expandable tables (registry refs)
 		bool m_Evaluating = false;
+		double m_EvaluationDeadline = 0; // seconds of the steady clock
+		// The error of a task the debugger paused at: the script's end by it is not a second pause.
+		std::string m_TaskError;
+		// A step through a task that ended: it stops in the next coroutine resumed.
+		bool m_StepNextResumed = false;
 
 		lua_State* m_StepThread = nullptr;
 		int m_StepDepth = 0;

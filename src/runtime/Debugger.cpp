@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -57,9 +59,97 @@ namespace cluau::runtime::detail {
 				i++;
 			if (i == digits)
 				return false;
-			count = std::atoi(text.c_str() + digits);
+			// A count past int's range is refused, not wrapped.
+			const auto parsed = std::from_chars(text.data() + digits, text.data() + i, count);
+			if (parsed.ec != std::errc() || parsed.ptr != text.data() + i)
+				return false;
 			skip();
 			return i == text.size() && (op != "%" || count > 0);
+		}
+
+		// The length of the UTF-8 character at `s` (of `n` bytes); 0 when
+		// the bytes there are not one.
+		size_t Utf8Length(const unsigned char* s, size_t n)
+		{
+			const unsigned char c = s[0];
+			size_t length = 0;
+			unsigned min = 0, code = 0;
+			if (c < 0x80)
+				return 1;
+			if (c >= 0xC2 && c <= 0xDF)
+				length = 2, min = 0x80, code = c & 0x1F;
+			else if (c >= 0xE0 && c <= 0xEF)
+				length = 3, min = 0x800, code = c & 0x0F;
+			else if (c >= 0xF0 && c <= 0xF4)
+				length = 4, min = 0x10000, code = c & 0x07;
+			else
+				return 0;
+			if (n < length)
+				return 0;
+			for (size_t i = 1; i < length; i++)
+			{
+				if ((s[i] & 0xC0) != 0x80)
+					return 0;
+				code = (code << 6) | (s[i] & 0x3F);
+			}
+			if (code < min || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
+				return 0;
+			return length;
+		}
+
+		// A string as a quoted literal: escapes for quotes, backslashes,
+		// control characters and bytes that are not UTF-8 (\xFE); cut at a
+		// character's end, with "..." before the closing quote, once it is
+		// `limit` bytes long.
+		std::string Quoted(const char* s, size_t len, size_t limit = 80)
+		{
+			std::string out = "\"";
+			size_t i = 0;
+			while (i < len && out.size() < limit)
+			{
+				const unsigned char c = (unsigned char)s[i];
+				char escape[8];
+				switch (c)
+				{
+				case '"': out += "\\\""; break;
+				case '\\': out += "\\\\"; break;
+				case '\n': out += "\\n"; break;
+				case '\r': out += "\\r"; break;
+				case '\t': out += "\\t"; break;
+				case '\0': out += "\\0"; break;
+				default:
+					if (c < 0x20 || c == 0x7F)
+					{
+						std::snprintf(escape, sizeof(escape), "\\x%02X", c);
+						out += escape;
+					}
+					else if (c >= 0x80)
+					{
+						const size_t n = Utf8Length((const unsigned char*)s + i, len - i);
+						if (n == 0)
+						{
+							std::snprintf(escape, sizeof(escape), "\\x%02X", c);
+							out += escape;
+						}
+						else
+						{
+							out.append(s + i, n);
+							i += n - 1;
+						}
+					}
+					else
+						out += (char)c;
+				}
+				i++;
+			}
+			return out + (i < len ? "...\"" : "\"");
+		}
+
+		bool IsName(const std::string& s)
+		{
+			if (s.empty() || !(std::isalpha((unsigned char)s[0]) || s[0] == '_'))
+				return false;
+			return std::all_of(s.begin(), s.end(), [](char c) { return std::isalnum((unsigned char)c) || c == '_'; });
 		}
 
 		// The text a table shows before it is opened: its class, its first
@@ -72,13 +162,19 @@ namespace cluau::runtime::detail {
 			{
 				size_t len = 0;
 				const char* s = lua_tolstring(S, index, &len);
-				std::string out = "\"";
-				for (size_t i = 0; i < len && out.size() < 80; i++)
+				return Quoted(s, len);
+			}
+			case LUA_TVECTOR:
+			{
+				const float* v = lua_tovector(S, index);
+				std::string out = "vector(";
+				for (int i = 0; i < LUA_VECTOR_SIZE; i++)
 				{
-					const char c = s[i];
-					out += c == '"' ? "\\\"" : c == '\\' ? "\\\\" : c == '\n' ? "\\n" : c == '\t' ? "\\t" : std::string(1, c);
+					char number[32];
+					std::snprintf(number, sizeof(number), "%.9g", (double)v[i]);
+					out += (i ? ", " : "") + std::string(number);
 				}
-				return out + (len > 78 ? "...\"" : "\"");
+				return out + ")";
 			}
 			case LUA_TTABLE: return "{...}";
 			case LUA_TNIL: return "nil";
@@ -115,12 +211,81 @@ namespace cluau::runtime::detail {
 			return lines + (last != '\n' ? 1 : 0);
 		}
 
+		// The file's lines (without their line breaks); empty when it cannot be read.
+		std::vector<std::string> FileLines(const std::string& file)
+		{
+			std::vector<std::string> lines;
+			std::ifstream in(fs::u8path(file), std::ios::binary);
+			for (std::string line; std::getline(in, line);)
+			{
+				if (!line.empty() && line.back() == '\r')
+					line.pop_back();
+				lines.push_back(std::move(line));
+			}
+			return lines;
+		}
+
+		// The line only closes a block: `}`, `})`, `},` (in Luau `end`,
+		// `end)`), and perhaps a comment.
+		bool OnlyCloses(const std::string& text, bool luau)
+		{
+			std::string code = text;
+			const size_t comment = code.find(luau ? "--" : "//");
+			if (comment != std::string::npos)
+				code.erase(comment);
+			bool any = false;
+			for (size_t i = 0; i < code.size(); i++)
+			{
+				const char c = code[i];
+				if (std::isspace((unsigned char)c) || c == ',' || c == ';' || c == ')' || c == ']')
+					continue;
+				if (c == '}')
+					any = true;
+				else if (luau && code.compare(i, 3, "end") == 0 && (i + 3 == code.size() || !std::isalnum((unsigned char)code[i + 3])) &&
+						 (i == 0 || !std::isalnum((unsigned char)code[i - 1])))
+				{
+					any = true;
+					i += 2;
+				}
+				else
+					return false;
+			}
+			return any;
+		}
+
+		double Now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+		// How long an expression (a watch, a condition, a value's __tostring) may run.
+		constexpr double kEvaluationSeconds = 2;
+
 		// Why a breakpoint's line is not in the file ("" when it is).
 		std::string PastEndOf(const std::optional<int>& lines, int line)
 		{
 			if (!lines || line <= *lines)
 				return {};
 			return "the file has " + std::to_string(*lines) + (*lines == 1 ? " line" : " lines") + ": there is no code at line " + std::to_string(line);
+		}
+
+		// What keeps a breakpoint from pausing ("" for nothing); `bytecode`:
+		// its condition, compiled.
+		std::string ProblemOf(const Breakpoint& b, const std::optional<int>& lines, bool luau, std::string* bytecode)
+		{
+			if (std::string past = PastEndOf(lines, b.Line); !past.empty())
+				return past;
+			if (!b.Condition.empty())
+			{
+				std::string error;
+				std::string compiled = CompileExpression(b.Condition, luau, error);
+				if (compiled.empty())
+					return "the condition does not compile: " + error;
+				if (bytecode)
+					*bytecode = std::move(compiled);
+			}
+			std::string op;
+			int count = 0;
+			if (!b.HitCondition.empty() && !ParseHitCondition(b.HitCondition, op, count))
+				return "the hit count is a number up to 2147483647, or one after >=, ==, >, <, <= or % (\"% 3\": every third hit)";
+			return {};
 		}
 
 		int ToStringProtected(lua_State* S)
@@ -156,6 +321,13 @@ namespace cluau::runtime::detail {
 			lua_pop(m_Main, 1);
 		}
 		lua_pop(m_Main, 1);
+		for (auto [name, ref] : { std::pair<const char*, int*>{ "pcall", &m_PcallRef }, { "xpcall", &m_XpcallRef } })
+		{
+			lua_getglobal(m_Main, name);
+			if (lua_isfunction(m_Main, -1))
+				*ref = lua_ref(m_Main, -1);
+			lua_pop(m_Main, 1);
+		}
 	}
 
 	Debugger::~Debugger()
@@ -174,8 +346,9 @@ namespace cluau::runtime::detail {
 		cb->debuginterrupt = nullptr;
 		for (const Chunk& chunk : m_Chunks)
 			lua_unref(m_Main, chunk.Ref);
-		if (m_ResumeRef)
-			lua_unref(m_Main, m_ResumeRef);
+		for (int ref : { m_ResumeRef, m_PcallRef, m_XpcallRef })
+			if (ref)
+				lua_unref(m_Main, ref);
 	}
 
 	Debugger* Debugger::Of(lua_State* L) { return static_cast<Debugger*>(lua_callbacks(L)->userdata); }
@@ -223,6 +396,8 @@ namespace cluau::runtime::detail {
 		if (Debugger* d = Of(L))
 			d->OnResumed(L);
 	}
+
+	bool DebuggerAttached(lua_State* L) { return lua_callbacks(L)->userdata != nullptr; }
 
 	void DebugWaiting(lua_State* L)
 	{
@@ -276,22 +451,18 @@ namespace cluau::runtime::detail {
 	std::vector<Breakpoint> Debugger::SetBreakpoints(const std::string& file, std::vector<Breakpoint> breakpoints)
 	{
 		const std::string canonical = Canonical(file);
-		std::vector<int> oldLines;
 		for (auto it = m_Breakpoints.begin(); it != m_Breakpoints.end();)
 			if (it->File == canonical)
 			{
-				oldLines.push_back(it->Line);
 				m_Conditions.erase(it->Id);
 				it = m_Breakpoints.erase(it);
 			}
 			else
 				++it;
-		for (int line : oldLines)
-			Arm(canonical, line);
 
 		const bool luau = EndsWith(canonical, ".luau");
 		const std::optional<int> lines = LineCount(canonical);
-		std::vector<Breakpoint> out;
+		const std::vector<std::string> text = FileLines(canonical);
 		for (Breakpoint& b : breakpoints)
 		{
 			if (b.Id == 0)
@@ -299,26 +470,15 @@ namespace cluau::runtime::detail {
 			b.File = canonical;
 			b.Hits = 0;
 			b.ResolvedLine = 0;
-			b.Problem.clear();
-			b.Problem = PastEndOf(lines, b.Line);
-			if (b.Problem.empty() && !b.Condition.empty())
-			{
-				std::string error;
-				std::string bytecode = CompileExpression(b.Condition, luau, error);
-				if (bytecode.empty())
-					b.Problem = "the condition does not compile: " + error;
-				else
-					m_Conditions[b.Id] = std::move(bytecode);
-			}
-			std::string op;
-			int count = 0;
-			if (b.Problem.empty() && !b.HitCondition.empty() && !ParseHitCondition(b.HitCondition, op, count))
-				b.Problem = "the hit count is a number, or one after >=, ==, >, <, <= or % (\"% 3\": every third hit)";
+			b.Closing = b.Line >= 1 && (size_t)b.Line <= text.size() && OnlyCloses(text[(size_t)b.Line - 1], luau);
+			std::string bytecode;
+			b.Problem = ProblemOf(b, lines, luau, &bytecode);
+			if (b.Problem.empty() && !bytecode.empty())
+				m_Conditions[b.Id] = std::move(bytecode);
 			m_Breakpoints.push_back(b);
 		}
-		for (const Breakpoint& b : m_Breakpoints)
-			if (b.File == canonical)
-				Arm(canonical, b.Line);
+		ArmFile(canonical);
+		std::vector<Breakpoint> out;
 		for (const Breakpoint& b : m_Breakpoints)
 			if (b.File == canonical)
 				out.push_back(b);
@@ -327,10 +487,11 @@ namespace cluau::runtime::detail {
 
 	void Debugger::MarkPastEnd(const std::string& file, std::vector<Breakpoint>& breakpoints)
 	{
-		const std::optional<int> lines = LineCount(Canonical(file));
+		const std::string canonical = Canonical(file);
+		const std::optional<int> lines = LineCount(canonical);
 		for (Breakpoint& b : breakpoints)
 			if (b.Problem.empty())
-				b.Problem = PastEndOf(lines, b.Line);
+				b.Problem = ProblemOf(b, lines, EndsWith(canonical, ".luau"), nullptr);
 	}
 
 	void Debugger::SetBreakOnErrors(bool uncaught, bool caught)
@@ -345,22 +506,122 @@ namespace cluau::runtime::detail {
 		lua_singlestep(m_Main, 1); // the script's thread inherits it
 	}
 
-	// Luau patches one BREAK per line: the line is armed while any
-	// breakpoint names it, in every chunk loaded from the file.
-	void Debugger::Arm(const std::string& file, int line)
+	int Debugger::Resolve(lua_State* L, int index, const Breakpoint& b, std::vector<int>& stray)
 	{
-		const bool armed = std::any_of(m_Breakpoints.begin(), m_Breakpoints.end(), [&](const Breakpoint& b) { return b.File == file && b.Line == line; });
+		// Luau arms the line, or the next one with code, and says which.
+		const int next = lua_breakpoint(L, index, b.Line, 1);
+		if (next == b.Line || !b.Closing)
+			return next;
+		// A line that only closes a block: the block's last line with code
+		// (where a breakpoint on a loop's `}` pauses on each pass), not the
+		// code after the block. The nearest line before it with code is the
+		// first, going up, that Luau resolves to a line before this one.
+		if (next > 0)
+			stray.push_back(next);
+		for (int line = b.Line - 1; line >= 1 && line >= b.Line - 1000; line--)
+		{
+			const int at = lua_breakpoint(L, index, line, 1);
+			if (at > 0 && at < b.Line)
+				return at;
+		}
+		return next;
+	}
+
+	// Luau patches one BREAK per line: a line is armed while a breakpoint
+	// resolves to it, in every chunk loaded from the file.
+	std::vector<Breakpoint*> Debugger::ArmFile(const std::string& file, Chunk* only, lua_State* L, int index)
+	{
+		struct Before
+		{
+			Breakpoint* B;
+			int Line;
+			bool Verified;
+		};
+		std::vector<Before> before;
+		for (Breakpoint& b : m_Breakpoints)
+			if (b.File == file)
+				before.push_back({ &b, b.ResolvedLine, b.Verified() });
+		for (Chunk& chunk : m_Chunks)
+		{
+			if (chunk.File != file || (only && &chunk != only))
+				continue;
+			lua_State* S = only ? L : m_Main;
+			int at = index;
+			if (!only)
+			{
+				lua_checkstack(m_Main, 2);
+				lua_getref(m_Main, chunk.Ref);
+				at = -1;
+			}
+			at = lua_absindex(S, at);
+			std::vector<int> want, stray;
+			for (Breakpoint& b : m_Breakpoints)
+			{
+				if (b.File != file)
+					continue;
+				const int line = Resolve(S, at, b, stray);
+				if (line > 0)
+				{
+					b.ResolvedLine = line;
+					if (b.Problem.empty())
+						want.push_back(line);
+					else
+						stray.push_back(line);
+				}
+				else if (b.ResolvedLine == 0 && b.Problem.empty())
+					b.Problem = "there is no code at line " + std::to_string(b.Line) + " or after it";
+			}
+			auto wanted = [&](int line) { return std::find(want.begin(), want.end(), line) != want.end(); };
+			for (const std::vector<int>* list : { &chunk.Armed, &stray })
+				for (int line : *list)
+					if (!wanted(line))
+						lua_breakpoint(S, at, line, 0);
+			for (int line : want)
+				lua_breakpoint(S, at, line, 1);
+			chunk.Armed = std::move(want);
+			if (!only)
+				lua_pop(m_Main, 1);
+		}
+		// Taking a line out takes out a step's breakpoint there too.
+		RearmSteps();
+		std::vector<Breakpoint*> changed;
+		for (const Before& b : before)
+			if (b.B->ResolvedLine != b.Line || b.B->Verified() != b.Verified)
+				changed.push_back(b.B);
+		return changed;
+	}
+
+	void Debugger::Rearm()
+	{
 		for (const Chunk& chunk : m_Chunks)
 		{
-			if (chunk.File != file)
+			if (chunk.Armed.empty())
 				continue;
+			lua_checkstack(m_Main, 2);
 			lua_getref(m_Main, chunk.Ref);
-			const int resolved = lua_breakpoint(m_Main, -1, line, armed ? 1 : 0);
+			for (int line : chunk.Armed)
+				lua_breakpoint(m_Main, -1, line, 1);
 			lua_pop(m_Main, 1);
-			if (resolved > 0)
-				for (Breakpoint& b : m_Breakpoints)
-					if (b.File == file && b.Line == line)
-						b.ResolvedLine = resolved;
+		}
+	}
+
+	void Debugger::RearmSteps()
+	{
+		lua_checkstack(m_Main, 2);
+		if (m_LineStep.Active)
+			for (const auto& [ref, line] : m_LineStep.Armed)
+			{
+				lua_getref(m_Main, ref);
+				if (lua_isfunction(m_Main, -1))
+					lua_breakpoint(m_Main, -1, line, 1);
+				lua_pop(m_Main, 1);
+			}
+		if (m_Entry.Thread)
+		{
+			lua_getref(m_Main, m_Entry.Function);
+			if (lua_isfunction(m_Main, -1))
+				lua_breakpoint(m_Main, -1, m_Entry.Line, 1);
+			lua_pop(m_Main, 1);
 		}
 	}
 
@@ -377,19 +638,10 @@ namespace cluau::runtime::detail {
 		m_Chunks.push_back(chunk);
 		if (chunk.File.empty())
 			return;
-		for (Breakpoint& b : m_Breakpoints)
-		{
-			if (b.File != chunk.File)
-				continue;
-			const int resolved = lua_breakpoint(L, -1, b.Line, 1);
-			if (resolved > 0 && resolved != b.ResolvedLine)
-			{
-				const bool moved = resolved != (b.ResolvedLine ? b.ResolvedLine : b.Line);
-				b.ResolvedLine = resolved;
-				if (moved && m_Callbacks.Changed)
-					m_Callbacks.Changed(b);
-			}
-		}
+		// The file's breakpoints are verified now (moved to the line with code).
+		for (Breakpoint* b : ArmFile(m_Chunks.back().File, &m_Chunks.back(), L, -1))
+			if (m_Callbacks.Changed)
+				m_Callbacks.Changed(*b);
 	}
 
 	const Debugger::Chunk* Debugger::ChunkNamed(const std::string& name) const
@@ -474,21 +726,24 @@ namespace cluau::runtime::detail {
 			}
 			if (same)
 			{
-				Pause(L, { PauseReason::Step, 0, {} }, true, true);
+				Pause(L, { PauseReason::Step, {}, {} }, true, true);
 				return;
 			}
 		}
 		if (m_LineStep.Active && L == m_LineStep.Thread && LineStepStops(L, line))
 		{
 			EndLineStep();
-			Pause(L, { PauseReason::Step, 0, {} }, true, false);
+			Pause(L, { PauseReason::Step, {}, {} }, true, false);
 			return;
 		}
+		// Every breakpoint at the line counts its hit (and logs); the pause
+		// names each that pauses.
 		const std::string file = chunk->File;
+		std::vector<int> pausing;
 		for (size_t i = 0; i < m_Breakpoints.size(); i++)
 		{
 			Breakpoint& b = m_Breakpoints[i];
-			if (b.File != file || (b.ResolvedLine ? b.ResolvedLine : b.Line) != line || !b.Problem.empty())
+			if (b.File != file || b.ResolvedLine != line || !b.Problem.empty())
 				continue;
 			if (auto condition = m_Conditions.find(b.Id); condition != m_Conditions.end())
 			{
@@ -509,13 +764,13 @@ namespace cluau::runtime::detail {
 			if (!b.LogMessage.empty())
 			{
 				if (m_Callbacks.Log)
-					m_Callbacks.Log(FormatLog(L, b) + "\n");
+					m_Callbacks.Log(FormatLog(L, m_Breakpoints[i]) + "\n");
 				continue;
 			}
-			const int id = b.Id;
-			Pause(L, { PauseReason::Breakpoint, id, {} }, true, false);
-			return;
+			pausing.push_back(b.Id);
 		}
+		if (!pausing.empty())
+			Pause(L, { PauseReason::Breakpoint, std::move(pausing), {} }, true, false);
 	}
 
 	void Debugger::OnStep(lua_State* L)
@@ -529,7 +784,7 @@ namespace cluau::runtime::detail {
 				return;
 			m_EntryPending = false;
 			lua_singlestep(m_Main, 0);
-			Pause(L, { PauseReason::Entry, 0, {} }, false, true);
+			Pause(L, { PauseReason::Entry, {}, {} }, false, true);
 			return;
 		}
 		if (!m_StepThread)
@@ -556,12 +811,24 @@ namespace cluau::runtime::detail {
 		if (!stop || !IsUserChunk(ChunkOf(ar)) || PastEnd(ChunkOf(ar), line))
 			return;
 		m_SkipBreakThread = nullptr;
-		Pause(L, { PauseReason::Step, 0, {} }, false, true);
+		Pause(L, { PauseReason::Step, {}, {} }, false, true);
 	}
 
 	void Debugger::OnInterrupt(lua_State* L)
 	{
-		if (m_Paused || m_Evaluating)
+		// An expression that does not return (a loop, a slow __tostring)
+		// is stopped: its error is the evaluation's result.
+		if (m_Evaluating)
+		{
+			if (Now() > m_EvaluationDeadline)
+			{
+				lua_rawcheckstack(L, 1);
+				lua_pushstring(L, "the expression ran for more than two seconds: it was stopped");
+				lua_error(L);
+			}
+			return;
+		}
+		if (m_Paused)
 			return;
 		// Requests are read every so many safepoints (thousands a millisecond).
 		if (m_Callbacks.Poll && (++m_Ticks % 1024 == 0 || m_PauseRequested))
@@ -581,7 +848,7 @@ namespace cluau::runtime::detail {
 		m_PauseRequested = false;
 		m_SkipBreakThread = L;
 		m_SkipBreakLine = ar.currentline;
-		Pause(L, { PauseReason::Pause, 0, {} }, true, false);
+		Pause(L, { PauseReason::Pause, {}, {} }, true, false);
 	}
 
 	void Debugger::Waiting(lua_State* L)
@@ -639,6 +906,31 @@ namespace cluau::runtime::detail {
 		return nullptr;
 	}
 
+	int Debugger::UserFrame(lua_State* L)
+	{
+		lua_Debug ar{};
+		for (int level = 0; lua_getinfo(L, level, "s", &ar); level++)
+			if (IsLuaFrame(ar) && IsUserChunk(ChunkOf(ar)))
+				return level;
+		return -1;
+	}
+
+	// The coroutine was resumed by coroutine.resume (not by the runtime, as
+	// the script's own thread is).
+	bool Debugger::ResumedFromLua()
+	{
+		if (m_Resuming.empty() || !m_ResumeRef)
+			return false;
+		lua_State* R = m_Resuming.back();
+		lua_Debug ar{};
+		if (!lua_checkstack(R, 3) || !lua_getinfo(R, 0, "f", &ar))
+			return false;
+		lua_getref(R, m_ResumeRef);
+		const bool resume = lua_rawequal(R, -1, -2) != 0;
+		lua_pop(R, 2);
+		return resume;
+	}
+
 	// The coroutine stopped running: it yielded, returned or failed.
 	void Debugger::OnResumed(lua_State* co)
 	{
@@ -647,45 +939,116 @@ namespace cluau::runtime::detail {
 		const int status = lua_status(co);
 		if (m_Paused || m_Evaluating || m_Stopping || status == LUA_BREAK)
 			return;
+		const bool failed = status != LUA_OK && status != LUA_YIELD;
+		if (!failed && co != m_StepThread)
+			return;
+		bool byResume = false;
+		lua_State* resumer = ResumerOf(co, &byResume);
+		auto message = [&] {
+			return lua_isstring(co, -1) ? std::string(lua_tostring(co, -1)) : std::string("(an error value of type ") + luaL_typename(co, -1) + ")";
+		};
+		auto leaveStep = [&] {
+			if (co == m_StepThread)
+			{
+				lua_singlestep(co, 0);
+				m_StepThread = nullptr;
+			}
+		};
 		// coroutine.resume catches the coroutine's error: a caught error
 		// (coroutine.wrap's call raises it again, where it is caught or not).
-		bool byResume = false;
-		if (status != LUA_OK && status != LUA_YIELD && m_BreakOnCaught && ResumerOf(co, &byResume) && byResume)
+		if (failed && m_BreakOnCaught && resumer && byResume)
 		{
-			if (co == m_StepThread)
-				m_StepThread = nullptr;
-			std::string message =
-				lua_isstring(co, -1) ? lua_tostring(co, -1) : std::string("(an error value of type ") + luaL_typename(co, -1) + ")";
-			Pause(co, { PauseReason::CaughtError, 0, std::move(message) }, false, false);
+			leaveStep();
+			Pause(co, { PauseReason::CaughtError, {}, message() }, false, false);
 			return;
 		}
-		// The coroutine stepped through left before the step stopped: the
-		// step goes on where it was resumed, at that function's next line.
+		// A task's error: @std/task's scheduler raises it again, after the
+		// task's frames, so the pause is where it was raised, in the task.
+		if (failed && !resumer && m_BreakOnUncaught && ResumedFromLua() && UserFrame(co) >= 0)
+		{
+			leaveStep();
+			m_TaskError = message();
+			Pause(co, { PauseReason::Error, {}, m_TaskError }, false, false);
+			return;
+		}
 		if (co != m_StepThread)
 			return;
+		// A task stepped through that waits (task.wait, a blocking call)
+		// keeps the step: resumed by the scheduler, it goes on single-stepping
+		// to its next line.
+		if (!resumer && status == LUA_YIELD)
+			return;
+		// The coroutine stepped through left before the step stopped: the
+		// step goes on where it was resumed, at that function's next line
+		// (for a task that ended, the script's code below the scheduler).
 		m_StepThread = nullptr;
 		lua_singlestep(co, 0);
-		if (lua_State* resumer = ResumerOf(co))
+		if (resumer)
 		{
 			lua_Debug ar{};
 			const int line = lua_getinfo(resumer, 1, "l", &ar) ? ar.currentline : 0;
 			StartLineStep(resumer, line, 1, true);
 		}
+		else if (!m_Resuming.empty())
+		{
+			lua_State* below = m_Resuming.back();
+			const int level = UserFrame(below);
+			lua_Debug ar{};
+			if (level >= 0 && lua_getinfo(below, level, "l", &ar))
+				StartLineStep(below, ar.currentline, level, true);
+		}
+	}
+
+	// A caught error pauses when the script's code is between where it was
+	// raised and the pcall that catches it, or calls that pcall: not for
+	// the errors a standard module raises and catches itself.
+	bool Debugger::CaughtInScript(lua_State* L)
+	{
+		lua_Debug ar{};
+		lua_checkstack(L, 3);
+		for (int level = 0; lua_getinfo(L, level, "sf", &ar); level++)
+		{
+			const bool lua = IsLuaFrame(ar);
+			bool catches = false;
+			if (!lua)
+				for (int ref : { m_PcallRef, m_XpcallRef })
+					if (ref)
+					{
+						lua_getref(L, ref);
+						catches = catches || lua_rawequal(L, -1, -2) != 0;
+						lua_pop(L, 1);
+					}
+			lua_pop(L, 1);
+			if (lua && IsUserChunk(ChunkOf(ar)))
+				return true;
+			if (catches)
+			{
+				lua_Debug caller{};
+				for (int up = level + 1; lua_getinfo(L, up, "s", &caller); up++)
+					if (IsLuaFrame(caller))
+						return IsUserChunk(ChunkOf(caller));
+				return false;
+			}
+		}
+		return false;
 	}
 
 	void Debugger::OnProtectedError(lua_State* L)
 	{
-		if (!m_BreakOnCaught || m_Paused || m_Evaluating || m_Stopping)
+		if (!m_BreakOnCaught || m_Paused || m_Evaluating || m_Stopping || !CaughtInScript(L))
 			return;
 		std::string message = lua_isstring(L, -1) ? lua_tostring(L, -1) : std::string("(an error value of type ") + luaL_typename(L, -1) + ")";
-		Pause(L, { PauseReason::CaughtError, 0, std::move(message) }, false, false);
+		Pause(L, { PauseReason::CaughtError, {}, std::move(message) }, false, false);
 	}
 
 	void Debugger::OnUncaught(lua_State* T, const std::string& message)
 	{
-		if (!m_BreakOnUncaught || m_Paused || m_Stopping)
+		// A task's error ends the script: it paused already, in the task.
+		const bool paused = !m_TaskError.empty() && message.find(m_TaskError) != std::string::npos;
+		m_TaskError.clear();
+		if (!m_BreakOnUncaught || m_Paused || m_Stopping || paused)
 			return;
-		Pause(T, { PauseReason::Error, 0, message }, false, false);
+		Pause(T, { PauseReason::Error, {}, message }, false, false);
 	}
 
 	void Debugger::Pause(lua_State* L, PauseInfo pause, bool fromBreak, bool stepping)
@@ -862,8 +1225,7 @@ namespace cluau::runtime::detail {
 		lua_pop(m_Main, 1);
 		lua_unref(m_Main, m_Entry.Function);
 		m_Entry = Entry{};
-		for (const Breakpoint& b : m_Breakpoints)
-			Arm(b.File, b.Line);
+		Rearm();
 	}
 
 	// The step's breakpoints come out; the editor's go back where they share a line.
@@ -884,8 +1246,7 @@ namespace cluau::runtime::detail {
 			if (ref)
 				lua_unref(m_Main, ref);
 		step.Armed.clear();
-		for (const Breakpoint& b : m_Breakpoints)
-			Arm(b.File, b.Line);
+		Rearm();
 	}
 
 	void Debugger::Release()
@@ -987,10 +1348,9 @@ namespace cluau::runtime::detail {
 		{
 			lua_pushcfunction(S, ToStringProtected, "tostring");
 			lua_pushvalue(S, index);
-			const bool was = m_Evaluating;
-			m_Evaluating = true;
+			const bool was = BeginEvaluation();
 			const int status = lua_pcall(S, 1, 1, 0);
-			m_Evaluating = was;
+			EndEvaluation(was);
 			std::string out = status == 0 && lua_isstring(S, -1) ? lua_tostring(S, -1) : prefix + "(its __tostring failed)";
 			lua_pop(S, 1);
 			return out;
@@ -1010,7 +1370,8 @@ namespace cluau::runtime::detail {
 			out += (shown++ ? ", " : "") + Shallow(S, -1);
 			lua_pop(S, 1);
 		}
-		lua_pushnil(S);
+		if (!more)
+			lua_pushnil(S);
 		while (!more && lua_next(S, index))
 		{
 			if (lua_type(S, -2) == LUA_TNUMBER)
@@ -1028,28 +1389,40 @@ namespace cluau::runtime::detail {
 				lua_pop(S, 2);
 				break;
 			}
-			std::string key;
-			if (lua_type(S, -2) == LUA_TSTRING)
-				key = lua_tostring(S, -2);
-			else
-			{
-				lua_pushvalue(S, -2);
-				key = "[" + Shallow(S, -1) + "]";
-				lua_pop(S, 1);
-			}
-			out += (shown++ ? ", " : "") + key + " = " + Shallow(S, -1);
+			out += (shown++ ? ", " : "") + KeyName(S, -2) + " = " + Shallow(S, -1);
 			lua_pop(S, 1);
 		}
 		return out + (more ? ", ...}" : "}");
+	}
+
+	// A table's key as a field's name: a name as itself, another string
+	// quoted, any other key in brackets (["a b"], ["[1]"], [1]).
+	std::string Debugger::KeyName(lua_State* S, int index)
+	{
+		index = lua_absindex(S, index);
+		if (lua_type(S, index) == LUA_TSTRING)
+		{
+			size_t len = 0;
+			const char* s = lua_tolstring(S, index, &len);
+			const std::string key(s, len);
+			if (IsName(key))
+				return key;
+		}
+		lua_pushvalue(S, index);
+		std::string key = "[" + Shallow(S, -1) + "]";
+		lua_pop(S, 1);
+		return key;
 	}
 
 	// The value on top of the scratch thread, popped; a table keeps a handle.
 	Variable Debugger::Describe(const std::string& name)
 	{
 		lua_State* S = m_Scratch;
+		const int top = lua_gettop(S);
 		Variable variable;
 		variable.Name = name;
 		variable.Value = Format(S, -1);
+		lua_settop(S, top); // Format leaves the stack as it found it
 		variable.Type = lua_typename(S, lua_type(S, -1));
 		if (lua_istable(S, -1))
 		{
@@ -1136,18 +1509,17 @@ namespace cluau::runtime::detail {
 		lua_checkstack(S, 8);
 		lua_getref(S, m_Handles[(size_t)handle - 1]);
 		const int table = lua_gettop(S);
+		constexpr size_t kShown = 500;
+		size_t entries = 0;
 		lua_pushnil(S);
-		while (lua_next(S, table) != 0 && out.size() < 500)
+		while (lua_next(S, table) != 0)
 		{
-			std::string key;
-			if (lua_type(S, -2) == LUA_TSTRING)
-				key = lua_tostring(S, -2);
-			else
+			if (++entries > kShown)
 			{
-				lua_pushvalue(S, -2);
-				key = "[" + Shallow(S, -1) + "]";
 				lua_pop(S, 1);
+				continue; // counted
 			}
+			const std::string key = KeyName(S, -2);
 			lua_pushvalue(S, -1);
 			out.push_back(Describe(key));
 			lua_pop(S, 1);
@@ -1159,6 +1531,14 @@ namespace cluau::runtime::detail {
 			const bool bn = !b.Name.empty() && b.Name[0] == '[';
 			return an != bn ? !an : an ? false : a.Name < b.Name;
 		});
+		if (entries > kShown)
+		{
+			Variable rest;
+			rest.Name = "...";
+			rest.Value = std::to_string(entries - kShown) + " more of " + std::to_string(entries) + " entries (an expression shows any of them)";
+			rest.Type = "";
+			out.push_back(std::move(rest));
+		}
 		return out;
 	}
 
@@ -1184,6 +1564,39 @@ namespace cluau::runtime::detail {
 		return result;
 	}
 
+	bool Debugger::BeginEvaluation()
+	{
+		const bool was = m_Evaluating;
+		if (!was)
+		{
+			m_Evaluating = true;
+			m_EvaluationDeadline = Now() + kEvaluationSeconds;
+		}
+		return was;
+	}
+
+	void Debugger::EndEvaluation(bool was) { m_Evaluating = was; }
+
+	namespace {
+
+		// An expression's environment's __index: a name the frame declares
+		// is its value (nil too), any other the frame's globals'.
+		int FrameIndex(lua_State* T)
+		{
+			lua_pushvalue(T, 2);
+			lua_rawget(T, lua_upvalueindex(1)); // declared?
+			const bool declared = lua_toboolean(T, -1) != 0;
+			lua_pop(T, 1);
+			lua_pushvalue(T, 2);
+			if (declared)
+				lua_rawget(T, lua_upvalueindex(2));
+			else
+				lua_gettable(T, lua_upvalueindex(3));
+			return 1;
+		}
+
+	} // namespace
+
 	bool Debugger::RunExpression(lua_State* L, int level, const std::string& bytecode, std::string& text, bool* truthy, Variable* described)
 	{
 		if (!lua_checkstack(L, 4) || !lua_checkstack(m_Main, 2))
@@ -1194,11 +1607,24 @@ namespace cluau::runtime::detail {
 		lua_State* T = lua_newthread(m_Main);
 		const int threadRef = lua_ref(m_Main, -1);
 		lua_pop(m_Main, 1);
-		lua_checkstack(T, 8);
+		lua_checkstack(T, 16);
 
-		// The environment: the frame's locals, then its upvalues, over its globals.
+		// The environment: the frame's locals, then its upvalues, over its
+		// globals. The names the frame declares are kept apart, so that a
+		// local holding nil hides a global of its name.
 		lua_newtable(T);
 		const int env = lua_gettop(T);
+		lua_newtable(T);
+		const int declared = lua_gettop(T);
+		lua_newtable(T);
+		const int values = lua_gettop(T);
+		auto declare = [&](const char* name) {
+			// The value on top of T, unless a later local of the name has one.
+			lua_pushstring(T, name);
+			lua_pushboolean(T, 1);
+			lua_rawset(T, declared);
+			lua_setfield(T, values, name);
+		};
 		for (int n = 1;; n++)
 		{
 			const char* name = lua_getlocal(L, level, n);
@@ -1208,10 +1634,11 @@ namespace cluau::runtime::detail {
 			if (name[0] == '(')
 				lua_pop(T, 1);
 			else
-				lua_setfield(T, env, name);
+				declare(name); // a later local of the same name shadows an earlier one
 		}
 		lua_Debug ar{};
-		if (lua_getinfo(L, level, "f", &ar))
+		int varargs = 0;
+		if (lua_getinfo(L, level, "fa", &ar))
 		{
 			for (int n = 1;; n++)
 			{
@@ -1219,30 +1646,44 @@ namespace cluau::runtime::detail {
 				if (!name)
 					break;
 				lua_xmove(L, T, 1);
-				lua_getfield(T, env, name);
-				const bool shadowed = !lua_isnil(T, -1);
+				lua_getfield(T, declared, name);
+				const bool shadowed = lua_toboolean(T, -1) != 0;
 				lua_pop(T, 1);
 				if (shadowed || !*name)
 					lua_pop(T, 1);
 				else
-					lua_setfield(T, env, name);
+					declare(name);
 			}
 			lua_getfenv(L, -1);
 			lua_xmove(L, T, 1);
 			lua_pop(L, 1);
+			// The frame's `...`: its arguments past the named ones.
+			if (ar.isvararg)
+				for (int n = ar.nparams + 1; lua_checkstack(L, 1) && lua_getargument(L, level, n); n++)
+					varargs++;
 		}
 		else
 			lua_pushvalue(T, LUA_GLOBALSINDEX);
-		lua_newtable(T);
-		lua_insert(T, -2);
+		const int globals = lua_gettop(T);
+		lua_newtable(T); // the metatable
+		lua_pushvalue(T, declared);
+		lua_pushvalue(T, values);
+		lua_pushvalue(T, globals);
+		lua_pushcclosure(T, FrameIndex, "index", 3);
 		lua_setfield(T, -2, "__index");
 		lua_setmetatable(T, env);
+		lua_settop(T, env);
 
-		const bool was = m_Evaluating;
-		m_Evaluating = true;
+		const bool was = BeginEvaluation();
 		int status = luau_load(T, "=debugger", bytecode.data(), bytecode.size(), env);
 		if (status == 0)
-			status = lua_pcall(T, 0, 1, 0);
+		{
+			lua_checkstack(T, varargs + 1);
+			lua_xmove(L, T, varargs); // pushed in order, the first lowest
+			status = lua_pcall(T, varargs, 1, 0);
+		}
+		else
+			lua_pop(L, varargs);
 		const bool ok = status == 0;
 		if (ok)
 		{
@@ -1260,7 +1701,7 @@ namespace cluau::runtime::detail {
 		}
 		else
 			text = lua_isstring(T, -1) ? lua_tostring(T, -1) : "the expression failed";
-		m_Evaluating = was;
+		EndEvaluation(was);
 		lua_settop(T, 0);
 		lua_unref(m_Main, threadRef);
 		return ok;

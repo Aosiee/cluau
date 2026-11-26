@@ -5,6 +5,7 @@
 #include "Json.h"
 #include "Spawn.h"
 #include "LspServer.h"
+#include "Std.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -1288,11 +1289,190 @@ TEST("lsp: protocol errors are answered: text that is not JSON, a message too lo
 	std::fclose(written);
 }
 
+TEST("lsp: each standard module used without its require has the quick fix that adds it")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	const std::string all = cluau::runtime::detail::StdNames();
+	int modules = 0;
+	for (size_t at = 0; (at = all.find("@std/", at)) != std::string::npos; modules++)
+	{
+		at += 5;
+		const std::string module = all.substr(at, all.find(',', at) - at);
+		s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "print(" + module + ")\n"));
+		const Json diagnostics = s.Diagnostics(project.Main);
+		const Json actions = s.Request("textDocument/codeAction", Json::Object()
+																	 .Set("textDocument", Json::Object().Set("uri", project.Main))
+																	 .Set("range", diagnostics[0]["range"])
+																	 .Set("context", Json::Object().Set("diagnostics", diagnostics)))["result"];
+		bool found = false;
+		for (const Json& action : actions.Items())
+			found = found || action["title"].String() == "Add const " + module + " = require(\"@std/" + module + "\")";
+		if (!(found))
+			cluau_test::Fail(__FILE__, __LINE__, module);
+		s.Notify("textDocument/didClose", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main)));
+	}
+	CHECK(modules >= 20);
+}
+
+TEST("lsp: hover on a declaration's name shows what a use of it shows; no hints on class and enum names")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "// Adds one.\n"                      // 0
+																 "function AddOne(x: number): number {\n" // 1
+																 "\treturn x + 1\n"                       // 2
+																 "}\n"                                    // 3
+																 "const M = {}\n"                         // 4
+																 "// A member.\n"                         // 5
+																 "function M.Get(k: string): string {\n"  // 6
+																 "\treturn k\n"                           // 7
+																 "}\n"                                    // 8
+																 "class Box {\n"                          // 9
+																 "\t// The width.\n"                      // 10
+																 "\tW: number = 1\n"                      // 11
+																 "\t// Grows it.\n"                       // 12
+																 "\tfunction Grow(by: number) {\n"        // 13
+																 "\t\tself.W += by\n"                     // 14
+																 "\t}\n"                                  // 15
+																 "}\n"                                    // 16
+																 "enum Color { Red, Green }\n"            // 17
+																 "for (k, v in Color) { print(k, v) }\n"  // 18
+																 "print(AddOne(1), M.Get(\"k\"), Box(), Color.Red)\n"));
+	auto hover = [&](int line, int character) {
+		return s.Request("textDocument/hover", At(project.Main, line, character))["result"]["contents"]["value"].String();
+	};
+	CHECK(hover(1, 10).find("AddOne: (x: number) -> number") != std::string::npos);
+	CHECK(hover(1, 10).find("Adds one.") != std::string::npos);
+	CHECK(hover(6, 12).find("Get: (k: string) -> string") != std::string::npos);
+	CHECK(hover(6, 12).find("A member.") != std::string::npos);
+	CHECK(hover(11, 1).find("W: number") != std::string::npos);
+	CHECK(hover(11, 1).find("The width.") != std::string::npos);
+	CHECK(hover(13, 11).find("Box:Grow(by: number)") != std::string::npos);
+	CHECK(hover(13, 11).find("Grows it.") != std::string::npos);
+	CHECK(hover(9, 7).find("class Box") != std::string::npos);
+	CHECK(hover(17, 13).find("Red: \"Red\"") != std::string::npos);
+
+	const Json hints = s.Request("textDocument/inlayHint", Json::Object()
+															  .Set("textDocument", Json::Object().Set("uri", project.Main))
+															  .Set("range", Json::Object()
+																				.Set("start", Json::Object().Set("line", 0).Set("character", 0))
+																				.Set("end", Json::Object().Set("line", 20).Set("character", 0))))["result"];
+	for (const Json& hint : hints.Items())
+	{
+		const int line = hint["position"]["line"].Int();
+		if (!(line != 9 && line != 17))
+			cluau_test::Fail(__FILE__, __LINE__, hint.Dump());
+		if (!(hint["label"].String() != ": unknown"))
+			cluau_test::Fail(__FILE__, __LINE__, hint.Dump());
+	}
+}
+
+TEST("lsp: the paths a require can name are completed")
+{
+	Project project;
+	std::filesystem::create_directories(project.Dir / "lib");
+	Session s;
+	s.Request("initialize", Json::Object());
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "const a = require(\"@std/f\")\n"
+																 "const b = require(\"./\")\n"));
+	std::set<std::string> labels;
+	const Json std = s.Request("textDocument/completion", At(project.Main, 0, 25));
+	for (const Json& item : std["result"].Items())
+		labels.insert(item["label"].String());
+	CHECK(labels.count("@std/fs"));
+	CHECK(!labels.count("@std/json"));
+	labels.clear();
+	const Json files = s.Request("textDocument/completion", At(project.Main, 1, 21));
+	for (const Json& item : files["result"].Items())
+		labels.insert(item["label"].String());
+	CHECK(labels.count("./shapes"));
+	CHECK(labels.count("./lib/"));
+	CHECK(!labels.count("./main")); // the file itself
+}
+
+TEST("lsp: the lifecycle's errors; a network share's URI; a script named by its first line; a message without a length")
+{
+	Project project;
+	{
+		Session s;
+		CHECK_EQ(s.Request("textDocument/hover", At(project.Main, 0, 0))["error"]["code"].Int(), -32002);
+		s.Notify("textDocument/didOpen", OpenedDocument(project.Main, "print(missing)\n"));
+		CHECK(s.Notes.empty());
+		s.Request("initialize", Json::Object());
+		s.Request("shutdown", Json::Object());
+		CHECK_EQ(s.Request("workspace/symbol", Json::Object().Set("query", "x"))["error"]["code"].Int(), -32600);
+		s.Notify("exit", Json::Object());
+		CHECK(s.Server.ShouldExit());
+		CHECK_EQ(s.Server.ExitCode(), 0);
+	}
+	CHECK_EQ(LspServer::PathFromUri("file://server/share/dir/x.cluau"), std::string("//server/share/dir/x.cluau"));
+	CHECK_EQ(LspServer::UriFromPath("//server/share/dir/x.cluau"), std::string("file://server/share/dir/x.cluau"));
+	CHECK_EQ(LspServer::UriFromPath("\\\\server\\share\\x.cluau"), std::string("file://server/share/x.cluau"));
+	CHECK_EQ(LspServer::PathFromUri("file://localhost/tmp/x.cluau"), std::string("/tmp/x.cluau"));
+	{
+		Session s;
+		s.Request("initialize", Json::Object());
+		const std::string tool = LspServer::UriFromPath((project.Dir / "tool").generic_u8string());
+		s.Notify("textDocument/didOpen", OpenedDocument(tool, "#!/usr/bin/env cluau\nprint(missing)\n"));
+		CHECK(s.Diagnostics(tool).Size() > 0);
+	}
+
+	std::FILE* in = std::tmpfile();
+	std::FILE* written = std::tmpfile();
+	CHECK(in && written);
+	if (!in || !written)
+		return;
+	const std::string first = R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})";
+	const std::string next = R"({"jsonrpc":"2.0","id":2,"method":"shutdown"})";
+	const std::string exit = R"({"jsonrpc":"2.0","method":"exit"})";
+	std::fprintf(in, "Content-Length: %zu\r\n\r\n%s", first.size(), first.c_str());
+	std::fprintf(in, "X-Other: 1\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"shutdown\"}");
+	std::fprintf(in, "Content-Length: %zu\r\n\r\n%s", next.size(), next.c_str());
+	std::fprintf(in, "Content-Length: %zu\r\n\r\n%s", exit.size(), exit.c_str());
+	std::rewind(in);
+	LspServer server;
+	CHECK_EQ(server.Serve(in, written), 0); // the shutdown after the message without a length was read
+	std::rewind(written);
+	std::string text;
+	for (int c; (c = std::fgetc(written)) != EOF;)
+		text += (char)c;
+	CHECK(text.find("\"code\":-32700") != std::string::npos);
+	CHECK(text.find("\"id\":2") != std::string::npos);
+	std::fclose(in);
+	std::fclose(written);
+}
+
 // ---- The debugger ------------------------------------------------------------
 
 namespace {
 
 	using cluau::runtime::detail::DapServer;
+
+	// Every message is JSON text, so UTF-8: the bytes a strict decoder takes.
+	bool IsUtf8(const std::string& text)
+	{
+		for (size_t i = 0; i < text.size();)
+		{
+			const unsigned char c = (unsigned char)text[i];
+			size_t n = c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
+			if (n == 0 || i + n > text.size())
+				return false;
+			unsigned code = n == 1 ? c : c & (0x3F >> (n - 1));
+			for (size_t k = 1; k < n; k++)
+			{
+				if (((unsigned char)text[i + k] & 0xC0) != 0x80)
+					return false;
+				code = (code << 6) | ((unsigned char)text[i + k] & 0x3F);
+			}
+			if ((n == 3 && (code < 0x800 || (code >= 0xD800 && code <= 0xDFFF))) || (n == 4 && (code < 0x10000 || code > 0x10FFFF)))
+				return false;
+			i += n;
+		}
+		return true;
+	}
 
 	// The debug adapter on a thread of its own, as an editor drives it.
 	struct Debug
@@ -1310,6 +1490,8 @@ namespace {
 		{
 			DapServer::Io io;
 			io.Send = [this](const std::string& text) {
+				if (!IsUtf8(text))
+					cluau_test::Fail(__FILE__, __LINE__, "a message that is not UTF-8: " + text);
 				std::optional<Json> m = Json::Parse(text);
 				std::lock_guard<std::mutex> lock(Mutex);
 				if (m && (*m)["event"].String() == "output" && (*m)["body"]["category"].String() == "console")
@@ -1857,11 +2039,16 @@ TEST("debug: ending a paused script; breakpoints past the file's end; a test fil
 		const Json set = d.Request("setBreakpoints", Json::Object()
 														 .Set("source", Json::Object().Set("path", scripts.Main.u8string()))
 														 .Set("breakpoints", Json::Array().Push(Line(2)).Push(Line(3)).Push(Line(40))));
-		CHECK(set["body"]["breakpoints"][0]["verified"].Bool());
+		CHECK(!set["body"]["breakpoints"][0]["verified"].Bool()); // until the script loads the file
+		CHECK_EQ(set["body"]["breakpoints"][0]["reason"].String(), std::string("pending"));
 		CHECK(!set["body"]["breakpoints"][1]["verified"].Bool()); // the line after the last line break
+		CHECK_EQ(set["body"]["breakpoints"][1]["reason"].String(), std::string("failed"));
 		CHECK(!set["body"]["breakpoints"][2]["verified"].Bool());
 		d.Request("launch", Json::Object().Set("program", scripts.Main.u8string()));
 		d.Request("configurationDone");
+		const int id = set["body"]["breakpoints"][0]["id"].Int();
+		const Json verified = d.Next([&](const Json& m) { return m["event"].String() == "breakpoint" && m["body"]["breakpoint"]["id"].Int() == id; }, "breakpoint event");
+		CHECK(verified["body"]["breakpoint"]["verified"].Bool());
 		CHECK_EQ(d.Stopped()[0]["line"].Int(), 2);
 		d.Request("terminate");
 		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
@@ -2080,3 +2267,332 @@ TEST("interrupt: a SIGINT ignored by whoever started the script stays ignored")
 }
 
 #endif
+
+TEST("debug: a table holding a long list opens, as the list does; a value that does not return is stopped")
+{
+	Scripts scripts("const data = { name = \"rows\", rows = { 1, 2, 3, 4, 5, 6, 7, 8 } }\n" // 1
+					"const seven = { 1, 2, 3, 4, 5, 6, 7 }\n"                               // 2
+					"class Slow {\n"                                                        // 3
+					"\tfunction __tostring(): string {\n"                                   // 4
+					"\t\twhile (true) { }\n"                                                // 5
+					"\t\treturn \"never\"\n"                                                // 6
+					"\t}\n"                                                                 // 7
+					"}\n"                                                                   // 8
+					"const slow = Slow()\n"                                                 // 9
+					"print(data.name)\n");                                                  // 10
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(10)) } });
+	d.Stopped();
+	std::map<std::string, Json> locals = d.Locals();
+	CHECK_EQ(locals["seven"]["type"].String(), std::string("table"));
+	CHECK_EQ(locals["seven"]["value"].String(), std::string("{1, 2, 3, 4, 5, 6, ...}"));
+	CHECK_EQ(d.Variables(locals["seven"]["variablesReference"].Int()).size(), size_t(7));
+	std::map<std::string, Json> fields = d.Variables(locals["data"]["variablesReference"].Int());
+	CHECK_EQ(fields["name"]["value"].String(), std::string("\"rows\""));
+	CHECK_EQ(fields["rows"]["value"].String(), std::string("{1, 2, 3, 4, 5, 6, ...}"));
+	CHECK_EQ(d.Variables(fields["rows"]["variablesReference"].Int()).size(), size_t(8));
+	CHECK(locals["slow"]["value"].String().find("__tostring failed") != std::string::npos); // stopped, not hung
+
+	const auto start = std::chrono::steady_clock::now();
+	const Json forever = d.Request("evaluate", Json::Object().Set("expression", "(function() { while (true) { } })()").Set("frameId", 1));
+	CHECK(!forever["success"].Bool());
+	CHECK(forever["message"].String().find("more than two seconds") != std::string::npos);
+	CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(5));
+	CHECK_EQ(d.Request("evaluate", Json::Object().Set("expression", "#seven").Set("frameId", 1))["body"]["result"].String(), std::string("7"));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}
+
+TEST("debug: strings are cut at a character's end; bytes, keys and vectors are shown as they are")
+{
+	Scripts scripts("const quotes = string.rep('\"', 60)\n"                        // 1
+					"const accents = \"ab\" .. string.rep(\"\xC3\xA9\", 50)\n"     // 2
+					"const raw = \"bad \\xff byte\\0\\r\"\n"                        // 3
+					"const keys: any = { [1] = \"one\", [\"[1]\"] = \"two\", [\"a b\"] = 3 }\n" // 4
+					"const v = vector.create(1, 2, 3)\n"                           // 5
+					"const many: { number } = {}\n"                                // 6
+					"for (i = 1, 600) { many[i] = i }\n"                           // 7
+					"print(\"a bad byte: \\xfe\")\n");                              // 8
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(8)) } });
+	d.Stopped();
+	std::map<std::string, Json> locals = d.Locals();
+	const std::string quotes = locals["quotes"]["value"].String();
+	CHECK(quotes.size() > 8 && quotes.compare(quotes.size() - 4, 4, "...\"") == 0);
+	const std::string accents = locals["accents"]["value"].String();
+	CHECK(accents.size() > 8 && accents.compare(accents.size() - 6, 6, "\xC3\xA9...\"") == 0);
+	CHECK_EQ(locals["raw"]["value"].String(), std::string("\"bad \\xFF byte\\0\\r\""));
+	CHECK_EQ(locals["v"]["value"].String(), std::string("vector(1, 2, 3)"));
+	std::map<std::string, Json> keys = d.Variables(locals["keys"]["variablesReference"].Int());
+	CHECK_EQ(keys["[1]"]["value"].String(), std::string("\"one\""));
+	CHECK_EQ(keys["[\"[1]\"]"]["value"].String(), std::string("\"two\""));
+	CHECK_EQ(keys["[\"a b\"]"]["value"].String(), std::string("3"));
+	const Json many = d.Request("variables", Json::Object().Set("variablesReference", locals["many"]["variablesReference"].Int()));
+	const Json& children = many["body"]["variables"];
+	CHECK_EQ(children.Size(), size_t(501));
+	CHECK_EQ(children[500]["name"].String(), std::string("..."));
+	CHECK(children[500]["value"].String().find("100 more of 600") != std::string::npos);
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0); // its output, a bad byte in it, was UTF-8 too
+}
+
+TEST("debug: expressions see a local holding nil over a global, and the frame's varargs")
+{
+	Scripts scripts("count = 5\n"                  // 1
+					"function F(first: string, ...: any) {\n" // 2
+					"\tlet count = nil\n"          // 3
+					"\tprint(count, first)\n"      // 4
+					"}\n"                          // 5
+					"F(\"x\", \"y\", \"z\")\n");   // 6
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(4)).Push(Json::Object().Set("line", 4).Set("condition", "count == nil").Set("logMessage", "count is {count}")) } });
+	d.Stopped();
+	auto eval = [&](const std::string& expression) {
+		return d.Request("evaluate", Json::Object().Set("expression", expression).Set("frameId", 1))["body"]["result"].String();
+	};
+	CHECK_EQ(eval("count"), std::string("nil"));
+	CHECK_EQ(eval("first"), std::string("\"x\""));
+	CHECK_EQ(eval("select('#', ...)"), std::string("2"));
+	CHECK_EQ(eval("(...)"), std::string("\"y\""));
+	for (int frame : { 0, -1, 99 })
+		CHECK(!d.Request("evaluate", Json::Object().Set("expression", "1").Set("frameId", frame))["success"].Bool());
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	std::lock_guard<std::mutex> lock(d.Mutex);
+	CHECK(!d.Console.empty() && d.Console.back() == "count is nil\n"); // the condition held, and the log ran
+}
+
+TEST("debug: every breakpoint at a line counts; a hit count past int's range is refused")
+{
+	Scripts scripts("let total = 0\n"        // 1
+					"for (i = 1, 3) {\n"     // 2
+					"\n"                     // 3
+					"\ttotal += i\n"         // 4
+					"}\n"                    // 5
+					"print(total)\n");       // 6
+	Debug d;
+	d.Request("initialize", Json::Object());
+	const Json set = d.Request("setBreakpoints",
+		Json::Object()
+			.Set("source", Json::Object().Set("path", scripts.Main.u8string()))
+			.Set("breakpoints", Json::Array()
+									.Push(Line(3))
+									.Push(Json::Object().Set("line", 4).Set("logMessage", "total before: {total}"))
+									.Push(Json::Object().Set("line", 4).Set("hitCondition", "2"))
+									.Push(Json::Object().Set("line", 6).Set("hitCondition", "4294967296"))));
+	CHECK(!set["body"]["breakpoints"][3]["verified"].Bool());
+	CHECK(set["body"]["breakpoints"][3]["message"].String().find("hit count") != std::string::npos);
+	const int first = set["body"]["breakpoints"][0]["id"].Int(), third = set["body"]["breakpoints"][2]["id"].Int();
+	d.Request("launch", Json::Object().Set("program", scripts.Main.u8string()));
+	d.Request("configurationDone");
+	std::vector<int> ids;
+	for (int pass = 1; pass <= 3; pass++)
+	{
+		const Json stopped = d.Event("stopped");
+		ids.clear();
+		for (const Json& id : stopped["body"]["hitBreakpointIds"].Items())
+			ids.push_back(id.Int());
+		CHECK_EQ(ids.size(), size_t(pass == 1 ? 1 : 2));
+		CHECK_EQ(ids[0], first);
+		if (pass > 1)
+			CHECK_EQ(ids[1], third);
+		d.Request("continue", Json::Object().Set("threadId", 1));
+	}
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	std::lock_guard<std::mutex> lock(d.Mutex);
+	CHECK_EQ(d.Console.size(), size_t(3));
+	CHECK(d.Console.size() == 3 && d.Console[2] == "total before: 3\n");
+}
+
+TEST("debug: a step over task.wait in a task stops at its next line; a task's error pauses in the task")
+{
+	Scripts scripts("const task = require(\"@std/task\")\n"  // 1
+					"const worker = task.spawn(function() {\n" // 2
+					"\tfor (i = 1, 2) {\n"                     // 3
+					"\t\tlet w = i\n"                          // 4
+					"\t\ttask.wait(0.05)\n"                    // 5
+					"\t}\n"                                    // 6
+					"\tlet local1 = \"in the task\"\n"         // 7
+					"\terror(\"task failure\")\n"              // 8
+					"})\n"                                     // 9
+					"task.wait(0.5)\n");                       // 10
+	Debug d;
+	d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(5)) } });
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 5);
+	d.Request("setBreakpoints", Json::Object().Set("source", Json::Object().Set("path", scripts.Main.u8string())).Set("breakpoints", Json::Array()));
+	d.Request("next", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 3); // after the wait, in the task
+	d.Request("next", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 4);
+	CHECK_EQ(d.Locals()["i"]["value"].String(), std::string("2"));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	std::string reason;
+	const Json frames = d.Stopped(&reason);
+	CHECK_EQ(reason, std::string("exception"));
+	CHECK_EQ(frames[0]["line"].Int(), 8);
+	CHECK_EQ(frames[0]["source"]["path"].String(), scripts.Main.u8string());
+	CHECK_EQ(d.Locals()["local1"]["value"].String(), std::string("\"in the task\""));
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 1); // and no second pause for it
+}
+
+TEST("debug: All Errors leaves out the errors a standard module raises and catches itself")
+{
+	Scripts scripts("const server = require(\"@std/server\")\n"                    // 1
+					"const net = require(\"@std/net\")\n"                          // 2
+					"const task = require(\"@std/task\")\n"                        // 3
+					"const s = server.serve({ host = \"127.0.0.1\", port = 0, idle = 0.2 }, function(request: server.Request): server.Answer {\n"
+					"\treturn \"hi\"\n"                                            // 5
+					"})\n"                                                         // 6
+					"const c = net.connect(\"127.0.0.1\", s.port)\n"              // 7
+					"task.wait(0.6)\n"                                             // 8
+					"c:close()\n"                                                  // 9
+					"s:close()\n"                                                  // 10
+					"try {\n"                                                      // 11
+					"\terror(\"mine\")\n"                                          // 12
+					"} catch (e) {\n"                                              // 13
+					"}\n");                                                        // 14
+	{
+		Debug d;
+		d.Start(scripts.Main, {}, Json::Object(), Json::Array().Push("all"));
+		std::string reason;
+		const Json frames = d.Stopped(&reason);
+		CHECK_EQ(reason, std::string("exception"));
+		CHECK_EQ(frames[0]["line"].Int(), 12);
+		CHECK_EQ(frames[0]["source"]["path"].String(), scripts.Main.u8string());
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	}
+	// A failing assertion: @std/test raises it and catches it, through the case's code.
+	const std::filesystem::path file = scripts.Dir / "fails_test.cluau";
+	std::ofstream(file, std::ios::binary) << "const test = require(\"@std/test\")\n"
+											 "test.case(\"fails\", function() {\n"
+											 "\ttest.equal(1, 2)\n"
+											 "})\n";
+	{
+		Debug d;
+		d.Start(file, {}, Json::Object(), Json::Array().Push("all"));
+		std::string reason;
+		const Json frames = d.Stopped(&reason);
+		CHECK_EQ(reason, std::string("exception"));
+		bool inCase = false;
+		for (const Json& frame : frames.Items())
+			inCase = inCase || (frame["line"].Int() == 3 && frame["source"]["path"].String() == file.u8string());
+		CHECK(inCase);
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 1);
+	}
+}
+
+TEST("debug: process.exit ends the script, and the session goes on to the editor's disconnect")
+{
+	Scripts scripts("const process = require(\"@std/process\")\n"
+					"print(\"bye\")\n"
+					"try {\n"
+					"\tprocess.exit(3)\n"
+					"} catch (e) {\n"
+					"}\n"
+					"while (true) { }\n");
+	Debug d;
+	d.Start(scripts.Main, {});
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 3);
+	d.Event("terminated");
+	CHECK(d.Request("disconnect")["success"].Bool());
+}
+
+TEST("debug: requests are served during a blocking call without @std/task")
+{
+	Scripts scripts("const process = require(\"@std/process\")\n" // 1
+					"process.sleep(1.5)\n"                         // 2
+					"let after = 1\n"                              // 3
+					"print(after)\n");                             // 4
+	{
+		Debug d;
+		d.Start(scripts.Main, {});
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		const auto start = std::chrono::steady_clock::now();
+		const Json set = d.Request("setBreakpoints", Json::Object()
+														 .Set("source", Json::Object().Set("path", scripts.Main.u8string()))
+														 .Set("breakpoints", Json::Array().Push(Line(4))));
+		CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(800)); // during the sleep
+		CHECK(set["body"]["breakpoints"][0]["verified"].Bool());
+		CHECK(d.Request("threads")["success"].Bool());
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 4);
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	}
+	{
+		Debug d;
+		d.Start(scripts.Main, {});
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		const auto start = std::chrono::steady_clock::now();
+		d.Request("pause", Json::Object().Set("threadId", 1));
+		std::string reason;
+		CHECK_EQ(d.Stopped(&reason)[0]["source"]["path"].String(), scripts.Main.u8string()); // as the sleep returns
+		CHECK_EQ(reason, std::string("pause"));
+		d.Request("terminate");
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+		d.Event("terminated");
+		CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(2500));
+	}
+	{
+		Debug d;
+		d.Start(scripts.Main, {});
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		const auto start = std::chrono::steady_clock::now();
+		CHECK(d.Request("terminate")["success"].Bool());
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+		d.Event("terminated");
+		CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(800));
+	}
+}
+
+TEST("debug: a breakpoint in a file not loaded yet is verified as it loads; one on a closing brace")
+{
+	Scripts scripts("let total = 0\n"            // 1
+					"for (i = 1, 3) {\n"         // 2
+					"\ttotal += i\n"             // 3
+					"}\n"                        // 4
+					"function Half(n: number): number {\n" // 5
+					"\treturn n / 2\n"           // 6
+					"}\n"                        // 7
+					"const later = require(\"./later\")\n" // 8
+					"print(Half(total), later)\n"); // 9
+	std::ofstream(scripts.Dir / "later.cluau", std::ios::binary) << "let x = 1\n"
+																	"return x + 1\n";
+	Debug d;
+	d.Request("initialize", Json::Object());
+	const Json set = d.Request("setBreakpoints", Json::Object()
+													  .Set("source", Json::Object().Set("path", (scripts.Dir / "later.cluau").u8string()))
+													  .Set("breakpoints", Json::Array().Push(Line(2))));
+	CHECK(!set["body"]["breakpoints"][0]["verified"].Bool());
+	const int later = set["body"]["breakpoints"][0]["id"].Int();
+	const Json main = d.Request("setBreakpoints", Json::Object()
+													   .Set("source", Json::Object().Set("path", scripts.Main.u8string()))
+													   .Set("breakpoints", Json::Array().Push(Line(4)).Push(Line(7))));
+	d.Request("launch", Json::Object().Set("program", scripts.Main.u8string()));
+	d.Request("configurationDone");
+	// The main file loads: its breakpoints go to the line with code before each `}`.
+	std::map<int, int> lines;
+	for (int n = 0; n < 2; n++)
+	{
+		const Json b = d.Event("breakpoint")["body"]["breakpoint"];
+		CHECK(b["verified"].Bool());
+		lines[b["id"].Int()] = b["line"].Int();
+	}
+	CHECK_EQ(lines[main["body"]["breakpoints"][0]["id"].Int()], 3);
+	CHECK_EQ(lines[main["body"]["breakpoints"][1]["id"].Int()], 6);
+	for (int pass = 1; pass <= 3; pass++)
+	{
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 3); // on each pass of the loop
+		d.Request("continue", Json::Object().Set("threadId", 1));
+	}
+	const Json loaded = d.Event("breakpoint")["body"]["breakpoint"];
+	CHECK(loaded["verified"].Bool());
+	CHECK_EQ(loaded["id"].Int(), later);
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 2);
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Stopped()[0]["line"].Int(), 6);
+	d.Request("continue", Json::Object().Set("threadId", 1));
+	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+}

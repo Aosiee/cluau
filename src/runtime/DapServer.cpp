@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <stdexcept>
 #include <thread>
 
 #ifdef _WIN32
@@ -51,6 +52,50 @@ namespace cluau::runtime::detail {
 		{
 			const size_t slash = path.find_last_of("/\\");
 			return slash == std::string::npos ? path : path.substr(slash + 1);
+		}
+
+		// The text with each byte sequence that is not UTF-8 replaced by
+		// U+FFFD: a string the script holds (or prints) can be any bytes,
+		// and every message is JSON text, which is UTF-8.
+		std::string ValidUtf8(const std::string& text)
+		{
+			std::string out;
+			const size_t n = text.size();
+			out.reserve(n);
+			size_t i = 0;
+			while (i < n)
+			{
+				const unsigned char c = (unsigned char)text[i];
+				size_t length = 0;
+				unsigned min = 0, code = 0;
+				if (c < 0x80)
+					length = 1, code = c;
+				else if (c >= 0xC2 && c <= 0xDF)
+					length = 2, min = 0x80, code = c & 0x1F;
+				else if (c >= 0xE0 && c <= 0xEF)
+					length = 3, min = 0x800, code = c & 0x0F;
+				else if (c >= 0xF0 && c <= 0xF4)
+					length = 4, min = 0x10000, code = c & 0x07;
+				bool valid = length > 0 && i + length <= n;
+				for (size_t k = 1; valid && k < length; k++)
+				{
+					const unsigned char next = (unsigned char)text[i + k];
+					valid = (next & 0xC0) == 0x80;
+					code = (code << 6) | (next & 0x3F);
+				}
+				valid = valid && code >= min && code <= 0x10FFFF && !(code >= 0xD800 && code <= 0xDFFF);
+				if (valid)
+				{
+					out.append(text, i, length);
+					i += length;
+				}
+				else
+				{
+					out += "\xEF\xBF\xBD";
+					i++;
+				}
+			}
+			return out;
 		}
 
 		const char* ReasonName(PauseReason reason)
@@ -152,7 +197,7 @@ namespace cluau::runtime::detail {
 		for (const auto& [key, value] : message.Members())
 			out.Set(key, value);
 		if (m_Io.Send)
-			m_Io.Send(out.Dump());
+			m_Io.Send(ValidUtf8(out.Dump()));
 	}
 
 	void DapServer::Respond(const Json& request, bool success, Json body, const std::string& message)
@@ -337,13 +382,24 @@ namespace cluau::runtime::detail {
 		Ended(code);
 	}
 
+	// process.exit: its status is the script's, reported now. Under the
+	// debugger the script then ends as a stop ends it (its next safepoint
+	// raises again), and the session goes on to the editor's disconnect,
+	// rather than the process ending under the editor.
 	void DapServer::ExitHook(int code)
 	{
-		if (DapServer* server = g_Running)
+		DapServer* server = g_Running;
+		if (!server)
+			return;
+		g_Running = nullptr;
+		server->Report(code);
+		if (!server->m_Debugger)
 		{
-			g_Running = nullptr;
-			server->Ended(code);
+			server->m_Finished = true;
+			return; // the process ends
 		}
+		server->Stop();
+		throw std::runtime_error("the script called process.exit");
 	}
 
 	void DapServer::Ended(int code)
@@ -398,7 +454,12 @@ namespace cluau::runtime::detail {
 		body.Set("threadId", 1);
 		body.Set("allThreadsStopped", true);
 		if (pause.Reason == PauseReason::Breakpoint)
-			body.Set("hitBreakpointIds", Json::Array().Push(pause.Breakpoint));
+		{
+			Json ids = Json::Array();
+			for (int id : pause.Breakpoints)
+				ids.Push(id);
+			body.Set("hitBreakpointIds", std::move(ids));
+		}
 		if (!pause.Message.empty())
 		{
 			body.Set("description", pause.Reason == PauseReason::CaughtError ? "Paused on a caught error" : "Paused on an error");
@@ -431,10 +492,19 @@ namespace cluau::runtime::detail {
 	{
 		Json out = Json::Object();
 		out.Set("id", b.Id);
-		out.Set("verified", b.Problem.empty());
+		out.Set("verified", b.Verified());
 		out.Set("line", Line(b.ResolvedLine ? b.ResolvedLine : b.Line));
 		if (!b.Problem.empty())
+		{
 			out.Set("message", b.Problem);
+			out.Set("reason", "failed");
+		}
+		else if (!b.Verified())
+		{
+			// Verified (a `breakpoint` event) once the script loads the file.
+			out.Set("message", "the script has not loaded this file yet");
+			out.Set("reason", "pending");
+		}
 		return out;
 	}
 
@@ -655,8 +725,14 @@ namespace cluau::runtime::detail {
 				Respond(request, false, Json::Object(), "expressions are evaluated in a paused frame (set a breakpoint, or pause the script)");
 				return;
 			}
+			// No frame: the top one. A frame that is not on the stack is an error.
 			const int frame = args["frameId"].Int(1);
-			const int level = frame >= 1 && (size_t)frame <= m_Stack.size() ? m_Stack[(size_t)frame - 1].Level : 0;
+			if (args.Has("frameId") && (frame < 1 || (size_t)frame > m_Stack.size()))
+			{
+				Respond(request, false, Json::Object(), "there is no frame " + std::to_string(frame) + " (the stack has " + std::to_string(m_Stack.size()) + ")");
+				return;
+			}
+			const int level = (size_t)frame <= m_Stack.size() ? m_Stack[(size_t)frame - 1].Level : 0;
 			bool ok = false;
 			const Variable result = m_Debugger->Evaluate(args["expression"].String(), level, ok);
 			if (!ok)
@@ -887,6 +963,13 @@ namespace cluau::runtime {
 					{
 						buffer.erase(0, body);
 						continue;
+					}
+					// The language server's limit: past it the stream cannot be read on.
+					if (length > (256L << 20))
+					{
+						server->Output("stderr", "cluau debug: a message of " + std::to_string(length) +
+													 " bytes is longer than the 256 MiB a message can be; the session ends\n");
+						break;
 					}
 					if (buffer.size() >= body + (size_t)length)
 					{

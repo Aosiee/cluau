@@ -10,17 +10,33 @@ const { LanguageClient, TransportKind, State } = require("vscode-languageclient/
 let client = null;
 let output = null;
 
-function settings() {
-	const config = vscode.workspace.getConfiguration("cluau");
-	return {
-		program: config.get("path") || "cluau",
-		modules: config.get("modules") || {},
-	};
-}
-
 function workspaceDir() {
 	const folders = vscode.workspace.workspaceFolders;
 	return folders && folders.length ? folders[0].uri.fsPath : undefined;
+}
+
+// A setting's path, the same for the language server, the debugger and
+// Run File: ${workspaceFolder} replaced, and a relative path taken from
+// the workspace's folder. A program's bare name ("cluau") is looked up on
+// PATH. Undefined for a relative path when no folder is open.
+function resolvePath(value, program) {
+	const dir = workspaceDir();
+	const out = value.replace(/\$\{workspaceFolder\}/g, dir || "");
+	if (path.isAbsolute(out)) return out;
+	if (program && !/[\\/]/.test(out)) return out;
+	return dir ? path.resolve(dir, out) : undefined;
+}
+
+function settings() {
+	const config = vscode.workspace.getConfiguration("cluau");
+	const configured = config.get("path") || "cluau";
+	const modules = {};
+	for (const [name, file] of Object.entries(config.get("modules") || {})) {
+		const resolved = resolvePath(String(file));
+		if (resolved) modules[name] = resolved;
+		else if (output) output.appendLine(`cluau.modules: ${name} names a relative path (${file}) and no folder is open; it is left out`);
+	}
+	return { program: resolvePath(configured, true) || configured, modules };
 }
 
 async function start() {
@@ -61,21 +77,19 @@ async function stop() {
 	client = null;
 }
 
-function quote(text) {
-	if (process.platform === "win32") return `& "${text.replace(/"/g, '""')}"`;
-	return `'${text.replace(/'/g, "'\\''")}'`;
-}
-
+// Run File: cluau itself is the terminal's program (no shell reads the
+// paths, so nothing in them needs quoting), in the file's directory. A
+// terminal of an earlier run that has ended makes way; one still running
+// is left alone and the run gets a terminal of its own.
 async function runFile() {
 	const editor = vscode.window.activeTextEditor;
 	if (!editor || editor.document.languageId !== "cluau") return;
 	if (editor.document.isDirty) await editor.document.save();
 	const file = editor.document.uri.fsPath;
-	const terminal = vscode.window.terminals.find((t) => t.name === "cluau") || vscode.window.createTerminal({ name: "cluau", cwd: path.dirname(file) });
-	terminal.show(true);
+	for (const t of vscode.window.terminals) if (t.name === "cluau" && t.exitStatus !== undefined) t.dispose();
 	const { program } = settings();
-	const target = process.platform === "win32" ? `"${file.replace(/"/g, '""')}"` : quote(file);
-	terminal.sendText(`${quote(program)} ${target}`);
+	const terminal = vscode.window.createTerminal({ name: "cluau", shellPath: program, shellArgs: [file], cwd: path.dirname(file) });
+	terminal.show(true);
 }
 
 // F5 with no launch.json, or a configuration without a program: the
@@ -106,7 +120,7 @@ const debugConfigurations = {
 
 const debugAdapters = {
 	createDebugAdapterDescriptor() {
-		return new vscode.DebugAdapterExecutable(settings().program, ["debug"]);
+		return new vscode.DebugAdapterExecutable(settings().program, ["debug"], { cwd: workspaceDir() });
 	},
 };
 

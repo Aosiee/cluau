@@ -248,6 +248,34 @@ namespace cluau::runtime::detail {
 	{
 		lua_getfield(L, LUA_REGISTRYINDEX, kRunUntilRegistry);
 		const bool tasks = lua_isfunction(L, -1);
+		if (!tasks && DebuggerAttached(L))
+		{
+			// Under the debugger the call runs on a job's thread while this
+			// one reads the editor's requests (a pause, breakpoints, the end).
+			lua_pop(L, 1);
+			const int id = Start(std::move(work));
+			Jobs& jobs = State();
+			for (;;)
+			{
+				{
+					std::unique_lock<std::mutex> lock(jobs.Mutex);
+					const std::shared_ptr<Job> job = jobs.All[id];
+					if (jobs.Finished.wait_for(lock, std::chrono::milliseconds(100), [&] { return job->Done; }))
+						break;
+				}
+				try
+				{
+					DebugWaiting(L);
+				}
+				catch (...)
+				{
+					std::lock_guard<std::mutex> lock(jobs.Mutex);
+					jobs.All.erase(id); // its thread finishes on its own
+					throw;
+				}
+			}
+			return Take(L, id);
+		}
 		if (!tasks || (IsTask(L) && !lua_isyieldable(L)))
 		{
 			lua_pop(L, 1);

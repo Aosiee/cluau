@@ -74,13 +74,13 @@ namespace cluau::runtime::detail {
 			return 13;
 		}
 
-		bool Readable(const std::string& path)
-		{
-			const std::string ext = std::filesystem::u8path(path).extension().u8string();
-			return ext == ".cluau" || ext == ".luau" || ext == ".lua";
-		}
-
 	} // namespace
+
+	bool LspServer::Readable(const std::string& path) const
+	{
+		const std::string ext = std::filesystem::u8path(path).extension().u8string();
+		return ext == ".cluau" || ext == ".luau" || ext == ".lua" || m_Cluau.count(path) > 0;
+	}
 
 	LspServer::LspServer(const CheckOptions& options)
 		: m_Service(options)
@@ -90,7 +90,20 @@ namespace cluau::runtime::detail {
 	std::string LspServer::PathFromUri(const std::string& uri)
 	{
 		std::string path = uri.rfind("file://", 0) == 0 ? uri.substr(7) : uri;
-		std::string out;
+		// file://server/share/x: a file on a network share, \\server\share\x
+		// (kept as //server/share/x, which Windows reads as the same).
+		std::string host;
+		if (uri.rfind("file://", 0) == 0 && !path.empty() && path[0] != '/')
+		{
+			const size_t slash = path.find('/');
+			host = path.substr(0, slash);
+			path = slash == std::string::npos ? std::string() : path.substr(slash);
+			std::string lower = host;
+			std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+			if (lower == "localhost")
+				host.clear();
+		}
+		std::string out = host.empty() ? std::string() : "//" + host;
 		for (size_t i = 0; i < path.size(); i++)
 		{
 			if (path[i] == '%' && i + 2 < path.size() && std::isxdigit((unsigned char)path[i + 1]) && std::isxdigit((unsigned char)path[i + 2]))
@@ -112,7 +125,14 @@ namespace cluau::runtime::detail {
 		std::string generic = path;
 		std::replace(generic.begin(), generic.end(), '\\', '/');
 		std::string out = "file://";
-		if (generic.empty() || generic[0] != '/')
+		// //server/share/x (\\server\share\x): the server is the URI's host.
+		if (generic.size() > 2 && generic[0] == '/' && generic[1] == '/' && generic[2] != '/')
+		{
+			const size_t slash = generic.find('/', 2);
+			out += generic.substr(2, slash == std::string::npos ? std::string::npos : slash - 2);
+			generic = slash == std::string::npos ? "/" : generic.substr(slash);
+		}
+		else if (generic.empty() || generic[0] != '/')
 			out += '/';
 		for (char c : generic)
 		{
@@ -239,6 +259,15 @@ namespace cluau::runtime::detail {
 		const std::string method = request["method"].String();
 		const bool isRequest = request.Has("id");
 		const Json& params = request["params"];
+		// LSP's lifecycle: nothing before `initialize`, and after `shutdown`
+		// only `exit` (a notification otherwise is dropped).
+		if (method != "exit")
+		{
+			if (!m_Initialized && method != "initialize")
+				return isRequest ? fail(-32002, "the server is not initialized yet (initialize comes first)", request["id"]) : out;
+			if (m_ShutDown)
+				return isRequest ? fail(-32600, "the server is shut down (only exit follows shutdown)", request["id"]) : out;
+		}
 
 		Json result;
 		std::string error;
@@ -281,6 +310,7 @@ namespace cluau::runtime::detail {
 			result = Json::Object()
 						 .Set("capabilities", std::move(capabilities))
 						 .Set("serverInfo", Json::Object().Set("name", "cluau").Set("version", cluau::Version()));
+			m_Initialized = true;
 		}
 		else if (method == "shutdown")
 			m_ShutDown = true;
@@ -288,6 +318,10 @@ namespace cluau::runtime::detail {
 			m_Exit = true;
 		else if (method == "textDocument/didOpen")
 		{
+			// A script the editor gives the cluau language (by its first
+			// line's #!) is one, with any name.
+			if (params["textDocument"]["languageId"].String() == "cluau")
+				m_Cluau.insert(path);
 			if (Readable(path))
 			{
 				m_Service.Open(path, params["textDocument"]["text"].String());
@@ -310,6 +344,7 @@ namespace cluau::runtime::detail {
 				m_Service.Close(path);
 				Publish(out);
 			}
+			m_Cluau.erase(path);
 		}
 		else if (method == "textDocument/didSave")
 		{
@@ -554,6 +589,8 @@ namespace cluau::runtime::detail {
 		_setmode(_fileno(in), _O_BINARY);
 		_setmode(_fileno(out), _O_BINARY);
 #endif
+		bool resync = false;
+		std::string window;
 		for (;;)
 		{
 			// Headers, then an empty line; Content-Length is the body's size.
@@ -567,6 +604,22 @@ namespace cluau::runtime::detail {
 				{
 					ended = true;
 					break;
+				}
+				if (resync)
+				{
+					// After a message without a length: on at the next
+					// Content-Length, wherever it starts.
+					constexpr std::string_view kHeader = "content-length:";
+					window += (char)std::tolower(c);
+					if (window.size() > kHeader.size())
+						window.erase(0, 1);
+					if (window == kHeader)
+					{
+						resync = false;
+						window.clear();
+						header = "Content-Length:";
+					}
+					continue;
 				}
 				if (c == '\n')
 				{
@@ -587,7 +640,21 @@ namespace cluau::runtime::detail {
 			if (ended)
 				return m_ShutDown ? 0 : 1;
 			if (length < 0)
+			{
+				// Its body cannot be told from what follows: an error, and the
+				// stream is read on from the next message's header.
+				const std::string error =
+					Json::Object()
+						.Set("jsonrpc", "2.0")
+						.Set("id", nullptr)
+						.Set("error", Json::Object().Set("code", -32700).Set("message", "a message without a Content-Length header"))
+						.Dump();
+				std::fprintf(out, "Content-Length: %zu\r\n\r\n", error.size());
+				std::fwrite(error.data(), 1, error.size(), out);
+				std::fflush(out);
+				resync = true;
 				continue;
+			}
 			// A length no editor sends: the stream cannot be followed past it.
 			if (length > kMaxMessage)
 			{
