@@ -15,6 +15,7 @@
 #include "lualib.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <functional>
@@ -32,13 +33,17 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #ifndef _WIN32
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <unistd.h>
 extern char** environ;
+#else
+#include <io.h> // _read
 #endif
 
 #if defined(_WIN32)
@@ -1259,18 +1264,32 @@ namespace cluau::runtime::detail {
 			const std::string name = EnvName(L, "process.setEnv");
 			const bool set = !lua_isnoneornil(L, 2);
 			const std::string value(set ? Text(L, 2, "value") : std::string_view());
+			bool ok;
+			int err = 0;
+			{
+				// Not while a child's launch on another thread copies the environment.
+				std::lock_guard<std::mutex> environment(EnvironmentLock());
 #ifdef _WIN32
-			// The C runtime's copy (getenv) and the system's (what programs
-			// started from here get), which also keeps an empty value.
-			const std::wstring wname = Wide(name), wvalue = Wide(value);
-			const bool ok = _wputenv_s(wname.c_str(), wvalue.c_str()) == 0 &&
-				SetEnvironmentVariableW(wname.c_str(), set ? wvalue.c_str() : nullptr) != 0;
-			if (!ok && set)
+				// The C runtime's copy (getenv) and the system's (what programs
+				// started from here get), which also keeps an empty value.
+				const std::wstring wname = Wide(name), wvalue = Wide(value);
+				ok = _wputenv_s(wname.c_str(), wvalue.c_str()) == 0 &&
+					SetEnvironmentVariableW(wname.c_str(), set ? wvalue.c_str() : nullptr) != 0;
+				ok = ok || !set;
+#else
+				ok = (set ? setenv(name.c_str(), value.c_str(), 1) : unsetenv(name.c_str())) == 0;
+				err = errno;
+#endif
+			}
+			if (!ok)
+			{
+#ifdef _WIN32
+				(void)err;
 				luaL_error(L, "process.setEnv: cannot set '%s'", name.c_str());
 #else
-			if ((set ? setenv(name.c_str(), value.c_str(), 1) : unsetenv(name.c_str())) != 0)
-				luaL_error(L, "process.setEnv: cannot set '%s': %s", name.c_str(), ErrnoMessage(errno).c_str());
+				luaL_error(L, "process.setEnv: cannot set '%s': %s", name.c_str(), ErrnoMessage(err).c_str());
 #endif
+			}
 			return 0;
 		}
 
@@ -1301,6 +1320,7 @@ namespace cluau::runtime::detail {
 		SpawnRequest Command(lua_State* L, const char* fn, bool run, bool textInput = true)
 		{
 			SpawnRequest request;
+			request.Interrupts = InterruptCount();
 			if (lua_type(L, 1) == LUA_TSTRING)
 			{
 				size_t len = 0;
@@ -1348,7 +1368,11 @@ namespace cluau::runtime::detail {
 			{
 				if (!lua_isstring(L, -1))
 					luaL_error(L, "%s: options.cwd is a string", fn);
-				request.Cwd = lua_tostring(L, -1);
+				size_t len = 0;
+				const char* cwd = lua_tolstring(L, -1, &len);
+				if (std::memchr(cwd, 0, len))
+					luaL_error(L, "%s: options.cwd holds a NUL byte", fn);
+				request.Cwd = std::string(cwd, len);
 			}
 			lua_pop(L, 1);
 			lua_getfield(L, 2, "env");
@@ -1359,7 +1383,15 @@ namespace cluau::runtime::detail {
 				{
 					if (lua_type(L, -2) != LUA_TSTRING || !lua_isstring(L, -1))
 						luaL_error(L, "%s: options.env maps names to strings", fn);
-					request.Env.emplace_back(lua_tostring(L, -2), lua_tostring(L, -1));
+					size_t nameLen = 0, valueLen = 0;
+					const char* name = lua_tolstring(L, -2, &nameLen);
+					const char* value = lua_tolstring(L, -1, &valueLen);
+					// A name holding '=' would set another variable than the one named.
+					if (nameLen == 0 || std::memchr(name, '=', nameLen) || std::memchr(name, 0, nameLen))
+						luaL_error(L, "%s: options.env has the name '%s' (a name is not empty, and holds no '=' or NUL byte)", fn, name);
+					if (std::memchr(value, 0, valueLen))
+						luaL_error(L, "%s: options.env's %s holds a NUL byte", fn, name);
+					request.Env.emplace_back(std::string(name, nameLen), std::string(value, valueLen));
 					lua_pop(L, 1);
 				}
 				std::sort(request.Env.begin(), request.Env.end());
@@ -1370,7 +1402,7 @@ namespace cluau::runtime::detail {
 			lua_getfield(L, 2, "timeout");
 			if (!lua_isnil(L, -1))
 			{
-				if (!lua_isnumber(L, -1) || lua_tonumber(L, -1) <= 0)
+				if (!lua_isnumber(L, -1) || !(lua_tonumber(L, -1) > 0)) // NaN too
 					luaL_error(L, "%s: options.timeout is a number of seconds", fn);
 				request.Timeout = lua_tonumber(L, -1);
 			}
@@ -1404,6 +1436,8 @@ namespace cluau::runtime::detail {
 				return [fn, started, why, what, result, push](lua_State* L) -> int {
 					if (!started)
 						luaL_error(L, "%s: cannot start %s: %s", fn, what.c_str(), why.c_str());
+					if (result->Interrupted)
+						RaiseIfInterrupted(L);
 					return push(L, *result);
 				};
 			};
@@ -1461,20 +1495,55 @@ namespace cluau::runtime::detail {
 
 		Child& CheckChild(lua_State* L) { return *SharedChild(L, 1); }
 
-		// A read (a chunk, or a line) on a job's thread: the text, or nil at the end.
+		// A read (a chunk, or a line) on a job's thread: the text, or nil at
+		// the end. A read whose task is cancelled takes nothing, or gives back
+		// what it took.
 		int AwaitRead(lua_State* L, std::shared_ptr<Child> child, bool line)
 		{
-			return Await(L, [child, line]() -> JobResult {
-				auto text = std::make_shared<std::string>();
-				const bool got = line ? child->ReadLine(*text) : child->Read(*text);
-				return [text, got](lua_State* L) {
-					if (!got)
+			struct Pending
+			{
+				std::atomic<int> State{ 0 }; // 0: waiting, 1: the read took its text, 2: given up
+				std::string Text;
+				bool Got = false;
+			};
+			auto pending = std::make_shared<Pending>();
+			const unsigned interrupts = InterruptCount();
+			auto work = [child, line, pending, interrupts]() -> JobResult {
+				auto claim = [&pending] {
+					int waiting = 0;
+					return pending->State.compare_exchange_strong(waiting, 1);
+				};
+				pending->Got = line ? child->ReadLine(pending->Text, interrupts, claim) : child->Read(pending->Text, interrupts, claim);
+				return [pending, line](lua_State* L) {
+					if (!pending->Got)
+					{
+						RaiseIfInterrupted(L);
 						lua_pushnil(L);
-					else
-						lua_pushlstring(L, text->data(), text->size());
+						return 1;
+					}
+					std::string_view text = pending->Text;
+					if (line && !text.empty() && text.back() == '\n')
+					{
+						text.remove_suffix(1);
+						if (!text.empty() && text.back() == '\r')
+							text.remove_suffix(1);
+					}
+					lua_pushlstring(L, text.data(), text.size());
 					return 1;
 				};
-			});
+			};
+			// What is there already is taken here: a thread for each line of a
+			// child's output would cost more than reading it.
+			if (child->Ready(line))
+				return work()(L);
+			auto unclaimed = [child, pending] {
+				int waiting = 0;
+				if (pending->State.compare_exchange_strong(waiting, 2))
+					return; // the read, still waiting, will take nothing
+				if (pending->Got)
+					child->Unread(pending->Text);
+			};
+			return Await(L, std::move(work), std::move(unclaimed));
 		}
 
 		int ChildRead(lua_State* L) { return AwaitRead(L, SharedChild(L, 1), false); }
@@ -1504,12 +1573,16 @@ namespace cluau::runtime::detail {
 				const char* part = luaL_checklstring(L, i, &len);
 				text.append(part, len);
 			}
-			return Await(L, [child, text = std::move(text)]() -> JobResult {
+			const unsigned interrupts = InterruptCount();
+			return Await(L, [child, text = std::move(text), interrupts]() -> JobResult {
 				std::string why;
-				const bool ok = child->Write(text, why);
+				const bool ok = child->Write(text, why, interrupts);
 				return [ok, why](lua_State* L) {
 					if (!ok)
+					{
+						RaiseIfInterrupted(L);
 						luaL_error(L, "child:write: %s", why.c_str());
+					}
 					return 0;
 				};
 			});
@@ -1524,9 +1597,11 @@ namespace cluau::runtime::detail {
 		int ChildWait(lua_State* L)
 		{
 			std::shared_ptr<Child> child = SharedChild(L, 1);
-			return Await(L, [child]() -> JobResult {
-				const int code = child->Wait();
+			const unsigned interrupts = InterruptCount();
+			return Await(L, [child, interrupts]() -> JobResult {
+				const int code = child->Wait(interrupts);
 				return [code](lua_State* L) {
+					RaiseIfInterrupted(L);
 					lua_pushinteger(L, code);
 					return 1;
 				};
@@ -1597,15 +1672,37 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// In steps, so a Ctrl-C ends it; math.huge sleeps until one.
 		int ProcessSleep(lua_State* L)
 		{
 			const double seconds = luaL_checknumber(L, 1);
+			if (seconds != seconds)
+				luaL_error(L, "process.sleep: the time is NaN, not a number of seconds");
 			if (seconds <= 0)
 				return 0;
-			return Await(L, [seconds]() -> JobResult {
-				std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
-				return [](lua_State*) { return 0; };
-			});
+			const unsigned interrupts = InterruptCount();
+			auto dropped = std::make_shared<std::atomic<bool>>(false); // its task was cancelled: the sleep ends
+			auto work = [seconds, interrupts, dropped]() -> JobResult {
+				using Clock = std::chrono::steady_clock;
+				const bool forever = !(seconds < 1e9);
+				const Clock::time_point until =
+					forever ? Clock::time_point::max() : Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
+				while (!*dropped && !InterruptPending() && InterruptCount() == interrupts)
+				{
+					const Clock::time_point now = Clock::now();
+					if (now >= until)
+						break;
+					auto step = std::chrono::duration_cast<Clock::duration>(std::chrono::milliseconds(100));
+					if (!forever && until - now < step)
+						step = until - now;
+					std::this_thread::sleep_for(step);
+				}
+				return [](lua_State* L) {
+					RaiseIfInterrupted(L);
+					return 0;
+				};
+			};
+			return Await(L, std::move(work), [dropped] { *dropped = true; });
 		}
 
 		const luaL_Reg kProcess[] = {
@@ -1708,43 +1805,192 @@ namespace cluau::runtime::detail {
 			return WriteTo(L, "io.writeError", stderr);
 		}
 
-		// Standard input is read on a job's thread, one read at a time.
-		std::mutex g_Reading;
+		// Standard input, read from its descriptor rather than through stdio:
+		// a read blocked in stdio holds stdin's lock, and the process's exit
+		// (which flushes every stream) would wait for it. One thread reads at
+		// a time; what a read gets past its line waits here for the next.
+		struct StandardInput
+		{
+			std::timed_mutex Reading; // the descriptor
+			std::mutex Lock;          // Buffer and Fills
+			std::string Buffer;
+			unsigned Fills = 0;
+		};
+
+		StandardInput& Stdin()
+		{
+			static StandardInput* in = new StandardInput; // never destroyed: a job may read while the process exits
+			return *in;
+		}
+
+		enum class StdinRead { Data, End, Interrupted };
+
+		bool StdinInterrupted(unsigned interrupts) { return InterruptPending() || InterruptCount() != interrupts; }
+
+		// More input into the buffer (Reading held): waits in steps, so a
+		// Ctrl-C ends the wait. The end is not kept: a terminal gives more
+		// after its end-of-file key.
+		StdinRead FillStdin(StandardInput& in, unsigned interrupts)
+		{
+			char buffer[4096];
+			for (;;)
+			{
+				if (StdinInterrupted(interrupts))
+					return StdinRead::Interrupted;
+#ifdef _WIN32
+				const int got = _read(0, buffer, sizeof(buffer));
+				if (got <= 0 && _isatty(0))
+					Sleep(50); // a Ctrl-C ends a console read before its handler has run
+				if (got <= 0)
+					return StdinInterrupted(interrupts) ? StdinRead::Interrupted : StdinRead::End;
+#else
+				fd_set ready;
+				FD_ZERO(&ready);
+				FD_SET(0, &ready);
+				timeval step = { 0, 100000 };
+				const int n = select(1, &ready, nullptr, nullptr, &step);
+				if (n == 0 || (n < 0 && errno == EINTR))
+					continue;
+				const ssize_t got = read(0, buffer, sizeof(buffer));
+				if (got < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+					continue;
+				if (got <= 0)
+					return StdinRead::End;
+#endif
+				std::lock_guard<std::mutex> lock(in.Lock);
+				in.Buffer.append(buffer, (size_t)got);
+				in.Fills++;
+				return StdinRead::Data;
+			}
+		}
+
+		// A line with its line end ("" when there is none: at the end).
+		// `claim` decides, with the buffer's lock held, whether the read takes
+		// it (false: given up, and it stays for the next read).
+		StdinRead ReadStdinLine(std::string& line, unsigned interrupts, const std::function<bool()>& claim)
+		{
+			StandardInput& in = Stdin();
+			bool ended = false;
+			for (;;)
+			{
+				unsigned fills = 0;
+				{
+					std::lock_guard<std::mutex> lock(in.Lock);
+					const size_t nl = in.Buffer.find('\n');
+					if (nl != std::string::npos || (ended && !in.Buffer.empty()))
+					{
+						if (claim && !claim())
+							return StdinRead::End;
+						const size_t n = nl != std::string::npos ? nl + 1 : in.Buffer.size();
+						line.assign(in.Buffer, 0, n);
+						in.Buffer.erase(0, n);
+						return StdinRead::Data;
+					}
+					if (ended)
+						return StdinRead::End;
+					fills = in.Fills;
+				}
+				if (StdinInterrupted(interrupts))
+					return StdinRead::Interrupted;
+				std::unique_lock<std::timed_mutex> reading(in.Reading, std::chrono::milliseconds(100));
+				if (!reading.owns_lock())
+					continue; // another read is waiting on the descriptor: what it gets is shared out
+				{
+					std::lock_guard<std::mutex> lock(in.Lock);
+					if (in.Fills != fills)
+						continue; // more came while this one waited its turn
+				}
+				const StdinRead got = FillStdin(in, interrupts);
+				if (got == StdinRead::Interrupted)
+					return got;
+				ended = got == StdinRead::End;
+			}
+		}
+
+		void UnreadStdin(const std::string& text)
+		{
+			StandardInput& in = Stdin();
+			std::lock_guard<std::mutex> lock(in.Lock);
+			in.Buffer.insert(0, text);
+			in.Fills++;
+		}
+
+		std::string_view WithoutLineEnd(std::string_view line)
+		{
+			if (!line.empty() && line.back() == '\n')
+				line.remove_suffix(1);
+			if (!line.empty() && line.back() == '\r')
+				line.remove_suffix(1);
+			return line;
+		}
 
 		int IoReadLine(lua_State* L)
 		{
 			std::fflush(stdout);
 			Binary(0);
-			return Await(L, []() -> JobResult {
-				std::lock_guard<std::mutex> reading(g_Reading);
-				auto line = std::make_shared<std::string>();
-				const bool got = (bool)std::getline(std::cin, *line);
-				if (got && !line->empty() && line->back() == '\r')
-					line->pop_back();
-				return [line, got](lua_State* L) {
-					if (!got)
+			struct Pending
+			{
+				std::atomic<int> State{ 0 }; // 0: waiting, 1: the read took its line, 2: given up
+				std::string Line;
+				StdinRead Got = StdinRead::End;
+			};
+			auto pending = std::make_shared<Pending>();
+			const unsigned interrupts = InterruptCount();
+			auto work = [pending, interrupts]() -> JobResult {
+				pending->Got = ReadStdinLine(pending->Line, interrupts, [&pending] {
+					int waiting = 0;
+					return pending->State.compare_exchange_strong(waiting, 1);
+				});
+				return [pending](lua_State* L) {
+					if (pending->Got != StdinRead::Data)
 					{
 						RaiseIfInterrupted(L);
 						lua_pushnil(L);
+						return 1;
 					}
-					else
-						lua_pushlstring(L, line->data(), line->size());
+					const std::string_view line = WithoutLineEnd(pending->Line);
+					lua_pushlstring(L, line.data(), line.size());
 					return 1;
 				};
-			});
+			};
+			// A line there already is taken here, without a thread of its own.
+			bool ready = false;
+			{
+				StandardInput& in = Stdin();
+				std::lock_guard<std::mutex> lock(in.Lock);
+				ready = in.Buffer.find('\n') != std::string::npos;
+			}
+			if (ready)
+				return work()(L);
+			// A read whose task is cancelled takes nothing, or gives its line back.
+			auto unclaimed = [pending] {
+				int waiting = 0;
+				if (!pending->State.compare_exchange_strong(waiting, 2) && pending->Got == StdinRead::Data)
+					UnreadStdin(pending->Line);
+			};
+			return Await(L, std::move(work), std::move(unclaimed));
 		}
 
 		int IoReadAll(lua_State* L)
 		{
 			std::fflush(stdout);
 			Binary(0);
-			return Await(L, []() -> JobResult {
-				std::lock_guard<std::mutex> reading(g_Reading);
-				std::stringstream buffer;
-				buffer << std::cin.rdbuf();
-				auto text = std::make_shared<std::string>(buffer.str());
-				return [text](lua_State* L) {
-					RaiseIfInterrupted(L);
+			const unsigned interrupts = InterruptCount();
+			return Await(L, [interrupts]() -> JobResult {
+				StandardInput& in = Stdin();
+				std::unique_lock<std::timed_mutex> reading(in.Reading);
+				StdinRead got = StdinRead::Data;
+				while (got == StdinRead::Data)
+					got = FillStdin(in, interrupts);
+				auto text = std::make_shared<std::string>();
+				{
+					std::lock_guard<std::mutex> lock(in.Lock);
+					text->swap(in.Buffer);
+					in.Fills++;
+				}
+				return [text, got](lua_State* L) {
+					if (got == StdinRead::Interrupted)
+						RaiseIfInterrupted(L);
 					lua_pushlstring(L, text->data(), text->size());
 					return 1;
 				};
@@ -2861,7 +3107,7 @@ namespace cluau::runtime::detail {
 
 		bool Awaits(lua_CFunction f)
 		{
-			for (lua_CFunction awaiting : { ProcessRun, ProcessExec, ProcessSleep, ChildRead, ChildReadLine, ChildWait, IoReadLine, IoReadAll })
+			for (lua_CFunction awaiting : { ProcessRun, ProcessExec, ProcessSleep, ChildRead, ChildReadLine, ChildWrite, ChildWait, IoReadLine, IoReadAll })
 				if (f == awaiting)
 					return true;
 			return false;
@@ -3019,6 +3265,14 @@ namespace cluau::runtime::detail {
 	}
 
 	void SetExitHook(void (*hook)(int code)) { g_ExitHook = hook; }
+
+	bool ReadStandardInputLine(std::string& line)
+	{
+		if (ReadStdinLine(line, InterruptCount(), {}) != StdinRead::Data)
+			return false;
+		line = std::string(WithoutLineEnd(line));
+		return true;
+	}
 
 } // namespace cluau::runtime::detail
 

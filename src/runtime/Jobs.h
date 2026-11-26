@@ -26,16 +26,22 @@ namespace cluau::runtime::detail {
 	using JobResult = std::function<int(lua_State*)>;
 	// Runs on its own thread: no Lua state.
 	using JobWork = std::function<JobResult()>;
+	// Called once when the job is dropped (its task cancelled, or the wait
+	// for it ended by an error) instead of its results being taken: a read
+	// gives back what it got. It may run on the job's thread or the
+	// script's, while the work runs or after; nothing else is called then.
+	using JobUnclaimed = std::function<void()>;
 
 	// The C function's return: `return Await(L, work);`. The function is
 	// registered with AwaitContinue as its continuation.
-	int Await(lua_State* L, JobWork work);
+	int Await(lua_State* L, JobWork work, JobUnclaimed unclaimed = {});
 	int AwaitContinue(lua_State* L, int status);
 
 	// Pushes the table @std/task drives jobs with (require("@std/_jobs")):
 	// marker (what a waiting call yields first), done(id), pending(),
-	// wait(seconds?) (until a job finishes, or the time passes), forget(id),
-	// register(tasksByThread, runUntilJob).
+	// completed() (how many have finished), wait(seconds?, since?) (until a
+	// job finishes, after `since` when given, or the time passes),
+	// forget(id), register(tasksByThread, runUntilJob).
 	void OpenJobs(lua_State* L);
 
 } // namespace cluau::runtime::detail

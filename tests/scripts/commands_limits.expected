@@ -1,0 +1,12 @@
+process.run: options.env has the name 'A=B' (a name is not empty, and holds no '=' or NUL byte)
+process.run: options.env has the name '' (a name is not empty, and holds no '=' or NUL byte)
+process.run: options.env's VALUE holds a NUL byte
+process.run: options.cwd holds a NUL byte
+process.run: options.timeout is a number of seconds
+process.sleep: the time is NaN, not a number of seconds
+held past the limit	false	0	started	true
+exit while a task reads	true	3
+generator stopped by SIGPIPE	true	1
+no zombies	true
+files kept from children	true
+exit: 0

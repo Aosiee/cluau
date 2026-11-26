@@ -156,6 +156,10 @@ __cluau_meta = {
 		// signal is the process's, so this is too: whichever runtime that
 		// catches interrupts reaches a safepoint first stops.
 		std::atomic<int> g_Interrupt{ 0 };
+		// Counts every Ctrl-C and is never cleared, so a job's thread sees one
+		// even after the script's thread has raised it.
+		std::atomic<unsigned> g_Interrupts{ 0 };
+		static_assert(std::atomic<int>::is_always_lock_free && std::atomic<unsigned>::is_always_lock_free);
 
 		// The message of the error a Ctrl-C raises: a run that ends in it
 		// (however it was caught and raised again) exits with status 130.
@@ -180,6 +184,7 @@ __cluau_meta = {
 			if (g_Interrupt)
 				std::_Exit(130);
 			g_Interrupt = 1;
+			g_Interrupts++;
 	#ifdef _WIN32
 			std::signal(SIGINT, OnSigint);
 	#endif
@@ -190,6 +195,11 @@ __cluau_meta = {
 	#ifdef _WIN32
 			std::signal(SIGINT, OnSigint);
 	#else
+			// A SIGINT ignored by whoever started the script (a background
+			// job of a shell) stays ignored.
+			struct sigaction current = {};
+			if (sigaction(SIGINT, nullptr, &current) == 0 && current.sa_handler == SIG_IGN)
+				return;
 			// Without SA_RESTART, so a script blocked reading standard input
 			// gets its read back and stops at the first Ctrl-C.
 			struct sigaction action = {};
@@ -1309,16 +1319,17 @@ end
 				std::fflush(stdout);
 			}
 #endif
-			if (!std::getline(std::cin, line))
+			// The script's io.readLine reads from the same buffer.
+			if (!detail::ReadStandardInputLine(line))
 				return Read::End;
-			if (!line.empty() && line.back() == '\r')
-				line.pop_back();
 			return Read::Line;
 		}
 
 	} // namespace
 
 	bool detail::InterruptPending() { return g_Interrupt.load() != 0; }
+
+	unsigned detail::InterruptCount() { return g_Interrupts; }
 
 	void detail::RaiseIfInterrupted(lua_State* L)
 	{

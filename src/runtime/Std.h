@@ -41,6 +41,9 @@ namespace cluau::runtime::detail {
 
 	// A Ctrl-C is waiting to stop the script (a long transfer checks).
 	bool InterruptPending();
+	// How many Ctrl-Cs have come so far (never reset): a job's thread
+	// compares it with the count when its work began.
+	unsigned InterruptCount();
 
 	// Pushes @std/http's table (when the runtime is built with it).
 	void OpenHttp(lua_State* L);
@@ -73,5 +76,9 @@ namespace cluau::runtime::detail {
 	// Called with the exit status when a script calls `process.exit`,
 	// before the process ends (the debugger reports the end); null for none.
 	void SetExitHook(void (*hook)(int code));
+
+	// A line of standard input without its line end (false at the end, or
+	// at a Ctrl-C), from the buffer io.readLine and input() read through.
+	bool ReadStandardInputLine(std::string& line);
 
 } // namespace cluau::runtime::detail

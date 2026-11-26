@@ -1,0 +1,133 @@
+// Tasks sharing one child (reads shared out, every wait given the code, a
+// write in a task, a cancelled read that gives its line back), and the
+// tasks' own edges: waits that last their time, join and cancel where a
+// task cannot yield, a failure inside another task's wait, an endless wait,
+// and finished tasks let go.
+const task = require("@std/task")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const cluau = process.executable
+
+function Clean(text: string?): string? {
+	return if (text == nil) nil else (string.gsub(text, "\r", ""))
+}
+
+// Two tasks read one child's lines while a third task and the script's own
+// code wait for it: no line is lost, and each wait gets the exit code.
+const counter = process.spawn({ cluau, "-e", "for (i = 1, 5000) { print(i) }\nrequire('@std/process').exit(3)" })
+const readers: { task.Task<number> } = {}
+for (i = 1, 2) {
+	table.insert(readers, task.spawn(function(): number {
+		let n = 0
+		for (line in counter:lines()) {
+			n += 1
+		}
+		return n
+	}))
+}
+const waiter = task.spawn(function(): number {
+	return counter:wait()
+})
+const code = counter:wait()
+let lines = 0
+for (_, reader in readers) {
+	lines += task.join(reader)
+}
+print("shared lines", lines, "codes", code, task.join(waiter), counter:wait())
+
+// A write in a task returns nothing, and a write after closeInput is an error.
+const echo = process.spawn({ cluau, "-e", "print(require('@std/io').readLine())" }, { input = true })
+const writer = task.spawn(function(): (number, boolean, string) {
+	const results = table.pack(echo:write("hello\n"))
+	echo:closeInput()
+	const ok, err = pcall(function() {
+		echo:write("more")
+	})
+	return results.n, ok, tostring(err)
+})
+const wrote, writeOk, writeError = task.join(writer)
+print("write in a task", wrote, writeOk, string.find(writeError, "child:write: its input is closed", 1, true) != nil)
+print("echoed", Clean(echo:readLine()), echo:wait())
+
+// A task cancelled while its read waits takes nothing: the next read gets
+// the first line.
+const late = process.spawn({ cluau, "-e", "require('@std/process').sleep(0.2)\nprint('first')\nprint('second')" })
+const cancelledRead = task.spawn(function() {
+	late:readLine()
+})
+task.wait(0.05)
+task.cancel(cancelledRead)
+print("after a cancelled read", Clean(late:readLine()), Clean(late:readLine()), late:wait())
+
+// task.wait lasts its time while a job no task waits on (a cancelled
+// task's sleep) finishes, and another task is due later.
+const sleeper = task.spawn(function() {
+	process.sleep(0.1)
+})
+task.cancel(sleeper)
+const later = task.delay(30, function() {})
+let started = time.monotonic()
+task.wait(0.4)
+print("waited its time", time.monotonic() - started >= 0.4)
+task.cancel(later)
+
+// task.join where the task cannot yield (a sort's comparison) runs the
+// tasks there instead, and leaves nothing behind for a later wait.
+const slow = task.spawn(function(): string {
+	task.wait(0.05)
+	return "slow"
+})
+const sorter = task.spawn(function(): (boolean, string, boolean) {
+	const sorted = { 2, 1 }
+	let joined = ""
+	const ok = pcall(table.sort, sorted, function(a: number, b: number): boolean {
+		joined = task.join(slow)
+		return a < b
+	})
+	const from = time.monotonic()
+	task.wait(0.3)
+	return ok, joined, time.monotonic() - from >= 0.3
+})
+print("join inside sort", task.join(sorter))
+
+// A task that cancels itself where it cannot yield ends there.
+const quitter = task.spawn(function(): string {
+	const me = task.running() :: task.Task<string>
+	table.sort({ 2, 1 }, function(a: number, b: number): boolean {
+		task.cancel(me)
+		return a < b
+	})
+	return "went on"
+})
+print("cancelled itself", quitter.done, quitter.cancelled, select("#", task.join(quitter)))
+
+// A task failing inside another task's wait is reported with its own stack.
+const failing = task.delay(0.01, function() {
+	error("failed here")
+})
+const hostOk, hostError = pcall(function() {
+	task.spawn(function() {
+		table.sort({ 2, 1 }, function(a: number, b: number): boolean {
+			task.wait(0.05)
+			return a < b
+		})
+	})
+})
+const failure = (task :: any)._failure // allow-any: the runtime's record of the last failure
+const failedAt = debug.traceback(failure.thread) // allow-any: as above
+print("nested failure", hostOk, hostError, failing.done, string.find(failedAt, "tasks_child.cluau:107", 1, true) != nil)
+
+// An endless wait sleeps until it is cancelled.
+const endless = task.spawn(function() {
+	task.wait(math.huge)
+})
+task.wait(0.05)
+task.cancel(endless)
+print("endless wait cancelled", endless.done, endless.cancelled)
+
+// Finished tasks (joined or not) are let go: the heap stays small.
+for (i = 1, 100000) {
+	task.spawn(function(data: string) {}, string.rep("x", 100))
+}
+print("finished tasks let go", gcinfo() < 50000)

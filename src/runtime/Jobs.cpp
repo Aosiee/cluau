@@ -7,10 +7,12 @@
 #include "lualib.h"
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace cluau::runtime::detail {
@@ -26,6 +28,7 @@ namespace cluau::runtime::detail {
 		{
 			bool Done = false;
 			JobResult Result;
+			JobUnclaimed Unclaimed; // when nothing takes the results
 		};
 
 		struct Jobs
@@ -34,7 +37,7 @@ namespace cluau::runtime::detail {
 			std::condition_variable Finished;
 			std::map<int, std::shared_ptr<Job>> All;
 			int Next = 1;
-			int Completed = 0; // bumps on each finish (wait's wake-up)
+			unsigned Completed = 0; // bumps on each finish (wait's wake-up; wraps)
 		};
 
 		// Never destroyed: a job's thread is detached and can still be
@@ -45,28 +48,83 @@ namespace cluau::runtime::detail {
 			return *jobs;
 		}
 
-		int Start(JobWork work)
+		// The error a job's work threw (out of memory, a thread that could
+		// not be made), raised on the script's thread instead.
+		JobResult Failed(std::string message)
+		{
+			return [message = std::move(message)](lua_State* L) -> int {
+				luaL_error(L, "%s", message.c_str());
+				return 0;
+			};
+		}
+
+		int Start(JobWork work, JobUnclaimed unclaimed)
 		{
 			Jobs& jobs = State();
 			auto job = std::make_shared<Job>();
+			job->Unclaimed = std::move(unclaimed);
 			int id = 0;
 			{
 				std::lock_guard<std::mutex> lock(jobs.Mutex);
 				id = jobs.Next++;
 				jobs.All[id] = job;
 			}
-			std::thread([job, work = std::move(work)] {
-				JobResult result = work();
-				Jobs& jobs = State();
-				{
-					std::lock_guard<std::mutex> lock(jobs.Mutex);
-					job->Result = std::move(result);
-					job->Done = true;
-					jobs.Completed++;
-				}
-				jobs.Finished.notify_all();
-			}).detach();
+			try
+			{
+				std::thread([job, work = std::move(work)] {
+					JobResult result;
+					try
+					{
+						result = work();
+					}
+					catch (const std::bad_alloc&)
+					{
+						result = Failed("not enough memory");
+					}
+					catch (const std::exception& e)
+					{
+						result = Failed(e.what());
+					}
+					catch (...)
+					{
+						result = Failed("the work failed");
+					}
+					Jobs& jobs = State();
+					{
+						std::lock_guard<std::mutex> lock(jobs.Mutex);
+						job->Result = std::move(result);
+						job->Done = true;
+						jobs.Completed++;
+					}
+					jobs.Finished.notify_all();
+				}).detach();
+			}
+			catch (...)
+			{
+				// No thread: the job would never finish.
+				std::lock_guard<std::mutex> lock(jobs.Mutex);
+				jobs.All.erase(id);
+				throw;
+			}
 			return id;
+		}
+
+		// Drops the job (its thread finishes on its own); what it got, or
+		// will get, goes back where it came from.
+		void Drop(int id)
+		{
+			Jobs& jobs = State();
+			JobUnclaimed unclaimed;
+			{
+				std::lock_guard<std::mutex> lock(jobs.Mutex);
+				auto it = jobs.All.find(id);
+				if (it == jobs.All.end())
+					return;
+				unclaimed = std::move(it->second->Unclaimed);
+				jobs.All.erase(it);
+			}
+			if (unclaimed)
+				unclaimed();
 		}
 
 		// The job's results, pushed (waiting for it, if it is not done).
@@ -122,20 +180,31 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
-		// Until a job finishes (from the call on), or `seconds` pass (none:
+		// How many jobs have finished so far: a later wait(seconds, since)
+		// returns at once when one has finished since.
+		int JobsCompleted(lua_State* L)
+		{
+			Jobs& jobs = State();
+			std::lock_guard<std::mutex> lock(jobs.Mutex);
+			lua_pushnumber(L, (double)jobs.Completed);
+			return 1;
+		}
+
+		// Until a job finishes (after `since`, a count from completed(); none:
+		// from the call on), or `seconds` pass (none, or too many to count:
 		// no limit); a Ctrl-C stops the wait.
 		int JobsWait(lua_State* L)
 		{
-			const bool limited = !lua_isnoneornil(L, 1);
+			const double seconds = luaL_optnumber(L, 1, HUGE_VAL);
+			if (!(seconds > 0)) // none left (or NaN)
+				return 0;
+			const bool limited = seconds < 1e9;
 			const auto until = std::chrono::steady_clock::now() +
-				std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(limited ? luaL_checknumber(L, 1) : 0));
+				std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(limited ? seconds : 0));
 			Jobs& jobs = State();
 			std::unique_lock<std::mutex> lock(jobs.Mutex);
-			const int seen = jobs.Completed;
-			bool anyDone = false;
-			for (const auto& [id, job] : jobs.All)
-				anyDone = anyDone || job->Done;
-			while (!anyDone && jobs.Completed == seen)
+			const unsigned seen = lua_isnoneornil(L, 2) ? jobs.Completed : (unsigned)luaL_checknumber(L, 2);
+			while (jobs.Completed == seen)
 			{
 				auto step = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
 				if (limited && until < step)
@@ -158,10 +227,7 @@ namespace cluau::runtime::detail {
 
 		int JobsForget(lua_State* L)
 		{
-			const int id = (int)luaL_checkinteger(L, 1);
-			Jobs& jobs = State();
-			std::lock_guard<std::mutex> lock(jobs.Mutex);
-			jobs.All.erase(id); // its thread finishes on its own
+			Drop((int)luaL_checkinteger(L, 1));
 			return 0;
 		}
 
@@ -178,7 +244,7 @@ namespace cluau::runtime::detail {
 
 	} // namespace
 
-	int Await(lua_State* L, JobWork work)
+	int Await(lua_State* L, JobWork work, JobUnclaimed unclaimed)
 	{
 		lua_getfield(L, LUA_REGISTRYINDEX, kRunUntilRegistry);
 		const bool tasks = lua_isfunction(L, -1);
@@ -189,7 +255,7 @@ namespace cluau::runtime::detail {
 			SampleBlocking(L); // the profiler's sample, with the calling line
 			return finish(L);
 		}
-		const int id = Start(std::move(work));
+		const int id = Start(std::move(work), std::move(unclaimed));
 		if (IsTask(L))
 		{
 			lua_pop(L, 1);
@@ -203,11 +269,7 @@ namespace cluau::runtime::detail {
 		lua_pushinteger(L, id);
 		if (lua_pcall(L, 1, 0, 0) != LUA_OK)
 		{
-			{
-				Jobs& jobs = State();
-				std::lock_guard<std::mutex> lock(jobs.Mutex);
-				jobs.All.erase(id); // its thread finishes on its own
-			}
+			Drop(id);
 			lua_error(L);
 		}
 		return Take(L, id);
@@ -225,6 +287,7 @@ namespace cluau::runtime::detail {
 		lua_pushlightuserdata(L, &g_Marker);
 		lua_setfield(L, -2, "marker");
 		const luaL_Reg functions[] = { { "done", JobsDone }, { "pending", JobsPending }, { "wait", JobsWait }, { "forget", JobsForget },
+			{ "completed", JobsCompleted },
 			{ "register", JobsRegister }, { nullptr, nullptr } };
 		for (const luaL_Reg* f = functions; f->name; f++)
 		{

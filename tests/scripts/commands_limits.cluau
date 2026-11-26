@@ -1,0 +1,101 @@
+// Programs at their limits: options that cannot be passed, a time limit
+// with something the command started still holding its output, a script
+// that exits while a task reads standard input, and (on Unix) SIGPIPE,
+// children dropped while running, and the script's files kept from them.
+const process = require("@std/process")
+const task = require("@std/task")
+const time = require("@std/time")
+const fs = require("@std/fs")
+const path = require("@std/path")
+
+const cluau = process.executable
+
+// Output without its line ends.
+function Clean(text: string): string {
+	return (string.gsub(text, "%s+$", ""))
+}
+
+// What a pcall caught, without its position.
+function Raised(ok: boolean, err: unknown): string {
+	return if (ok) "no error" else (string.gsub(tostring(err), "^[^:]*:%d+: ", ""))
+}
+
+const noop = { cluau, "-e", "" }
+print(Raised(pcall(process.run, noop, { env = { ["A=B"] = "1" } })))
+print(Raised(pcall(process.run, noop, { env = { [""] = "1" } })))
+print(Raised(pcall(process.run, noop, { env = { VALUE = "a\0b" } })))
+print(Raised(pcall(process.run, noop, { cwd = "here\0there" })))
+print(Raised(pcall(process.run, noop, { timeout = 0 / 0 })))
+print(Raised(pcall(process.sleep, 0 / 0)))
+
+// Past the limit a command that has ended finished in time, even though
+// what it started (here holding its standard error) runs on: the run
+// returns at the limit, not when that ends.
+const middle = "const process = require('@std/process')\n"
+	.. "process.spawn({ process.executable, '-e', 'require(\"@std/process\").sleep(4)' })\n"
+	.. "print('started')"
+const started = time.monotonic()
+const held = process.run({ cluau, "-e", middle }, { timeout = 1, stderr = "capture" })
+print("held past the limit", held.timedOut, held.code, Clean(held.output), time.monotonic() - started < 3)
+
+// A script that exits while a task waits on standard input exits at once.
+const reader = process.spawn({
+	cluau,
+	"-e",
+	"const task = require('@std/task')\ntask.spawn(function() { require('@std/io').readLine() })\ntask.wait(0.1)\nrequire('@std/process').exit(3)",
+}, { input = true })
+const guard = task.delay(10, function() {
+	reader:kill()
+})
+const before = time.monotonic()
+// Its output's end (not wait, which would close its input first).
+for (line in reader:lines()) {
+}
+print("exit while a task reads", time.monotonic() - before < 5, reader:wait())
+task.cancel(guard)
+
+if (process.platform == "windows") {
+	print("generator stopped by SIGPIPE", true, "1")
+	print("no zombies", true)
+	print("files kept from children", true)
+} else {
+	const dir = fs.tempDir()
+	const script = path.join(dir, `cluau-limits-{math.floor(time.now() * 1000)}.cluau`)
+
+	// After a program has run, a write to a closed pipe still ends the script
+	// (`cluau x | head -1` stops).
+	fs.write(script, "const process = require('@std/process')\nprocess.run({ 'true' })\nfor (i = 1, 300000) { print(i) }\nrequire('@std/io').writeError('finished')\n")
+	const piped = process.run({ "sh", "-c", "\"$0\" \"$1\" | head -n 1", cluau, script }, { stderr = "capture" })
+	print("generator stopped by SIGPIPE", string.find(piped.error, "finished", 1, true) == nil, Clean(piped.output))
+
+	// Children dropped while still running are reaped once they end.
+	let zombies = 0
+	if (process.platform == "linux") {
+		const ids: { number } = {}
+		for (i = 1, 5) {
+			const c = process.spawn({ cluau, "-e", "for (i = 1, 1000000) { print(i) }" })
+			c:readLine()
+			table.insert(ids, c:id())
+		}
+		// Garbage enough for the collector to run (and drop the children).
+		for (i = 1, 300000) {
+			const junk = { i, i, i }
+		}
+		process.sleep(0.5)
+		process.run({ "true" })
+		for (_, id in ids) {
+			const stat = `/proc/{id}/stat`
+			if (fs.exists(stat) && string.find(fs.read(stat), ") Z ", 1, true)) {
+				zombies += 1
+			}
+		}
+	}
+	print("no zombies", zombies == 0)
+
+	// The script's open files are not a child's.
+	const open = fs.open(script, "r")
+	const fds = process.run({ "sh", "-c", "ls -l /dev/fd/ 2>/dev/null" })
+	print("files kept from children", string.find(fds.output, path.basename(script), 1, true) == nil)
+	open:close()
+	fs.remove(script)
+}
