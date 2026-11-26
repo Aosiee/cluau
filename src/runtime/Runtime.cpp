@@ -1297,6 +1297,34 @@ end
 		void Complete(ic_completion_env_t* cenv, const char* input) { ic_complete_word(cenv, input, Completions, IsCompletionChar); }
 	#endif
 
+	#if defined(CLUAU_HAS_ISOCLINE) && !defined(_WIN32)
+		// While it reads a line, isocline handles the signals that end a
+		// process: it gives the terminal its mode back, then calls the handler
+		// that was there before, but only a handler of the program's own, not
+		// the default action. With none of ours under it the signal would be
+		// lost: a closed terminal's SIGHUP left the prompt reading a terminal
+		// that is gone, at full speed, for good. Ours takes the default action.
+		void TakeDefault(int signum)
+		{
+			std::signal(signum, SIG_DFL);
+			std::raise(signum); // delivered once isocline's handler returns
+		}
+
+		void PassOnEndingSignals()
+		{
+			for (int signum : { SIGTERM, SIGHUP, SIGQUIT, SIGSEGV, SIGBUS, SIGTRAP })
+			{
+				struct sigaction current = {};
+				if (sigaction(signum, nullptr, &current) != 0 || (current.sa_flags & SA_SIGINFO) || current.sa_handler != SIG_DFL)
+					continue;
+				struct sigaction action = {};
+				action.sa_handler = TakeDefault;
+				sigemptyset(&action.sa_mask);
+				sigaction(signum, &action, nullptr);
+			}
+		}
+	#endif
+
 		Read ReadLine(bool interactive, const char* prompt, std::string& line)
 		{
 	#ifdef CLUAU_HAS_ISOCLINE
@@ -1546,6 +1574,9 @@ end
 #ifdef CLUAU_HAS_ISOCLINE
 		if (interactive)
 		{
+#ifndef _WIN32
+			PassOnEndingSignals();
+#endif
 			ic_set_prompt_marker("", "");
 			ic_enable_brace_insertion(false);
 			ic_set_default_highlighter(TrackEdits, nullptr);

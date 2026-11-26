@@ -2,7 +2,8 @@
 # The interactive prompt in a real terminal (a pseudo-terminal): an
 # expression's value, Ctrl-C abandoning a line and a multi-line input, a
 # pasted block arriving whole, tab completion, Ctrl-C stopping running
-# code, and Ctrl-D leaving.
+# code, Ctrl-D leaving, and the prompt ending when its terminal closes or
+# it is sent SIGTERM.
 #
 #   python3 repl_terminal.py <cluau>
 #
@@ -137,6 +138,29 @@ def main():
     status = p.finish()
     if status != 0:
         sys.exit(f"FAIL Ctrl-D: the prompt exited with {status}")
+
+    # The terminal closing (SIGHUP) and SIGTERM each end the prompt.
+    for name, end in (("the terminal closing", None), ("SIGTERM", signal.SIGTERM)):
+        p = Prompt(sys.argv[1])
+        p.expect(r"Ctrl-D exits\.", "the banner")
+        p.ready("the first prompt")
+        if end is None:
+            os.close(p.fd)
+        else:
+            os.kill(p.pid, end)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            pid, _ = os.waitpid(p.pid, os.WNOHANG)
+            if pid == p.pid:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(p.pid, signal.SIGKILL)
+            os.waitpid(p.pid, 0)
+            sys.exit(f"FAIL {name}: the prompt kept running")
+        if end is not None:
+            os.close(p.fd)
+
     print("repl_terminal: every step passed")
 
 
