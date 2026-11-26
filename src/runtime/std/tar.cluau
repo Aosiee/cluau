@@ -13,7 +13,7 @@ const path = require("@std/path")
 
 // @std/compress, loaded for a gzip-compressed archive only: a build without
 // it still reads and writes plain tar.
-const Compress = function() {
+const Compress = function(): typeof(require("@std/compress")) {
 	return require("@std/compress")
 }
 

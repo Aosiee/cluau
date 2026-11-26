@@ -17,8 +17,10 @@ const encoding = require("@std/encoding")
 // @std/crypto, loaded by the first connection: a build without it still
 // loads this module (and @std/server, which serves plain HTTP without it),
 // and a connection is an error saying why.
-const Crypto = function() {
-	const found, crypto = pcall(require, "@std/crypto")
+const Crypto = function(): typeof(require("@std/crypto")) {
+	const found, crypto = pcall(function(): typeof(require("@std/crypto")) {
+		return require("@std/crypto")
+	})
 	if (!found) {
 		error("websocket: this cluau is built without @std/crypto, which WebSockets need", 0)
 	}
@@ -48,6 +50,9 @@ const kMaxFragments = 65536
 // The most the handshake's answer may have: a line, and the whole head.
 const kLineLimit = 64 * 1024
 const kHeadLimit = 256 * 1024
+
+// string.unpack for the formats read here (">I2", ">I4I4"), which give numbers.
+const UnpackNumbers = string.unpack :: (format: string, data: string) -> (number, number)
 
 // The close codes an endpoint may send (RFC 6455 7.4): 1004 is reserved,
 // and 1005, 1006 and 1015 stand for a close without a code.
@@ -235,13 +240,13 @@ class Connection {
 			if (extended == nil) {
 				return nil, true, ""
 			}
-			length = string.unpack(">I2", extended)
+			length = UnpackNumbers(">I2", extended)
 		} else if (length == 127) {
 			const extended = self:ReadExact(8)
 			if (extended == nil) {
 				return nil, true, ""
 			}
-			const high, low = string.unpack(">I4I4", extended)
+			const high, low = UnpackNumbers(">I4I4", extended)
 			if (high >= 2147483648) {
 				self:Fault(1002, "a frame's length has its top bit set")
 				return nil, true, ""
@@ -289,7 +294,7 @@ class Connection {
 					return nil
 				}
 				if (#payload >= 2) {
-					const code = string.unpack(">I2", payload)
+					const code = UnpackNumbers(">I2", payload)
 					if (!SendableCode(code)) {
 						self:Fault(1002, `a close with the code {code}`)
 						return nil
@@ -379,7 +384,7 @@ class Connection {
 				}
 				if (opcode == kClose) {
 					if (#payload >= 2) {
-						self.closeCode = string.unpack(">I2", payload)
+						self.closeCode = UnpackNumbers(">I2", payload)
 						self.closeReason = string.sub(payload, 3)
 					}
 					break
@@ -480,7 +485,7 @@ const HasToken = function(value: string?, token: string): boolean {
 // A connection to `url`: the handshake made and its answer checked.
 // options.timeout limits the connecting and the handshake (not later waits).
 const connect = function(url: string, options: ConnectOptions?): Connection {
-	const given = options or {}
+	const given: ConnectOptions = options or {}
 	const host, port, target, tls = ParseUrl(url)
 	// What goes in the request is checked first: nothing may end a header.
 	const extra: { string } = {}
@@ -492,7 +497,8 @@ const connect = function(url: string, options: ConnectOptions?): Connection {
 		}
 		table.insert(extra, `Sec-WebSocket-Protocol: {table.concat(given.protocols, ", ")}`)
 	}
-	for (name, value in given.headers or {}) {
+	const requestHeaders: { [string]: string } = given.headers or {}
+	for (name, value in requestHeaders) {
 		if (type(name) != "string" || !IsToken(name)) {
 			error(`websocket.connect: options.headers: '{tostring(name)}' is not a header name`, 2)
 		}
@@ -535,7 +541,8 @@ const connect = function(url: string, options: ConnectOptions?): Connection {
 	const chosen = headers["sec-websocket-protocol"]
 	if (chosen != nil) {
 		let offered = false
-		for (_, protocol in given.protocols or {}) {
+		const protocols: { string } = given.protocols or {}
+		for (_, protocol in protocols) {
 			offered = offered || protocol == chosen
 		}
 		if (!offered) {
