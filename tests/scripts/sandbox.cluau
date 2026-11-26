@@ -22,3 +22,9 @@ const log = require("@std/log")
 log.configure({ time = false, output = "stdout" })
 log.debug("not written")
 log.logger("sandbox"):info("logged", { ran = true })
+
+// Async functions and await run on @std/task, which the sandbox keeps.
+async function Twice(n: number): number {
+	return n * 2
+}
+print(await Twice(21))

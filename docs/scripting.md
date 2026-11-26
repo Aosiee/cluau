@@ -1843,6 +1843,7 @@ meanwhile.
 | function | is |
 |---|---|
 | `spawn(fn, ...): Task` | `fn(...)` as a task, started now: it runs until it first waits |
+| `async(fn, ...): Task` | `fn(...)` as `spawn` starts it, but an error in it is raised where the task is joined (what an `async function`'s call is) |
 | `delay(seconds, fn, ...): Task` | `fn(...)` as a task that starts after `seconds` |
 | `wait(seconds?): number` | waits `seconds` (none: lets the tasks due now run), and returns how long it waited |
 | `join(task): ...` | waits for the task to finish, and returns what its function returned (nothing when it was cancelled) |
@@ -1876,7 +1877,25 @@ for (_, page in pages) {
   their end before the script exits.
 - An error in a task is raised where the tasks are being run (a
   `task.wait` or `task.join` in the script's code, or the script's end),
-  with the task's own stack in the report.
+  with the task's own stack in the report. A task `task.async` started
+  (an async function's) keeps its error instead: `task.join` (or `await`)
+  raises it where the task is joined, so a `try` there catches it, and one
+  that nothing joins is raised once the script's own code has finished.
+- An `async function` is a function whose body runs as a task, and `await
+  t` is `task.join(t)` (see [the syntax guide](syntax.md#async-functions-and-await)):
+
+  ```
+  const task = require("@std/task")
+
+  async function slow(n: number): number {
+  	task.wait(0.1)
+  	return n * 2
+  }
+
+  const a = slow(1) // the two run side by side: 0.1 seconds in all
+  const b = slow(2)
+  print(await a + await b) // 6
+  ```
 - The standard library's blocking calls wait on their own: `@std/http`'s
   requests and downloads, `@std/net`'s waits, `process.run` and `process.exec`, a child's
   `read`, `readLine`, `lines`, `write` and `wait`, `io.readLine`,

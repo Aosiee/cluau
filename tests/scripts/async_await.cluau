@@ -1,0 +1,65 @@
+// Async functions run as tasks; await waits for one and gives back what it
+// returned.
+const task = require("@std/task")
+
+const order: { string } = {}
+async function Fetch(name: string, seconds: number): string {
+	task.wait(seconds)
+	table.insert(order, name)
+	return string.upper(name)
+}
+
+// Started at once, so they run side by side: the shorter wait ends first.
+const slow = Fetch("slow", 0.05)
+const quick = Fetch("quick", 0.01)
+print(await slow, await quick, table.concat(order, " "))
+
+// Several values, none, and the arguments passed on.
+async function Pair(): (string, number) {
+	return await Fetch("pair", 0), 2
+}
+const word, count = await Pair()
+print(word, count)
+async function Nothing() {
+	task.wait(0)
+}
+print(select("#", await Nothing()))
+const Count = async function(...: number): number {
+	return select("#", ...)
+}
+print(await Count(1, 2, 3))
+
+// An error in the task is raised where it is awaited.
+async function Fails(): number {
+	task.wait(0)
+	throw "it failed"
+	return 0
+}
+async function Guarded(): string {
+	try {
+		return tostring(await Fails())
+	} catch (error) {
+		return `caught: {error}`
+	}
+}
+print(await Guarded())
+const failing = Fails()
+task.wait(0.01) // running the tasks does not raise it
+const ok, message = pcall(function() {
+	await failing
+})
+print(ok, message)
+
+// Methods can be async; await works on any value that gives a task.
+class Loader {
+	Root: string = "/data/"
+	async function Load(path: string): string {
+		task.wait(0)
+		return self.Root .. path
+	}
+}
+const loader = Loader()
+const loads = { loader:Load("a"), loader:Load("b") }
+print(await loads[1], await loads[2], #(await loader:Load("c")))
+const { Root } = loader
+print(Root)

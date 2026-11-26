@@ -1,0 +1,9 @@
+SLOW	QUICK	quick slow
+PAIR	2
+0
+3
+caught: it failed
+false	it failed
+/data/a	/data/b	7
+/data/
+exit: 0

@@ -48,6 +48,8 @@ type State = {
 	// resumed with (the job's id, for the call to take its results).
 	job: number,
 	resumeWith: number?,
+	// An error ends it quietly: it is kept for whoever joins it.
+	keep: boolean,
 }
 
 // The tasks waiting to run again (or to start), each with when it is due,
@@ -69,6 +71,12 @@ const counter = { next = 0, since = 0 }
 // is reported with that task's stack when it is this one (the runtime's).
 // `count` goes up with each failure.
 const failure: { message: unknown, thread: thread?, count: number } = { message = nil, thread = nil, count = 0 }
+// The errors of the tasks task.async started, kept for task.join to raise
+// (with the task's stack), and those that nothing has joined yet: the first
+// of those is raised at the script's end.
+type Kept = { message: unknown, thread: thread }
+const kept = setmetatable({} :: { [Handle]: Kept }, { __mode = "k" })
+const unjoined: { Handle } = {}
 
 // Into `waiting`, kept latest first so the next due is the last: found by
 // halving, so many tasks cost little each.
@@ -126,8 +134,16 @@ const Resume = function(state: State) {
 	}
 	if (!results[1]) {
 		// Another task's error, raised where this one ran the tasks (a wait
-		// inside a call it could not yield across), keeps that task's stack.
-		if (failure.count == failures || !rawequal(failure.message, results[2])) {
+		// inside a call it could not yield across, or a join), keeps that
+		// task's stack.
+		const passed = failure.count != failures && rawequal(failure.message, results[2])
+		if (state.keep) {
+			kept[state.task] = { message = results[2], thread = if (passed && failure.thread != nil) failure.thread else state.thread }
+			table.insert(unjoined, state.task)
+			Finish(state)
+			return
+		}
+		if (!passed) {
 			failure.thread = state.thread
 		}
 		failure.message = results[2]
@@ -246,6 +262,7 @@ const Make = function<R...>(task: Handle, fn: (...any) -> R..., args: Packed): S
 		order = 0,
 		job = 0,
 		resumeWith = nil,
+		keep = false,
 	}
 	states[task] = state
 	known[task] = true
@@ -262,6 +279,17 @@ const Current = function(): State? {
 const spawn = function<R...>(fn: (...any) -> R..., ...: unknown): Task<R...> {
 	const task: Task<R...> = { done = false, cancelled = false, __returns = fn }
 	Resume(Make(task, fn, table.pack(...)))
+	return task
+}
+
+// Starts `fn(...)` as a task now, as spawn does, but an error in it is
+// kept for task.join, which raises it where the task is joined (an async
+// function's call is one of these).
+const async = function<R...>(fn: (...any) -> R..., ...: unknown): Task<R...> {
+	const task: Task<R...> = { done = false, cancelled = false, __returns = fn }
+	const state = Make(task, fn, table.pack(...))
+	state.keep = true
+	Resume(state)
 	return task
 }
 
@@ -318,6 +346,18 @@ const join = function<R...>(task: Task<R...>): R... {
 			}
 		}
 	}
+	// The error of a task task.async started, raised here with its stack.
+	const failed = kept[task]
+	if (failed != nil) {
+		const at = table.find(unjoined, task)
+		if (at != nil) {
+			table.remove(unjoined, at)
+		}
+		failure.message = failed.message
+		failure.thread = failed.thread
+		failure.count += 1
+		error(failed.message, 0)
+	}
 	// None for a task that was cancelled or failed.
 	const results = resultsOf[task] or { n = 0 }
 	// The results are kept untyped (coroutine.resume gave them); the task's
@@ -366,6 +406,16 @@ const _run = function() {
 	RunUntil(function(): boolean {
 		return #waiting == 0 && #onJobs == 0
 	})
+	// An async task's error that nothing joined.
+	const first = unjoined[1]
+	if (first != nil) {
+		const failed = kept[first] :: Kept
+		table.clear(unjoined)
+		failure.message = failed.message
+		failure.thread = failed.thread
+		failure.count += 1
+		error(failed.message, 0)
+	}
 }
 
 // A blocking call in the script's own code: the tasks run until its job is done.
@@ -377,6 +427,7 @@ jobs.register(byThread, function(id: number) {
 
 return {
 	spawn = spawn,
+	async = async,
 	delay = delay,
 	wait = wait,
 	join = join,

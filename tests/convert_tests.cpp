@@ -71,6 +71,9 @@ TEST("convert: operators and comments")
 TEST("convert: what has no cluau form is reported")
 {
 	CHECK(HasError(cluau::Convert("local let = 1"), "cluau keyword"));
+	CHECK(HasError(cluau::Convert("local v = await(t)"), "reads as cluau's await"));
+	CHECK(HasError(cluau::Convert("await t"), "reads as cluau's await"));
+	CHECK(!cluau::Convert("local await = 1\nprint(await, x.await(t))").HasErrors());
 	CHECK(HasError(cluau::Convert("if a then"), "not closed"));
 	CHECK(HasError(cluau::Convert("end"), "does not close"));
 }

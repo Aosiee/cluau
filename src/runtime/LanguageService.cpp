@@ -454,7 +454,7 @@ namespace cluau::runtime::detail {
 		}
 		// cluau's own statement words, where Luau offered its statements.
 		if (cluau && result.entryMap.count("local"))
-			for (const char* keyword : { "let", "const", "class", "enum", "try", "throw", "abstract", "switch" })
+			for (const char* keyword : { "let", "const", "class", "enum", "try", "throw", "abstract", "switch", "async", "await" })
 				if (seen.insert(keyword).second)
 					ranked.push_back({ 2, { keyword, CompletionKind::Keyword, {}, {}, false } });
 		std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {

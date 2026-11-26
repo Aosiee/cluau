@@ -31,19 +31,27 @@ namespace cluau {
 		// first line of a chunk that uses them (in this order): `a ?? b` and
 		// `a?.b` where `a` is not a name (it is evaluated once; `b`, unless
 		// it is a literal or a name, only when needed), and a generator's
-		// body, a coroutine that is handed its typed yield.
+		// body, a coroutine that is handed its typed yield; @std/task for
+		// async functions and await, and a table literal's spreads.
 		enum Helper : uint8_t
 		{
 			kHelperNil = 1,
 			kHelperChain = 2,
 			kHelperGenerator = 4,
 			kHelperOr = 8,
+			kHelperTask = 16,
+			kHelperSpread = 32,
 		};
 		constexpr std::string_view kHelperText[] = {
 			"local function __cluau_nil(value: any, fallback: () -> any): any if value ~= nil then return value end return fallback() end; ",
 			"local function __cluau_chain<T, U>(value: T?, f: (T) -> U): U? if value == nil then return nil end return f(value) end; ",
 			"local function __cluau_generator<T...>(body: ((T...) -> ()) -> ()): () -> T... return coroutine.wrap(function() body(coroutine.yield) end) :: any end; ",
 			"local function __cluau_or(value: any, fallback: any): any if value ~= nil then return value end return fallback end; ",
+			"local __cluau_task = require(\"@std/task\"); ",
+			"local function __cluau_spread(...: any): any local out = {} for i = 1, select(\"#\", ...) do local part = select(i, ...) "
+			"if type(part) ~= \"table\" then error(\"cannot spread \" .. typeof(part) .. \" (a table is spread: { ...items })\", 2) end "
+			"local n, len = #out, #part table.move(part, 1, len, n + 1, out) for k, v in next, part do "
+			"if type(k) ~= \"number\" or k < 1 or k > len or k % 1 ~= 0 then out[k] = v end end end return out end; ",
 		};
 
 		// Interp: an interpolated string's segment (its tokens are an expression).
@@ -160,6 +168,7 @@ namespace cluau {
 				Classify();
 				Chains();
 				Coalesces();
+				Awaits();
 				for (size_t i : m_NilAssigns)
 					NilAssign(i);
 				Emit();
@@ -522,7 +531,8 @@ namespace cluau {
 						m_MethodHeaderEnd = npos;
 					if (m_ValueEnd != npos && i >= m_ValueEnd)
 						m_ValueEnd = npos;
-					if (InClassBody() && m_MethodHeaderEnd == npos && m_ValueEnd == npos && !t.Is("}") && !t.Is("function") && !t.Is(";"))
+					if (InClassBody() && m_MethodHeaderEnd == npos && m_ValueEnd == npos && !t.Is("}") && !t.Is("function") && !t.Is(";") &&
+						!(t.Is("async") && m_Toks[Sig(i + 1)].Is("function")))
 					{
 						ClassItem(i);
 						continue;
@@ -654,6 +664,13 @@ namespace cluau {
 				}
 				else if (w == "function")
 					Function(i);
+				else if (w == "async" && m_Toks[Sig(i + 1)].Is("function") && m_Toks[Sig(i + 1)].Line == t.EndLine)
+				{
+					Generate(i, "");
+					m_AsyncNext = true;
+				}
+				else if (w == "await" && IsAwait(i))
+					m_Awaits.push_back(i); // after the chains and ?? in what it waits for
 				else if ((w == "let" || w == "local" || w == "const") && (m_Toks[Sig(i + 1)].Is("{") || m_Toks[Sig(i + 1)].Is("[")))
 					Destructure(i);
 				else if ((w == "let" || w == "local" || w == "const") && m_Options.Repl && m_Stack.empty())
@@ -710,6 +727,75 @@ namespace cluau {
 					Jump(i);
 				else if (w == "then" || w == "end" || w == "elseif" || w == "repeat" || w == "until")
 					Error(t, "cluau uses braces for blocks: '" + std::string(w) + "' is Luau syntax (see docs/syntax.md)");
+			}
+
+			// `await value` in a script: the value (a task) is waited for. Not
+			// a name declared, called through a member or assigned to.
+			bool IsAwait(size_t i) const
+			{
+				if (!m_Options.Script || !StartsOperand(i + 1, m_Toks[i].EndLine))
+					return false;
+				const size_t before = PrevSig(i);
+				return before == i || !(m_Toks[before].Is("function") || m_Toks[before].Is("local") || m_Toks[before].Is("let") ||
+										   m_Toks[before].Is("const") || m_Toks[before].Is("."));
+			}
+
+			// The last token of what an `await` at i waits for: a value and its
+			// fields, indexes, calls and optional chains (`await t`, `await
+			// load(url)`, `await self.tasks[1]`).
+			size_t AwaitOperandEnd(size_t i) const
+			{
+				size_t k = Sig(i + 1);
+				if (m_Toks[k].Is("await") && IsAwait(k))
+					return AwaitOperandEnd(k);
+				size_t last = OpensGroup(m_Toks[k]) ? MatchGroup(k) : k;
+				if (m_Toks[k].Is("function"))
+				{
+					// A function value: to its body's end.
+					size_t p = Sig(k + 1);
+					if (!m_Toks[p].Is("("))
+						return k;
+					const size_t brace = FindHeaderBrace(MatchClose(p) + 1);
+					if (brace == npos)
+						return k;
+					last = MatchClose(brace);
+				}
+				for (;;)
+				{
+					size_t n = Sig(last + 1);
+					if (IsChainStep(n))
+						n++;
+					const Token& s = m_Toks[n];
+					if ((s.Is(".") || s.Is(":")) && m_Toks[Sig(n + 1)].Kind == TokenKind::Name)
+						last = Sig(n + 1);
+					else if (s.Is("["))
+						last = MatchClose(n);
+					else if (s.Is("(") && s.Line == m_Toks[last].EndLine)
+						last = MatchClose(n);
+					else if ((s.Kind == TokenKind::String || s.Kind == TokenKind::LongString || s.Kind == TokenKind::Interpolated) &&
+						s.Line == m_Toks[last].EndLine)
+						last = n;
+					else if (s.Kind == TokenKind::InterpBegin && s.Line == m_Toks[last].EndLine)
+						last = MatchGroup(n);
+					else
+						return last;
+				}
+			}
+
+			// `await task`: task.join, which waits for it (in a task, letting
+			// the others run) and gives back what its function returned. From
+			// the last: an inner one's closing text comes first.
+			void Awaits()
+			{
+				for (size_t n = m_Awaits.size(); n-- > 0;)
+				{
+					const size_t i = m_Awaits[n];
+					if (m_Skip[i])
+						continue;
+					m_Helpers |= kHelperTask;
+					Generate(i, "__cluau_task.join(");
+					AddAfter(AwaitOperandEnd(i), ")");
+				}
 			}
 
 			// A contextual keyword (`throw`, `try`, `enum`, `abstract`) at a
@@ -1242,8 +1328,53 @@ namespace cluau {
 				m_Repl[q] = " ";
 				if (const size_t let = Sig(p + 1); m_Toks[let].Is("let") || m_Toks[let].Is("local"))
 					Blank(let);
-				TypeClassLoop(p, q);
-				MarkBlock(brace, BlockKind::Loop, "do");
+				// A pattern for a loop variable, `for (_, { name, size } in
+				// items)`: the loop's variable is a local of its own, and the
+				// pattern's locals are read from it as the body starts.
+				std::string locals;
+				int position = 0;
+				for (size_t k = Sig(p + 1); k < q;)
+				{
+					const Token& v = m_Toks[k];
+					if (v.Is("in") || v.Is("="))
+					{
+						if (!locals.empty() && v.Is("="))
+							Error(v, "a numeric loop counts with a name: for (i = 1, n)");
+						break;
+					}
+					if (v.Is(","))
+					{
+						k = Sig(k + 1);
+						continue;
+					}
+					position++;
+					if (!v.Is("{") && !v.Is("["))
+					{
+						k = Sig(k + 1);
+						continue;
+					}
+					std::vector<PatternLeaf> leaves;
+					std::vector<size_t> syntax;
+					if (!ParsePattern(k, "", leaves, syntax))
+						return;
+					const size_t end = MatchClose(k);
+					for (size_t s : syntax)
+						Blank(s);
+					for (const PatternLeaf& leaf : leaves)
+						Blank(leaf.Name);
+					for (size_t c = k; c <= end; c++)
+						if (m_Toks[c].Is(","))
+							Blank(c);
+					const std::string name = "__cluau_v" + std::to_string(position);
+					Generate(k, name);
+					locals += PatternLocals(leaves, name);
+					k = Sig(end + 1);
+				}
+				if (locals.empty())
+					TypeClassLoop(p, q);
+				MarkBlock(brace, BlockKind::Loop, "do" + locals);
+				if (!locals.empty())
+					m_GeneratedAt[brace] = { 2, locals.size() };
 			}
 
 			// `for (name, value in Class)` over a class this file declared
@@ -1392,40 +1523,194 @@ namespace cluau {
 					MissingElse();
 			}
 
+			// A name a pattern can declare: not a keyword or a literal.
+			bool IsPatternName(size_t k) const
+			{
+				const Token& t = m_Toks[k];
+				return t.Kind == TokenKind::Name && !IsExpressionWord(t.Text) && !t.Is("nil") && !t.Is("true") && !t.Is("false") && !t.Is("end");
+			}
+
+			// One local a destructuring pattern declares.
+			struct PatternLeaf
+			{
+				size_t Name = npos;       // the local's name
+				std::string Read;         // how it is read from the value: `.a`, `[2].b`
+				size_t Default = npos;    // its default's first token
+				size_t DefaultEnd = npos; // after the default's last token
+				size_t RestFrom = 0;      // a list's rest: the first item it takes (`Read` is the list)
+			};
+
+			// The pattern `{ ... }` or `[ ... ]` at `open`, read from `path`:
+			// its locals in order, and the tokens that are not Luau's (its
+			// brackets, renamed fields, defaults; the commas between locals
+			// stay). False after reporting what is wrong.
+			bool ParsePattern(size_t open, const std::string& path, std::vector<PatternLeaf>& leaves, std::vector<size_t>& syntax)
+			{
+				const bool fields = m_Toks[open].Is("{");
+				const size_t close = MatchClose(open);
+				const char* usage = fields ? "a { } pattern takes fields: { name, size: n, pos: { x, y }, label = \"none\" }"
+										   : "a [ ] pattern takes items: [first, [a, b], third = 0, ...rest]";
+				if (close >= m_Toks.size() || !m_Toks[close].Is(fields ? "}" : "]"))
+				{
+					Error(m_Toks[open], usage);
+					return false;
+				}
+				syntax.push_back(open);
+				syntax.push_back(close);
+				size_t index = 0;
+				const size_t before = leaves.size();
+				for (size_t k = Sig(open + 1); k < close;)
+				{
+					index++;
+					PatternLeaf leaf;
+					if (m_Toks[k].Is("..."))
+					{
+						const size_t name = Sig(k + 1);
+						if (fields)
+						{
+							Error(m_Toks[k], "a { } pattern takes fields by name; the rest of a list is taken in a [ ] pattern: [first, ...rest]");
+							return false;
+						}
+						if (!IsPatternName(name))
+						{
+							Error(m_Toks[k], "a rest element is a name: [first, ...rest]");
+							return false;
+						}
+						if (Sig(name + 1) != close)
+						{
+							Error(m_Toks[k], "a rest element is the pattern's last: [first, ...rest]");
+							return false;
+						}
+						syntax.push_back(k);
+						leaf.Name = name;
+						leaf.Read = path;
+						leaf.RestFrom = index;
+						leaves.push_back(leaf);
+						break;
+					}
+					std::string read;
+					size_t target = k;
+					if (fields)
+					{
+						if (!IsPatternName(k))
+						{
+							Error(m_Toks[k], usage);
+							return false;
+						}
+						read = path + "." + std::string(m_Toks[k].Text);
+						const size_t colon = Sig(k + 1);
+						if (m_Toks[colon].Is(":"))
+						{
+							syntax.push_back(k);
+							syntax.push_back(colon);
+							target = Sig(colon + 1);
+						}
+					}
+					else
+						read = path + "[" + std::to_string(index) + "]";
+					if (m_Toks[target].Is("{") || m_Toks[target].Is("["))
+					{
+						if (!ParsePattern(target, read, leaves, syntax))
+							return false;
+						k = Sig(MatchClose(target) + 1);
+						if (m_Toks[k].Is("="))
+						{
+							Error(m_Toks[k], "a nested pattern has no default: give its fields theirs");
+							return false;
+						}
+					}
+					else
+					{
+						if (!IsPatternName(target))
+						{
+							Error(m_Toks[target], usage);
+							return false;
+						}
+						leaf.Name = target;
+						leaf.Read = read;
+						k = Sig(target + 1);
+						if (m_Toks[k].Is("="))
+						{
+							size_t end = Sig(k + 1);
+							while (end < close && !m_Toks[end].Is(","))
+								end = OpensGroup(m_Toks[end]) ? Sig(MatchGroup(end) + 1) : Sig(end + 1);
+							if (Sig(k + 1) >= end)
+							{
+								Error(m_Toks[k], "a default needs a value: name = value");
+								return false;
+							}
+							for (size_t d = k; d < end; d++)
+								syntax.push_back(d);
+							leaf.Default = Sig(k + 1);
+							leaf.DefaultEnd = end;
+							k = end;
+						}
+						leaves.push_back(leaf);
+					}
+					if (k < close)
+					{
+						if (!m_Toks[k].Is(","))
+						{
+							Error(m_Toks[k], usage);
+							return false;
+						}
+						if (Sig(k + 1) == close)
+							syntax.push_back(k); // a trailing comma
+						k = Sig(k + 1);
+					}
+				}
+				if (leaves.size() == before)
+				{
+					Error(m_Toks[open], usage);
+					return false;
+				}
+				return true;
+			}
+
+			// A pattern's locals as statements, read from the local `base`. A
+			// default is evaluated only when its value is nil, and may use the
+			// locals before it.
+			std::string PatternLocals(const std::vector<PatternLeaf>& leaves, const std::string& base) const
+			{
+				std::string out;
+				for (size_t n = 0; n < leaves.size(); n++)
+				{
+					const PatternLeaf& leaf = leaves[n];
+					const std::string name(m_Toks[leaf.Name].Text);
+					const std::string read = base + leaf.Read;
+					if (leaf.RestFrom)
+						out += " local " + name + " = table.move(" + read + ", " + std::to_string(leaf.RestFrom) + ", #" + read + ", 1, {});";
+					else if (leaf.Default != npos)
+					{
+						const std::string value = "__cluau_d" + std::to_string(n + 1);
+						out += " local " + value + " = " + read + "; local " + name + " = if " + value + " ~= nil then " + value + " else " +
+							TranslateValue(leaf.Default, leaf.DefaultEnd, true) + ";";
+					}
+					else
+						out += " local " + name + " = " + read + ";";
+				}
+				return out;
+			}
+
 			// `const { a, b } = value` and `const [first, second] = list`: a
-			// local for each field (by its name) or item (in order). A name (or
-			// names joined by dots) is read for each, `local a, b = t.a, t.b`;
-			// any other value once, by a function given it.
+			// local for each field (by its name) or item (in order), through
+			// renames (`{ name: n }`), nested patterns, defaults and a list's
+			// rest. Without defaults or a rest, a name (or names joined by
+			// dots) is read for each, `local a, b = t.a, t.b`; anything else
+			// is evaluated once, by a function given it.
 			void Destructure(size_t i)
 			{
 				const Token& t = m_Toks[i];
 				const size_t open = Sig(i + 1);
-				const bool fields = m_Toks[open].Is("{");
+				std::vector<PatternLeaf> leaves;
+				std::vector<size_t> syntax;
+				if (!ParsePattern(open, "", leaves, syntax))
+					return;
 				const size_t close = MatchClose(open);
-				const char* usage = fields ? "destructuring takes names: const { a, b } = value" : "destructuring takes names: const [first, second] = list";
-				std::vector<size_t> names;
-				for (size_t k = Sig(open + 1); k < close;)
-				{
-					if (m_Toks[k].Kind != TokenKind::Name || IsExpressionWord(m_Toks[k].Text) || m_Toks[k].Is("nil") || m_Toks[k].Is("true") ||
-						m_Toks[k].Is("false"))
-					{
-						Error(m_Toks[k], usage);
-						return;
-					}
-					names.push_back(k);
-					k = Sig(k + 1);
-					if (k < close && !m_Toks[k].Is(","))
-					{
-						Error(m_Toks[k], usage);
-						return;
-					}
-					if (k < close)
-						k = Sig(k + 1);
-				}
 				const size_t eq = Sig(close + 1);
-				if (names.empty() || !m_Toks[eq].Is("="))
+				if (!m_Toks[eq].Is("="))
 				{
-					Error(t, names.empty() ? usage : std::string(usage) + ": it needs its value after =");
+					Error(t, "destructuring needs its value after =: const { a, b } = value");
 					return;
 				}
 				const size_t last = ExpressionEnd(eq);
@@ -1447,19 +1732,22 @@ namespace cluau {
 					}
 				}
 				m_Repl[i] = m_Options.Repl && m_Stack.empty() ? "" : "local";
-				Blank(open);
-				Blank(close);
+				for (size_t k : syntax)
+					Blank(k);
 				if (t.Is("const"))
-					for (size_t k : names)
-						m_R.ConstNames.push_back({ { m_Toks[k].Line, m_Toks[k].Col }, { m_Toks[k].EndLine, m_Toks[k].EndCol } });
-				auto access = [&](size_t n) { return fields ? "." + std::string(m_Toks[names[n]].Text) : "[" + std::to_string(n + 1) + "]"; };
+					for (const PatternLeaf& leaf : leaves)
+					{
+						const Token& n = m_Toks[leaf.Name];
+						m_R.ConstNames.push_back({ { n.Line, n.Col }, { n.EndLine, n.EndCol } });
+					}
+				const bool plain = std::all_of(leaves.begin(), leaves.end(), [](const PatternLeaf& l) { return l.Default == npos && !l.RestFrom; });
 				const size_t first = Sig(eq + 1);
-				if (IsPath(first, last + 1))
+				if (plain && IsPath(first, last + 1))
 				{
 					const std::string value = CodeText(first, last + 1);
-					std::string rest = access(0);
-					for (size_t n = 1; n < names.size(); n++)
-						rest += ", " + value + access(n);
+					std::string rest = leaves[0].Read;
+					for (size_t n = 1; n < leaves.size(); n++)
+						rest += ", " + value + leaves[n].Read;
 					AddAfter(last, rest);
 					return;
 				}
@@ -1468,10 +1756,20 @@ namespace cluau {
 					Error(m_Toks[eq], "destructuring ... needs it in a local first: local list = { ... }");
 					return;
 				}
-				std::string reads;
-				for (size_t n = 0; n < names.size(); n++)
-					reads += (n ? ", __cluau_t" : "__cluau_t") + access(n);
-				Generate(eq, "= (function(__cluau_t: typeof(" + TranslateValue(first, last + 1, true) + ")) return " + reads + " end)(");
+				std::string body;
+				if (plain)
+				{
+					body = " return ";
+					for (size_t n = 0; n < leaves.size(); n++)
+						body += (n ? ", __cluau_t" : "__cluau_t") + leaves[n].Read;
+				}
+				else
+				{
+					body = PatternLocals(leaves, "__cluau_t") + " return ";
+					for (size_t n = 0; n < leaves.size(); n++)
+						body += (n ? ", " : "") + std::string(m_Toks[leaves[n].Name].Text);
+				}
+				Generate(eq, "= (function(__cluau_t: typeof(" + TranslateValue(first, last + 1, true) + "))" + body + " end)(");
 				AddAfter(last, ")");
 			}
 
@@ -1627,6 +1925,11 @@ namespace cluau {
 				{
 					if (!out.empty())
 						out += ", ";
+					if (const std::string rest = RestParamType(p); m_Toks[p.Begin].Is("...") && !rest.empty())
+					{
+						out += rest == "?" ? "..." : "...: " + rest;
+						continue;
+					}
 					if (p.Eq == npos || p.Name == npos)
 					{
 						out += CodeText(p.Begin, p.End);
@@ -1637,6 +1940,47 @@ namespace cluau {
 				}
 				return out;
 			}
+
+			// A rest parameter's (`...items: T`) item type: "?" without an
+			// annotation, "" when `p` is no rest parameter.
+			std::string RestParamType(const Param& p) const
+			{
+				const size_t name = Sig(p.Begin + 1);
+				if (!m_Toks[p.Begin].Is("...") || !IsPatternName(name) || m_Toks[name].Begin != m_Toks[p.Begin].End)
+					return "";
+				const size_t colon = Sig(name + 1);
+				if (!m_Toks[colon].Is(":"))
+					return "?";
+				return CodeText(Sig(colon + 1), SkipType(colon + 1));
+			}
+
+			// `function f(first, ...rest: T)`: Luau's `...: T`, and the local
+			// `rest`, a list of them, as the body starts.
+			std::string RestParam(size_t open, size_t close)
+			{
+				const std::vector<Param> params = ParseParams(open, close);
+				for (size_t n = 0; n < params.size(); n++)
+				{
+					const Param& p = params[n];
+					const std::string type = RestParamType(p);
+					if (type.empty())
+						continue;
+					const size_t name = Sig(p.Begin + 1);
+					m_Repl[p.Begin] = "...";
+					m_Skip[p.Begin] = 1;
+					Blank(name);
+					if (n + 1 != params.size())
+						Error(m_Toks[p.Begin], "a rest parameter is the last: function f(first, ...rest)");
+					if (const size_t eq = Sig(name + 1); m_Toks[eq].Is("="))
+						Error(m_Toks[eq], "a rest parameter has no default (it is a list, empty when none are given)");
+					return " local " + std::string(m_Toks[name].Text) + (type == "?" ? "" : ": { " + type + " }") + " = { ... };";
+				}
+				return "";
+			}
+
+			// An async function's declared return type as the type of the task
+			// it returns: `string` -> `Task<string>`, `(A, B)` -> `Task<(A, B)>`.
+			std::string TaskType(size_t from, size_t to) const { return "__cluau_task.Task<" + CodeText(from, to) + ">"; }
 
 			// The parameters with defaults in [open, close): optional in the
 			// signature, and given their default at the start of the body
@@ -1739,8 +2083,12 @@ namespace cluau {
 				// ordinary function, not a method.
 				const bool method = InClassBody() && m_ValueEnd == npos;
 				size_t j = Sig(i + 1);
+				const bool async = m_AsyncNext;
+				m_AsyncNext = false;
 				// `function*`: a generator.
 				const bool generator = m_Toks[j].Is("*");
+				if (async && generator)
+					Error(t, "a generator is not async: its body runs as its loop asks for values");
 				if (generator)
 				{
 					Generate(j, "");
@@ -1780,10 +2128,21 @@ namespace cluau {
 					m_Repl[j] = "(self: " + m_ClassName + (Sig(j + 1) == close ? "" : ", ");
 				size_t k = Sig(close + 1);
 				std::string yields; // a generator's yield's type
+				std::string returns; // an async function's declared return type
 				if (m_Toks[k].Is(":"))
 				{
 					const size_t typeBegin = Sig(k + 1);
 					const size_t typeEnd = SkipType(k + 1);
+					if (async && !generator && typeEnd > typeBegin)
+					{
+						// It returns the task its body runs as.
+						returns = CodeText(typeBegin, typeEnd);
+						Generate(typeBegin, TaskType(typeBegin, typeEnd));
+						m_Skip[typeBegin] = 1;
+						for (size_t t = typeBegin + 1; t < typeEnd; t++)
+							Blank(t);
+						m_TypeEnd[typeBegin] = 1;
+					}
 					if (generator && typeEnd > typeBegin)
 					{
 						const bool pack = m_Toks[typeBegin].Is("(") && Sig(MatchClose(typeBegin) + 1) >= typeEnd;
@@ -1808,6 +2167,9 @@ namespace cluau {
 					m_MethodHeaderEnd = m_AbstractEnd;
 					m_AbstractFunction = npos;
 					Defaults(paramsOpen, close, npos);
+					RestParam(paramsOpen, close);
+					if (async)
+						Error(t, "an abstract method is not async: its subclasses' are");
 					if (generator)
 						Error(t, "an abstract method is not a generator: its subclasses' are");
 					return;
@@ -1817,18 +2179,49 @@ namespace cluau {
 					Error(m_Toks[k], "a function body is a { } block");
 					return;
 				}
+				const std::string rest = RestParam(paramsOpen, close);
 				if (generator)
 				{
 					// The body runs as a coroutine, its yields typed by what the
 					// generator declares it yields.
-					const std::string opener = " return __cluau_generator(function(__cluau_yield" + (yields.empty() ? "" : ": " + yields) + ")";
+					const std::string opener = rest + " return __cluau_generator(function(__cluau_yield" + (yields.empty() ? "" : ": " + yields) + ")";
 					MarkBlock(k, method ? BlockKind::Method : BlockKind::Function, opener);
 					m_GeneratedAt[k] = { 0, opener.size() };
 					m_GeneratorBrace.insert(k);
 					m_Helpers |= kHelperGenerator;
 				}
+				else if (async && !m_Options.Script)
+				{
+					Error(t, "async functions run as @std/task tasks, which only scripts have");
+					MarkBlock(k, method ? BlockKind::Method : BlockKind::Function, rest);
+				}
+				else if (async)
+				{
+					// The body runs as a task, started now: the function returns it, and
+					// an error in it is raised where the task is awaited.
+					// The function's `...` is passed on when the body uses it.
+					const bool varargs = UsesVarargs(k, MatchClose(k));
+					std::string varargType;
+					for (size_t p = Sig(paramsOpen + 1); p < close; p = Sig(p + 1))
+						if (m_Toks[p].Is("...") && m_Toks[Sig(p + 1)].Is(":"))
+							varargType = CodeText(Sig(Sig(p + 1) + 1), SkipType(Sig(p + 1) + 1));
+					const std::string opener = rest + " return __cluau_task.async(function(" +
+						(varargs ? "..." + (varargType.empty() ? "" : ": " + varargType) : "") + ")" + (returns.empty() ? "" : ": " + returns);
+					MarkBlock(k, method ? BlockKind::Method : BlockKind::Function, opener);
+					m_GeneratedAt[k] = { 0, opener.size() };
+					m_AsyncBrace[k] = varargs ? "end, ...) end" : "end) end";
+					m_Helpers |= kHelperTask;
+					// Without a declared type, a body that returns nothing gives a
+					// task of nothing; one that returns values, a task typed by them.
+					if (returns.empty() && !m_Toks[Sig(close + 1)].Is(":") && !BodyReturnsValue(k, MatchClose(k)))
+						AddAfter(close, ": __cluau_task.Task<()>");
+				}
 				else
-					MarkBlock(k, method ? BlockKind::Method : BlockKind::Function, "");
+				{
+					MarkBlock(k, method ? BlockKind::Method : BlockKind::Function, rest);
+					if (!rest.empty())
+						m_GeneratedAt[k] = { 0, rest.size() };
+				}
 				Defaults(paramsOpen, close, k);
 				// Its `...: T`, for a try inside that passes them on.
 				for (size_t p = Sig(j + 1); p < close; p = Sig(p + 1))
@@ -1967,11 +2360,17 @@ namespace cluau {
 			// on one line, without comments.
 			std::string TranslateValue(size_t begin, size_t end, bool oneLine = false) const
 			{
+				return TranslateText(oneLine ? CodeText(begin, end) : SourceText(begin, end));
+			}
+
+			// cluau text translated as an expression.
+			std::string TranslateText(const std::string& text) const
+			{
 				TranslateOptions options;
 				options.Script = m_Options.Script;
 				options.Manifest = m_Options.Manifest;
 				const std::string prefix = "return ";
-				const TranslateResult r = Translate(prefix + (oneLine ? CodeText(begin, end) : SourceText(begin, end)), options);
+				const TranslateResult r = Translate(prefix + text, options);
 				std::string_view luau = r.Luau;
 				if (luau.substr(0, kRaiseHead.size()) == kRaiseHead)
 					luau.remove_prefix(kRaiseHead.size());
@@ -2240,7 +2639,12 @@ namespace cluau {
 					}
 					if (m_Toks[j].Is("function"))
 					{
-						j = ScanMethod(j, end, info);
+						j = ScanMethod(j, end, info, false);
+						continue;
+					}
+					if (m_Toks[j].Is("async") && m_Toks[Sig(j + 1)].Is("function"))
+					{
+						j = ScanMethod(Sig(j + 1), end, info, true);
 						continue;
 					}
 					if (m_Toks[j].Is("static"))
@@ -2452,7 +2856,7 @@ namespace cluau {
 				return Sig(last + 1);
 			}
 
-			size_t ScanMethod(size_t fn, size_t end, ClassInfo& info)
+			size_t ScanMethod(size_t fn, size_t end, ClassInfo& info, bool async)
 			{
 				ClassMethod m;
 				const bool generator = m_Toks[Sig(fn + 1)].Is("*");
@@ -2476,7 +2880,9 @@ namespace cluau {
 				if (m_Toks[k].Is(":"))
 				{
 					const size_t typeEnd = SkipType(k + 1);
-					m.ReturnType = generator ? GeneratorType(Sig(k + 1), typeEnd) : CodeText(Sig(k + 1), typeEnd);
+					m.ReturnType = generator ? GeneratorType(Sig(k + 1), typeEnd)
+						: async			 ? TaskType(Sig(k + 1), typeEnd)
+										 : CodeText(Sig(k + 1), typeEnd);
 					k = Sig(typeEnd);
 				}
 				if (!m_Toks[k].Is("{"))
@@ -2484,7 +2890,7 @@ namespace cluau {
 				const size_t bodyEnd = MatchClose(k);
 				m.BodyBeginLine = m_Toks[k].Line;
 				m.BodyEndLine = m_Toks[bodyEnd].Line;
-				m.ReturnsValue = generator || BodyReturnsValue(k, bodyEnd);
+				m.ReturnsValue = generator || async || BodyReturnsValue(k, bodyEnd);
 				info.Methods.push_back(std::move(m));
 				(void)end;
 				return Sig(bodyEnd + 1);
@@ -2647,6 +3053,11 @@ namespace cluau {
 					m_NilAssigns.push_back(i); // after the ?? in its value
 					return;
 				}
+				if (op == "...")
+				{
+					Spread(i);
+					return;
+				}
 				if (op == "(" )
 				{
 					m_Stack.push_back({ Frame::Paren, BlockKind::Plain, i });
@@ -2676,6 +3087,81 @@ namespace cluau {
 				}
 				if (op == "}")
 					CloseBrace(i);
+			}
+
+			// `...items` in a call's arguments or a table literal: the items
+			// in their place. A call's is its last argument, `f(a,
+			// table.unpack(items))`; a table's are gathered as the table
+			// closes (TableSpread).
+			void Spread(size_t i)
+			{
+				const Token& t = m_Toks[i];
+				if (!StartsOperand(i + 1, t.EndLine) || m_Stack.empty() || m_PrevSig == npos)
+					return;
+				const Token& prev = m_Toks[m_PrevSig];
+				if (!(prev.Is("(") || prev.Is(",") || prev.Is("{") || prev.Is(";")))
+					return;
+				const Open& frame = m_Stack.back();
+				if (frame.Kind == Frame::Table)
+				{
+					m_TableSpreads[frame.Token].push_back(i);
+					return;
+				}
+				if (frame.Kind != Frame::Paren)
+					return;
+				const size_t open = frame.Token;
+				const size_t before = PrevSig(open);
+				// (Other parentheses hold a type's `...T`: `(...number) -> ()`.)
+				if (before == open || !EndsExpression(m_Toks[before]) || m_Toks[before].EndLine != m_Toks[open].Line)
+					return;
+				const size_t close = MatchClose(open);
+				for (size_t k = Sig(i + 1); k < close; k = OpensGroup(m_Toks[k]) ? Sig(MatchGroup(k) + 1) : Sig(k + 1))
+					if (m_Toks[k].Is(","))
+					{
+						Error(t, "a spread argument goes last: f(a, ...rest)");
+						return;
+					}
+				Generate(i, "table.unpack(");
+				AddAfter(PrevSig(close), ")");
+			}
+
+			// A table literal with spreads, `{ first, ...items, size = 2 }`:
+			// each spread's list items are added in order where it is, and its
+			// other fields copied, later ones replacing earlier ones. The
+			// table is __cluau_spread's of its parts (the literal's own runs
+			// of items, and the spread values), typed as all of them at once.
+			void TableSpread(size_t open, size_t close, const std::vector<size_t>& spreads)
+			{
+				std::string literal;
+				std::string type;
+				bool run = true; // a run of the literal's own items is open
+				for (size_t k = Sig(open + 1); k < close;)
+				{
+					size_t end = k;
+					while (end < close && !m_Toks[end].Is(",") && !m_Toks[end].Is(";"))
+						end = OpensGroup(m_Toks[end]) ? Sig(MatchGroup(end) + 1) : Sig(end + 1);
+					const bool spread = std::find(spreads.begin(), spreads.end(), k) != spreads.end();
+					if (spread)
+					{
+						type += (type.empty() ? "" : " & ") + std::string("typeof(") + TranslateValue(Sig(k + 1), end, true) + ")";
+						Generate(k, "}, ");
+						m_Skip[k] = 1;
+						run = false;
+						if (end < close)
+						{
+							Generate(end, ", {");
+							run = true;
+						}
+					}
+					else if (end > k)
+						literal += (literal.empty() ? "" : ", ") + CodeText(k, end);
+					k = end < close ? Sig(end + 1) : close;
+				}
+				if (!literal.empty())
+					type += " & typeof(" + TranslateText("{ " + literal + " }") + ")";
+				m_Helpers |= kHelperSpread;
+				AddBefore(open, "(__cluau_spread(");
+				Generate(close, std::string(run ? "}" : "") + ") :: " + type + ")");
 			}
 
 			// `x ??= value`: `if x == nil then x = value end` (the target is a
@@ -2803,7 +3289,11 @@ namespace cluau {
 				m_Stack.pop_back();
 				EndExpressionIfsAbove(m_Stack.size());
 				if (open.Kind == Frame::Table)
+				{
+					if (auto spreads = m_TableSpreads.find(open.Token); spreads != m_TableSpreads.end())
+						TableSpread(open.Token, i, spreads->second);
 					return;
+				}
 				m_ClosedBlock[i] = 1;
 				if (open.Kind == Frame::Class)
 				{
@@ -2873,7 +3363,10 @@ namespace cluau {
 					m_Repl[i] = m_Switches[open.Token].Clauses > 0 ? "end end" : "end";
 					return;
 				default:
-					m_Repl[i] = m_GeneratorBrace.count(open.Token) ? "end) end" : "end";
+					if (auto async = m_AsyncBrace.find(open.Token); async != m_AsyncBrace.end())
+						m_Repl[i] = async->second;
+					else
+						m_Repl[i] = m_GeneratorBrace.count(open.Token) ? "end) end" : "end";
 					return;
 				}
 			}
@@ -3042,9 +3535,22 @@ namespace cluau {
 			bool HasVarargs(size_t from, size_t to) const
 			{
 				for (size_t k = from; k <= to && k < m_Toks.size(); k++)
-					if (m_Toks[k].Is("..."))
+					if (m_Toks[k].Is("...") && !StartsOperand(k + 1, m_Toks[k].EndLine))
 						return true;
 				return false;
+			}
+
+			// The token after j (comments skipped) begins a value on `line`:
+			// what a spread's `...` or an await takes (`...items`, `await f()`).
+			bool StartsOperand(size_t j, int line) const
+			{
+				const Token& t = m_Toks[Sig(j)];
+				if (t.Line != line)
+					return false;
+				if (t.Kind == TokenKind::Name)
+					return !IsExpressionWord(t.Text) || t.Is("function");
+				return t.Is("(") || t.Is("{") || t.Kind == TokenKind::String || t.Kind == TokenKind::LongString ||
+					t.Kind == TokenKind::Interpolated || t.Kind == TokenKind::InterpBegin;
 			}
 
 			// The first token of the value an optional chain's `?` at q steps
@@ -3168,7 +3674,7 @@ namespace cluau {
 			{
 				for (size_t q = 0; q < m_Toks.size(); q++)
 				{
-					if (!IsChainStep(q))
+					if (!IsChainStep(q) || m_Skip[q])
 						continue;
 					const size_t start = ChainReceiver(q);
 					if (start == npos)
@@ -3254,6 +3760,9 @@ namespace cluau {
 						break;
 					if (t.Kind == TokenKind::Name && (t.Is("yield") || t.Is("throw") || t.Is("case")) && m_Repl[p])
 						break;
+					if (t.Is("...") && m_Repl[p])
+						break; // a spread
+
 					if (m_StatementStart[p] && p != Sig(0) && start != npos && m_Toks[p].Line < m_Toks[start].Line)
 						break;
 					start = p;
@@ -3316,7 +3825,7 @@ namespace cluau {
 			{
 				for (size_t op = m_Toks.size(); op-- > 0;)
 				{
-					if (!m_Toks[op].Is("??"))
+					if (!m_Toks[op].Is("??") || m_Skip[op])
 						continue;
 					const size_t start = CoalesceStart(op);
 					const size_t last = CoalesceEnd(op);
@@ -3479,6 +3988,10 @@ namespace cluau {
 			std::vector<uint8_t> m_StatementStart; // the token starts a statement
 			std::set<size_t> m_CaseColon;          // a switch case's `:`
 			std::set<size_t> m_GeneratorBrace;     // a generator's body's `{`
+			std::map<size_t, std::string> m_AsyncBrace; // an async function's body's `{` -> what its `}` becomes
+			std::map<size_t, std::vector<size_t>> m_TableSpreads; // a table's `{` -> its spreads' `...`
+			std::vector<size_t> m_Awaits;          // the `await` tokens
+			bool m_AsyncNext = false;              // the next function is async
 			std::vector<size_t> m_NilAssigns;      // the `??=` tokens
 			struct SwitchState
 			{
@@ -3681,7 +4194,7 @@ namespace cluau {
 
 	const char* Version()
 	{
-		return "0.31.0";
+		return "0.32.0";
 	}
 
 } // namespace cluau

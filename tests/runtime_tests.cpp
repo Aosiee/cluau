@@ -880,6 +880,44 @@ TEST("lsp: workspace symbols, and inlay hints for the types of names declared wi
 	CHECK_EQ(labels["10:9"], std::string(": number"));
 }
 
+TEST("lsp: destructured names, spreads and await have their types")
+{
+	Project project;
+	Session s;
+	s.Request("initialize", Json::Object());
+	const std::string text = "const point = { x = 1, y = 2 }\n"                // 0
+							 "const { x: across, y } = point\n"                 // 1
+							 "const task = require(\"@std/task\")\n"           // 2
+							 "async function Half(n: number): number {\n"       // 3
+							 "\ttask.wait(0)\n"                                // 4
+							 "\treturn n / 2\n"                                // 5
+							 "}\n"                                              // 6
+							 "const half = await Half(4)\n"                     // 7
+							 "for (_, [a, b] in ipairs({ { 1, 2 } })) {\n"      // 8
+							 "\tprint(a + b, across, y, half)\n"               // 9
+							 "}\n"                                              // 10
+							 "const merged = { ...point, z = 3 }\n"             // 11
+							 "print(merged.z, Half)\n";                         // 12
+	s.Notify("textDocument/didOpen", OpenedDocument(project.Main, text));
+	CHECK_EQ(s.Diagnostics(project.Main).Size(), size_t(0));
+	auto hover = [&](int line, int character) {
+		return s.Request("textDocument/hover", At(project.Main, line, character))["result"]["contents"]["value"].String();
+	};
+	CHECK_EQ(hover(1, 12), std::string("```luau\nacross: number\n```"));
+	CHECK_EQ(hover(7, 7), std::string("```luau\nhalf: number\n```"));
+	CHECK(hover(12, 16).find("Task<number>") != std::string::npos);
+	CHECK(hover(11, 7).find("z: number") != std::string::npos);
+	// The other requests take the file as it is.
+	const Json document = Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main));
+	CHECK(s.Request("textDocument/semanticTokens/full", document)["result"]["data"].Size() > 0);
+	CHECK(s.Request("textDocument/documentSymbol", document)["result"].IsArray());
+	const Json range = Json::Object()
+						   .Set("start", Json::Object().Set("line", 0).Set("character", 0))
+						   .Set("end", Json::Object().Set("line", 13).Set("character", 0));
+	CHECK(s.Request("textDocument/inlayHint", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main)).Set("range", range))["result"]
+			  .IsArray());
+}
+
 TEST("coverage: each line with code, and the times it ran")
 {
 	const std::string file = Temp("covered.cluau", "function half(n: number): number {\n" // 1

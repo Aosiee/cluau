@@ -1,0 +1,17 @@
+patterns_async.cluau:9:32: Expected this to be 'number', but got 'number | string'
+caused by:
+  Not all union options are compatible.
+Expected this to be 'number', but got 'string'
+patterns_async.cluau:10:37: Expected this to be exactly '{number}', but got '{string}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'number', but got 'string'
+patterns_async.cluau:11:8: Expected this to be 'string', but got 'number'
+patterns_async.cluau:12:12: Expected this to be 'number', but got 'string'
+patterns_async.cluau:13:43: Expected this to be 'string', but got 'number'
+patterns_async.cluau:14:34: Expected this to be 'number', but got 'string'
+patterns_async.cluau:15:1: Expected this to be 'string', but got 'number'
+patterns_async.cluau:16:41: Expected this to be 'number', but got '{string}'
+patterns_async.cluau:17:1: Expected this to be 'number', but got 'Task<number>'
+cluau check: 9 error(s), 0 warning(s)
+exit: 1

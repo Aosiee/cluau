@@ -122,7 +122,12 @@ suite:step("docs-examples", {
 			index += 1
 			const file = host.join(ctx.out, `syntax-example-{index}.cluau`)
 			host.write(file, block)
-			ctx:run({ cluau, "translate", file })
+			// Async functions are for scripts.
+			if (string.find(block, "async function", 1, true)) {
+				ctx:run({ cluau, "translate", "--script", file })
+			} else {
+				ctx:run({ cluau, "translate", file })
+			}
 		}
 		if (index == 0) {
 			ctx:fail("found no cluau example in docs/syntax.md")

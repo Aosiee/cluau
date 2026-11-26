@@ -7,4 +7,5 @@ false	true
 {"ran":true}
 true
 INFO  [sandbox] logged ran=true
+42
 exit: 0

@@ -52,9 +52,13 @@ namespace cluau::detail {
 						return std::move(m_Tokens);
 					}
 					m_TokenIndex = m_Tokens.size();
+					m_PatternBracket = InPatternPosition();
 					LexOne(token);
+					m_TokenStartsPattern = m_PatternBracket;
+					m_PatternBracket = false;
 					Finish(token);
 					m_Tokens.push_back(token);
+					Track(m_Tokens.back());
 				}
 			}
 
@@ -111,6 +115,57 @@ namespace cluau::detail {
 				d.At = { { at.Line, at.Col }, { m_Line, Col() } };
 				d.Message = std::move(message);
 				m_Diagnostics.push_back(std::move(d));
+			}
+
+			// The last token but `back` (comments skipped), or null.
+			const Token* Previous(size_t back) const
+			{
+				for (size_t k = m_Tokens.size(); k-- > 0;)
+					if (!m_Tokens[k].IsComment() && back-- == 0)
+						return &m_Tokens[k];
+				return nullptr;
+			}
+
+			// Where a destructuring pattern starts, or a nested one in it can:
+			// after `let`, `const` or `local`, a loop variable's place in a
+			// `for (...)` header, and inside a pattern after `[`, `,` or a
+			// field's `:`. There `[[` is two brackets (`const [[a, b], c] =
+			// pairs`), not a long string.
+			bool InPatternPosition() const
+			{
+				const Token* prev = Previous(0);
+				if (prev == nullptr)
+					return false;
+				if (prev->Is("let") || prev->Is("const") || prev->Is("local"))
+					return true;
+				if (m_PatternDepth > 0 && (prev->Is("[") || prev->Is(",") || prev->Is(":")))
+					return true;
+				return m_ForDepth == 1 && (prev->Is("(") || prev->Is(","));
+			}
+
+			// Follows the brackets of patterns and of `for` headers (up to
+			// their `in` or `=`).
+			void Track(const Token& t)
+			{
+				const bool opens = t.Is("(") || t.Is("[") || t.Is("{");
+				const bool closes = t.Is(")") || t.Is("]") || t.Is("}");
+				if (m_PatternDepth > 0)
+					m_PatternDepth += opens ? 1 : closes ? -1 : 0;
+				else if ((t.Is("[") || t.Is("{")) && m_TokenStartsPattern)
+					m_PatternDepth = 1;
+				if (m_ForDepth > 0)
+				{
+					m_ForDepth += opens ? 1 : closes ? -1 : 0;
+					if (m_ForDepth == 1 && (t.Is("in") || t.Is("=")))
+						m_ForDepth = 0;
+				}
+				else if (t.Is("("))
+				{
+					const Token* before = Previous(1);
+					if (before != nullptr && before->Is("for"))
+						m_ForDepth = 1;
+				}
+				m_TokenStartsPattern = false;
 			}
 
 			// `[` `=`* `[`: the level, or -1 when this is not a long bracket.
@@ -367,7 +422,7 @@ namespace cluau::detail {
 					}
 					return;
 				}
-				if (const int level = LongBracketLevel(); level >= 0)
+				if (const int level = LongBracketLevel(); level >= 0 && !(m_PatternBracket && level == 0))
 				{
 					token.Kind = TokenKind::LongString;
 					if (!SkipLongBracket(level))
@@ -401,6 +456,10 @@ namespace cluau::detail {
 			size_t m_LineStart = 0;
 			int m_Line = 0;
 			bool m_TooDeep = false;
+			bool m_PatternBracket = false;     // the token being lexed is where a pattern may be
+			bool m_TokenStartsPattern = false; // ... and so, a `[` or `{`, starts one
+			int m_PatternDepth = 0;            // the brackets open in a destructuring pattern
+			int m_ForDepth = 0;                // the brackets open in a `for (...)` header, before its `in` or `=`
 		};
 
 	} // namespace

@@ -2,6 +2,43 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.32.0: patterns, spreads, rest parameters and async functions
+
+Language:
+- Destructuring patterns rename (`const { name: who } = person`), nest
+  (`{ pos: { x, y } }`, `[[a, b], c]`), give defaults to fields and items
+  that are nil (`{ port = 8080 }`, evaluated only then and able to use the
+  names before them), and take a list's rest (`[head, ...tail]`).
+- A loop takes its variables apart the same way: `for (_, { name, size }
+  in ipairs(files))`.
+- Rest parameters: `function sum(...numbers: number)` gives the body a
+  list of the arguments from there on, typed `{ number }`.
+- Spreads: `f(a, ...items)` passes a list's items as the last arguments,
+  and `{ 0, ...items, ...defaults, port = 8080 }` adds a list's items in
+  place and copies a table's other fields, later fields replacing earlier
+  ones. The new table is typed as all of its parts together.
+- Async functions (scripts): `async function f(): string` runs its body as
+  an @std/task task and returns the task, typed `Task<string>`. `await t`
+  waits for a task and gives back what it returned, anywhere in a script.
+  An error in an async function's task is raised where it is awaited, so a
+  `try` around the `await` catches it, with the task's own stack in the
+  report; one that nothing awaits is raised once the script's own code has
+  finished. Methods can be async.
+- Luau's explicit type arguments, `f<<T>>(x)`, are documented and tested
+  through cluau.
+
+Standard library:
+- `task.async(fn, ...)` starts a task as `task.spawn` does, but keeps an
+  error in it for `task.join` to raise where the task is joined.
+
+Fixes:
+- A parameter default containing `??` or `?.` translated into broken
+  Luau.
+
+Tooling: highlighting, completion and the converter know `async` and
+`await` (the converter reports a Luau name `await` used as a call, which a
+script would read as the keyword).
+
 ## 0.31.0: TOML, collections, random numbers and logging
 
 Four new standard modules, each available in the sandbox:

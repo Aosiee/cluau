@@ -194,14 +194,103 @@ greet("Cy", nil, 3)      // nil takes the default too
 ## Destructuring
 
 ```
-const { name, age } = person          // local name, age = person.name, person.age
-let [first, second] = splitPair(text)  // its first two items
+const { name, age } = person              // local name, age = person.name, person.age
+let [first, second] = splitPair(text)     // its first two items
+const { name: who, pos: { x, y } } = e     // renamed, and nested
+const { port = 8080, host = "localhost" } = options
+const [head, ...tail] = list              // tail: the items after the first
 ```
 
 - `{ a, b }` takes fields by their names, `[a, b]` takes items in order;
   each name becomes a local (`const` ones may not be assigned again).
-- The value is evaluated once. The names are plain names: no renaming,
-  nesting or defaults.
+- `field: name` takes a field into a local of another name, and
+  `field: { ... }` or `field: [ ... ]` takes it apart in turn; a list's
+  items nest the same way, `[[a, b], c]` (in a pattern, `[[` is two
+  brackets, not the start of a long string).
+- `name = value` gives a default for a field or item that is nil. The
+  default is evaluated only then, and may use the names before it in the
+  pattern (`[a, b = a]`).
+- `...name`, a list pattern's last, is a new list of the items after
+  those before it. A table's other fields are not gathered this way.
+- The value is evaluated once.
+- A loop takes its variables apart the same way: `for (_, { name, size }
+  in ipairs(files))` or `for (_, [key, value] in ipairs(pairs))`.
+
+## Rest parameters and spreads
+
+```
+function sum(...numbers: number): number {   // numbers: { number }
+	let total = 0
+	for (_, n in numbers) {
+		total += n
+	}
+	return total
+}
+
+const list = { 1, 2, 3 }
+sum(...list)                                 // sum(1, 2, 3)
+const longer = { 0, ...list, 4 }             // { 0, 1, 2, 3, 4 }
+const settings = { ...defaults, port = 8080 } // defaults' fields, port replaced
+```
+
+- `...name: T`, a function's last parameter, is a list of the arguments
+  from there on (`{ T }`, empty when there are none). Luau's own `...` is
+  still there for passing them on.
+- `...items` as a call's last argument passes the list's items as the
+  arguments. It goes last, since only a call's last argument can be several
+  values.
+- In a table, `...items` adds the list's items where it stands and copies
+  the table's other fields; later fields replace earlier ones. The new
+  table is typed as all of its parts together, so spreading lists of
+  different item types needs an annotation. Spreading anything other than a
+  table is an error.
+
+## Async functions and await
+
+```
+const http = require("@std/http")
+
+async function size(url: string): number {
+	return #http.get(url).body
+}
+
+const a = size("https://example.com")       // started now, running side by side
+const b = size("https://example.org")
+print(await a + await b)
+```
+
+- In scripts, an `async function` runs as an `@std/task` task: calling it
+  starts the task and returns it at once, and the task runs until it first
+  waits. Its declared type is what the task gives back: `async function
+  f(): string` returns a `Task<string>`.
+- `await task` waits for the task to finish and gives back what it
+  returned. In a task the others run meanwhile; in the script's own code,
+  the tasks run until it is done. `await` works anywhere in a script, not
+  only in async functions.
+- An error in an async function's task is raised where the task is
+  awaited, so a `try` around the `await` catches it, with the task's stack
+  in the report. One that nothing awaits is raised once the script's own
+  code has finished.
+- `await` binds like a unary operator: `await load(url).body` waits for
+  `load(url).body`, and `(await load(url)).body` for the call. In a script,
+  `await` followed by a value on its line is the keyword, so a function
+  named `await` is called as a member (`task.await(t)`) or renamed.
+- Methods can be async (`async function Load(path: string): string` in a
+  class); a generator cannot.
+
+## Explicit type arguments
+
+A generic function's type arguments are inferred from its arguments.
+Where they cannot be (or to state them), Luau's `f<<T>>(...)` gives them,
+and cluau passes it through:
+
+```
+function first<T>(items: { T }): T? {
+	return items[1]
+}
+
+const name = first<<string>>({})   // string? (from `{}` alone, T is unknown)
+```
 
 ## Switch
 

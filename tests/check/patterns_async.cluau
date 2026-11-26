@@ -1,0 +1,18 @@
+// Type errors in patterns, rest parameters, spreads, async functions and
+// await (each line is one).
+type Item = { size: number?, tags: { string } }
+const item: Item = { size = 1, tags = {} }
+function Two(a: number, b: string) {}
+function Numbers(...values: number) {}
+async function Later(): number { return 1 }
+
+const { size = "big" } = item; const n: number = size
+const [first, ...rest] = item.tags; const r: { number } = rest
+Two(1, ...{ 2 })
+Numbers(1, "two")
+const merged = { ...{ a = 1 }, b = "x" }; const q: string = merged.a
+async function Wrong(): number { return "x" }
+const w: string = await Later()
+for (_, { tags } in ipairs({ item })) { const t: number = tags }
+const p: number = Later()
+print(first, n, r, q, w, p)

@@ -978,9 +978,90 @@ TEST("destructuring: fields by name and items in order, a value read once")
 	CHECK_EQ(Luau("const { a } = f()"), std::string("local  a  = (function(__cluau_t: typeof(f())) return __cluau_t.a end)( f())"));
 	const cluau::TranslateResult r = cluau::Translate("const { a, b } = t\n");
 	CHECK_EQ(r.ConstNames.size(), (size_t)2);
-	CHECK(HasError(cluau::Translate("const { a: b } = t"), "destructuring takes names"));
+	CHECK(HasError(cluau::Translate("const { 1 } = t"), "a { } pattern takes fields"));
 	CHECK(HasError(cluau::Translate("const [a] = x, y"), "one value"));
-	CHECK(HasError(cluau::Translate("const { a }"), "it needs its value after ="));
+	CHECK(HasError(cluau::Translate("const { a }"), "needs its value after ="));
+}
+
+TEST("destructuring patterns: renames, nesting, defaults and a list's rest")
+{
+	CHECK_EQ(Luau("const { name: n, pos: { x, y } } = t"), std::string("local   n,   x, y   = t.name, t.pos.x, t.pos.y"));
+	CHECK_EQ(Luau("const [a, [b, c]] = t"), std::string("local a, b, c = t[1], t[2][1], t[2][2]"));
+	CHECK_EQ(Luau("const { a, b = 2 } = t"),
+		std::string("local  a, b    = (function(__cluau_t: typeof(t)) local a = __cluau_t.a; local __cluau_d2 = __cluau_t.b; local b = if "
+					"__cluau_d2 ~= nil then __cluau_d2 else 2; return a, b end)( t)"));
+	CHECK_EQ(Luau("const [first, ...rest] = list"),
+		std::string("local first, rest = (function(__cluau_t: typeof(list)) local first = __cluau_t[1]; local rest = table.move(__cluau_t, 2, "
+					"#__cluau_t, 1, {}); return first, rest end)( list)"));
+	// A default may use the names before it, and a trailing comma goes.
+	CHECK(Luau("let [a, b = a,] = t").find("local b = if __cluau_d2 ~= nil then __cluau_d2 else a;") != std::string::npos);
+	CHECK(!cluau::Translate("let [a, b = a,] = t").HasErrors());
+	// Where a pattern is, `[[` is two brackets; a long string elsewhere.
+	CHECK_EQ(Luau("const [[a, b], c] = t"), std::string("local a, b, c = t[1][1], t[1][2], t[2]"));
+	CHECK_EQ(Luau("let { p: [[x]] } = t"), std::string("local   x  = t.p[1][1]"));
+	CHECK(Luau("for (_, [[a, b]] in t) { }").find("local a = __cluau_v2[1][1]; local b = __cluau_v2[1][2];") != std::string::npos);
+	CHECK_EQ(Luau("local s = [[text]]\nf(a, [[x]])\nfor (_, v in f([[y]])) { }"), std::string("local s = [[text]]\nf(a, [[x]])\nfor  _, v in f([[y]])  do end"));
+	CHECK(Luau("const [a = [[s]]] = t").find("else [[s]]; return a end") != std::string::npos);
+	CHECK(HasError(cluau::Translate("const { a, ...rest } = t"), "the rest of a list is taken in a [ ] pattern"));
+	CHECK(HasError(cluau::Translate("const [...rest, a] = t"), "a rest element is the pattern's last"));
+	CHECK(HasError(cluau::Translate("const { pos: { x } = p } = t"), "a nested pattern has no default"));
+	CHECK(HasError(cluau::Translate("const { a = } = t"), "a default needs a value"));
+	CHECK(HasError(cluau::Translate("const { pos: {} } = t"), "a { } pattern takes fields"));
+	const cluau::TranslateResult r = cluau::Translate("const { a: b, c: [d] } = t\n");
+	CHECK_EQ(r.ConstNames.size(), (size_t)2);
+}
+
+TEST("loop patterns: a loop variable's fields or items are locals of the body")
+{
+	CHECK_EQ(Luau("for (_, { name, size = 1 } in items) {\n}"),
+		std::string("for  _, __cluau_v2      in items  do local name = __cluau_v2.name; local __cluau_d2 = __cluau_v2.size; local size = if "
+					"__cluau_d2 ~= nil then __cluau_d2 else 1;\nend"));
+	CHECK_EQ(Luau("for ([k, v] in pairs) { }"), std::string("for  __cluau_v1   in pairs  do local k = __cluau_v1[1]; local v = __cluau_v1[2]; end"));
+	CHECK(HasError(cluau::Translate("for ({ a } = 1, 2) { }"), "a numeric loop counts with a name"));
+}
+
+TEST("rest parameters and spreads: ...items in a signature, a call and a table")
+{
+	CHECK_EQ(Luau("function f(a, ...rest: number) { }"), std::string("function f(a, ...: number)  local rest: { number } = { ... }; end"));
+	CHECK_EQ(Luau("function f(...rest) { }"), std::string("function f(...)  local rest = { ... }; end"));
+	CHECK(HasError(cluau::Translate("function f(...rest, a) { }"), "a rest parameter is the last"));
+	CHECK_EQ(Luau("f(a, ...items)"), std::string("f(a, table.unpack(items))"));
+	CHECK_EQ(Luau("o:m(...items.list)"), std::string("o:m(table.unpack(items.list))"));
+	CHECK(HasError(cluau::Translate("f(...items, a)"), "a spread argument goes last"));
+	CHECK(Luau("local t = { 1, ...a, x = 2 }").find("(__cluau_spread({ 1, }, a, { x = 2 }) :: typeof(a) & typeof({ 1, x = 2 }))") != std::string::npos);
+	CHECK(Luau("local t = { ...a }").find("(__cluau_spread({ }, a ) :: typeof(a))") != std::string::npos);
+	CHECK(Luau("local t = { ...a, ...b }").find("(__cluau_spread({ }, a, { }, b ) :: typeof(a) & typeof(b))") != std::string::npos);
+	// `...` as a value, and a type's `...T`, are as they were.
+	CHECK_EQ(Luau("function f(...) { return { ... }, g(...) }"), std::string("function f(...)  return { ... }, g(...) end"));
+	CHECK_EQ(Luau("local f: (...number) -> () = g"), std::string("local f: (...number) -> () = g"));
+	CHECK_EQ(Luau("type F = (string, ...any) -> ...number"), std::string("type F = (string, ...any) -> ...number"));
+}
+
+TEST("async and await: a task per call, joined by await (scripts)")
+{
+	cluau::TranslateOptions script;
+	script.Script = true;
+	const std::string luau = cluau::Translate("async function f(n: number): string {\n\treturn await g(n)\n}", script).Luau;
+	CHECK(luau.find("local __cluau_task = require(\"@std/task\"); ") == 0);
+	CHECK(luau.find("function f(n: number): __cluau_task.Task<string>  return __cluau_task.async(function(): string\n\treturn "
+					"__cluau_task.join( g(n))\nend) end") != std::string::npos);
+	CHECK(cluau::Translate("async function f() { }", script).Luau.find("f(): __cluau_task.Task<()>  return __cluau_task.async(function() end) end") !=
+		std::string::npos);
+	CHECK(cluau::Translate("async function f(...: number) { return select(\"#\", ...) }", script)
+			  .Luau.find("async(function(...: number) return select(\"#\", ...) end, ...) end") != std::string::npos);
+	CHECK(cluau::Translate("local v = await a.b[1]:c() + 1", script).Luau.find("__cluau_task.join( a.b[1]:c()) + 1") != std::string::npos);
+	CHECK(cluau::Translate("local v = await a?.b", script).Luau.find("__cluau_task.join( (if a == nil then nil else a.b))") != std::string::npos);
+	// A name that is not a keyword's use stays a name, and hosts have neither.
+	CHECK_EQ(cluau::Translate("local await = 1\nprint(await)", script).Luau, std::string("local await = 1\nprint(await)"));
+	CHECK_EQ(Luau("local v = await(t)"), std::string("local v = await(t)"));
+	CHECK(HasError(cluau::Translate("async function f() { }"), "only scripts have"));
+	CHECK(HasError(cluau::Translate("async function* f() { }", script), "a generator is not async"));
+}
+
+TEST("?? and ?. in a parameter's default")
+{
+	CHECK_EQ(Luau("function f(a = b ?? 1) { }"), std::string("function f(a    )  local a = if a == nil then (if b  ~= nil then b else  1) else a; end"));
+	CHECK(!cluau::Translate("function f(a = m?.n) { }").HasErrors());
 }
 
 TEST("switch: an if chain over the value, which a name is compared as")

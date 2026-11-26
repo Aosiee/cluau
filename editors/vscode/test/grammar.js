@@ -188,6 +188,12 @@ const cases = [
 	["function* count(n: number): number { yield n }", "count", 0, "entity.name.function.cluau"],
 	["function* count(n: number): number { yield n }", "yield", 0, "keyword.control.cluau"],
 	["function count(n: number) { }", "count", 0, "entity.name.function.cluau"],
+	["const [[a, b], c] = pairs", "a", 0, "source.cluau"],
+	["const [[a, b], c] = pairs", "const", 0, "storage.type.cluau"],
+	["local s = [[text]]", "text", 0, "string.quoted.other.multiline.cluau"],
+	["async function load(url: string): string { return await get(url) }", "async", 0, "storage.type.cluau"],
+	["async function load(url: string): string { return await get(url) }", "load", 0, "entity.name.function.cluau"],
+	["async function load(url: string): string { return await get(url) }", "await", 0, "keyword.control.cluau"],
 ];
 
 let failures = 0;

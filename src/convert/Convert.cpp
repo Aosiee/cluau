@@ -856,6 +856,10 @@ namespace cluau {
 				else if (w == "switch" && CluauStatementStart(i) && At(i + 1).Is("(") && m_Match[i + 1] != npos &&
 					At(m_Match[i + 1] + 1).Is("{"))
 					Error(t, "a call to 'switch' here reads as cluau's switch statement: rename the function (left as written)");
+				else if (w == "await" && At(i + 1).Line == t.Line && (At(i + 1).Is("(") || At(i + 1).Is("{") || At(i + 1).K == Kind::String ||
+							 (At(i + 1).K == Kind::Name && !IsKeyword(At(i + 1).Text))) &&
+					!(i > 0 && (At(i - 1).Is(".") || At(i - 1).Is(":") || At(i - 1).Is("local") || At(i - 1).Is("function"))))
+					Error(t, "'await' here reads as cluau's await in a script: rename it (left as written)");
 			}
 
 			// A do-block at token i is written `; {`, so that cluau does not

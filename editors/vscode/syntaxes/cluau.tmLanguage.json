@@ -7,6 +7,7 @@
 	"patterns": [
 		{ "include": "#shebang" },
 		{ "include": "#comments" },
+		{ "include": "#patterns" },
 		{ "include": "#strings" },
 		{ "include": "#declarations" },
 		{ "include": "#keywords" },
@@ -19,6 +20,14 @@
 		{ "include": "#punctuation" }
 	],
 	"repository": {
+		"patterns": {
+			"comment": "A destructuring pattern's `[[` (const [[a, b], c] = pairs) is two brackets, not a long string.",
+			"match": "\\b(let|const|local)\\s*(\\[)(?=\\[)",
+			"captures": {
+				"1": { "name": "storage.type.cluau" },
+				"2": { "name": "punctuation.section.brackets.cluau" }
+			}
+		},
 		"shebang": {
 			"match": "\\A#!.*$",
 			"name": "comment.line.shebang.cluau"
@@ -164,11 +173,11 @@
 		"keywords": {
 			"patterns": [
 				{
-					"match": "\\b(?:if|else|while|for|do|in|return|break|continue|try|catch|finally|throw|switch|case|default|yield)\\b",
+					"match": "\\b(?:if|else|while|for|do|in|return|break|continue|try|catch|finally|throw|switch|case|default|yield|await)\\b",
 					"name": "keyword.control.cluau"
 				},
 				{
-					"match": "\\b(?:let|const|local|function|class|enum|signal|extends|abstract|static)\\b",
+					"match": "\\b(?:let|const|local|function|class|enum|signal|extends|abstract|static|async)\\b",
 					"name": "storage.type.cluau"
 				},
 				{

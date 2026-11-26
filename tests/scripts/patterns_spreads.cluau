@@ -1,0 +1,60 @@
+// Destructuring patterns, rest parameters and spreads.
+
+// Renamed and nested fields, defaults (evaluated only when needed) and a
+// list's rest.
+type Shape = { name: string, at: { x: number, y: number }, tags: { string }, label: string? }
+const shape: Shape = { name = "box", at = { x = 3, y = 4 }, tags = { "red", "big", "new" } }
+const { name: title, at: { x, y }, label = "none" } = shape
+print(title, x, y, label)
+const [firstTag, ...otherTags] = shape.tags
+print(firstTag, #otherTags, table.concat(otherTags, ","))
+let defaulted = 0
+function Fallback(): string {
+	defaulted += 1
+	return "fallback"
+}
+const { label: shown = Fallback() } = { label = "given" } :: { label: string? }
+const [kept, extra = Fallback()] = { "one" }
+print(shown, kept, extra, defaulted)
+const [a, b = a .. "!"] = { "hi" }
+print(a, b)
+
+// A loop takes its variables apart.
+const points = { { x = 1, y = 2 }, { x = 5, y = 6 } }
+for (i, { x, y } in ipairs(points)) {
+	print(i, x + y)
+}
+for (_, [key, value = "none"] in ipairs({ { "k1", "v1" }, { "k2" } })) {
+	print(key, value)
+}
+
+// Rest parameters gather the arguments from there on.
+function Join(separator: string, ...parts: string): string {
+	return table.concat(parts, separator)
+}
+print(Join("-", "a", "b", "c"), Join("-"), #Join(", ", "x"))
+
+// A spread passes a list as arguments, or adds it to a table.
+const words = { "x", "y", "z" }
+print(Join("+", ...words), select("#", ...words))
+const numbers = { 1, 2 }
+const longer = { 0, ...numbers, 3, ...{ 4, 5 } }
+print(#longer, table.concat(longer, " "))
+const defaults = { host = "localhost", port = 80, secure = false }
+const settings = { ...defaults, port = 8080 }
+print(settings.host, settings.port, settings.secure, defaults.port)
+const copy = { ...numbers }
+copy[1] = 100
+print(numbers[1], copy[1], copy == numbers)
+const missing: { number }? = nil
+const ok = pcall(function() {
+	return { ...(missing :: any) } // allow-any: spreading nil on purpose
+})
+print(ok)
+
+// A parameter's default may use ?? and ?. too.
+const fallback: number? = nil
+function Pick(n: number = fallback ?? 7, floor: number = math.floor(fallback ?? 2.5)): number {
+	return n + floor
+}
+print(Pick(), Pick(1))
