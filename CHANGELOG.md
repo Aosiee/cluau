@@ -2,6 +2,160 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.29.0: a second, deeper review
+
+A second review of the whole of cluau, area by area, with each fix covered
+by a test. Beyond reading every line, it tested against references:
+generated programs against hand-written Luau, the converter round-tripping
+Luau's own sources, JSON, CSV, tar, URLs, compression and hashes against
+Python's libraries and published test vectors, and the servers against
+the HTTP and WebSocket RFCs with clients made by hand. Coverage, the
+sanitizers and longer fuzzing pointed it at code the tests never ran.
+Some behaviour changes on purpose; those are listed under "Behaviour
+changes".
+
+Security:
+- @std/server: no client can end a server any more. A WebSocket upgrade
+  whose client has gone, a handler answering with the wrong kind of value,
+  and any other error on one connection end only that connection (a 500
+  where an answer is still possible). A new `headTimeout` option (30
+  seconds) bounds how long a request's head may take, so a client sending
+  a byte now and then cannot hold a connection; large bodies and served
+  files go out in pieces, so a slow reader holds little memory; a stream
+  of empty WebSocket fragments is bounded.
+- `server.files` follows a symbolic link only to a file inside its
+  directory (a new `fs.realpath` resolves links).
+- @std/http and `websocket.connect` refuse header names, values, methods,
+  protocols and URLs that could inject into a request; a redirect to
+  another host drops the request's own headers but a few harmless ones;
+  error messages no longer show a URL's password.
+- `tar.extract` refuses names holding a NUL byte (which could write outside
+  its directory), and every @std/fs and @std/path function refuses a path
+  holding one instead of cutting it short.
+- Packages: install never writes or deletes through a symbolic link: a
+  `cluau_modules`, `cluau.toml` or `cluau.lock` that is a link is refused,
+  and a package's own `.cluau-commit` link is not followed. A commit
+  pinned in `cluau.lock` is checked against `cluau.toml` (a tag's must be
+  the tag's, a branch's must be on the branch); git's `ext::` transport
+  is always refused.
+- `fs.remove(dir, true)` no longer makes files outside the tree writable
+  through symbolic links.
+- The sandbox no longer reveals the working directory through
+  `path.absolute` and `path.relative` (they take absolute paths only), or
+  which files exist outside it through `require`'s error.
+- Zip archives whose entries share data, whose local headers disagree
+  with the directory, or whose entries claim too much are refused when
+  opened, so extracting an archive from anywhere writes a bounded amount.
+- Windows: batch-file arguments are escaped for cmd.exe (the "BatBadBut"
+  injection); programs are found on `PATH` with `PATHEXT` and not from the
+  current directory first; only trusted root certificates are trust
+  anchors, not intermediates.
+
+Language and tools:
+- Interpolated string segments translate exactly like any other code:
+  functions with bodies, comments, long strings and if-expressions work
+  inside `{...}`.
+- A class field whose default also appears in its names (`class Vector3 {
+  Z: number = 3 }`), a comment right after a minus, and `return` inside
+  `try` with its value on the next line all translate correctly.
+- At the prompt, an unclosed type is reported instead of dropping the rest
+  of the input; a value whose `__tostring` fails, and completing a class's
+  inherited static, no longer crash it; it ends when its terminal closes
+  or it is sent SIGTERM (it kept running at full speed).
+- `for (k, v in SomeClass)` iterates the class's members (it constructed
+  instances forever).
+- A script run through a symbolic link finds the modules beside the file
+  it links to, as `cluau check` does; `cluau check` accepts requiring a
+  module that returns nothing.
+- `cluau convert` handles backslash-continued strings at CRLF line ends,
+  comments after `/`, multi-line `until` conditions, `T...` returns and
+  more, and `--verify` parses both sides with Luau and compares the
+  programs, so it no longer passes output that does not compile.
+- `cluau test`: `process.exit` in code under test fails that case instead
+  of ending the run with its status, and a task a case starts is waited
+  for and its failure reported against that case.
+- `cluau profile` gives a blocking call's time to the line that made it
+  and names task and coroutine bodies.
+
+Language server and debugger:
+- Opening a table holding a list of more than six items no longer ends
+  the debugged script; an expression or `__tostring` that never returns
+  is stopped after two seconds instead of freezing the session.
+- Stepping over `task.wait` in a task stops at the task's next line; an
+  error that ends a task pauses in the task, with its locals.
+- Breakpoints, pause and Stop work during blocking calls without
+  `@std/task`; a breakpoint in a file not yet loaded shows unverified until
+  it loads; one on a line that only closes a block moves to the block's
+  last line with code.
+- Every debugger message is valid UTF-8 JSON; expressions see a local
+  holding nil over a global of the same name.
+- The language server's strict-typing diagnostics have stable ranges;
+  `require` paths are completed; hover works on a declaration's own name.
+
+Runtime and standard library:
+- Tasks: finished tasks are released (a long-running server's memory
+  stays flat); a job finishing just as the scheduler looked no longer
+  leaves a wait in the script's own code waiting for good; `task.wait(n)`
+  never returns early; `task.cancel` takes constant time.
+- Processes: one child can be shared by tasks (reads share its output,
+  every `wait` gets the exit code); Ctrl-C stops `process.sleep` and every
+  wait on a program, with or without `@std/task`, and kills the program; a
+  script waiting on standard input in a task exits at once; programs a
+  script started are killed when it is interrupted; `cluau x | head -1`
+  stops at the closed pipe; a cancelled task's pending child or stdin read
+  no longer swallows a line.
+- `db:transaction` rolls back and raises when its commit fails (later
+  writes were lost); `db:close()` finalizes statements and ends an open
+  transaction.
+- Regex: matching around empty matches agrees with Perl and Python, `\K`
+  matches are kept, memory and the work of one call are bounded, and
+  `replace`, `split` and `matches` take time in proportion to the text.
+- `json.encode` writes a table as an array only when its keys are exactly
+  1..n (string keys of a table with holes were dropped).
+- Write errors are reported: `fs.write`, `fs.append`, `fs.writeBuffer`, a
+  file's `flush` and `close`, and `io.write`/`io.flush` on a full disk or
+  a closed pipe.
+- `@std/time` rounds to the millisecond (a millisecond was lost in about
+  half of all round trips) and behaves the same on every platform.
+- `path.normalize` and `path.absolute` leave no trailing `/`.
+- `fs.glob`: a pattern ending in `/` matches only directories, `[` with no
+  `]` is an ordinary character, and `?` matches one character, not byte.
+- tar reads GNU incremental archives, PAX sizes and negative times
+  correctly; url refuses bad ports and keeps empty authorities; csv's
+  `records` skips blank lines.
+
+Build and distribution:
+- The Windows release no longer needs the Visual C++ redistributable; the
+  macOS releases run on macOS 11 and later.
+- The releases, packages and installers ship THIRD_PARTY_NOTICES.md with
+  the licences of the libraries in the `cluau` tool.
+- libcurl is built with HTTP and HTTPS only, as documented (curl 8.23
+  dropped the switch the build used, so every protocol was in).
+- An installer update whose new binary does not run changes nothing and
+  shows the error; `install.ps1 -Uninstall` removes only what it
+  installed.
+- CMake 3.21 to 3.23 configure again; a host using add_subdirectory keeps
+  its own BUILD_SHARED_LIBS and BUILD_TESTING.
+
+Behaviour changes:
+- `//` inside an interpolated string's `{...}` starts a comment, as it
+  does everywhere else; floor division is `~/`.
+- `encoding.fromBase64` refuses text that is not the exact encoding of its
+  bytes; `json.encode` refuses a table with two keys that are the same
+  JSON key (`[1]` and `["1"]`).
+- `process.exit` takes only whole numbers 0 to 255; a script containing a
+  NUL byte is an error; times outside the years 0 to 9999 are errors; the
+  `interrupted` error carries no source position.
+- `csv.records` skips blank lines; `url.parse` refuses a port that is not
+  0 to 65535; `@std/args` gives a flag with `short = "h"` the `-h`.
+- @std/server reads requests more strictly (header names, control
+  characters, exactly one Host, versions 1.0 and 1.1) and drops a
+  handler's framing headers; @std/http changes the method on redirects as
+  RFC 9110 says.
+- One regex call gives up past about ten million steps plus a thousand
+  per byte of text.
+- `cluau convert --verify` fails input that Luau does not parse.
+
 ## 0.28.0: a full review, fixes and hardening
 
 A review of the whole of cluau, with each fix covered by a test. Some
