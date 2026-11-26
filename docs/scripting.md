@@ -445,7 +445,11 @@ is a global too.
 - The history is kept in `~/.cluau_history`.
 
 A script waiting in `input()` or `io.readLine()` stops at the first
-Ctrl-C too (`interrupted`, exit status 130).
+Ctrl-C too (`interrupted`, exit status 130), as does one waiting on a
+program it runs (`process.run`, `exec`, a child's reads, writes and `wait`)
+or in `process.sleep`; the program is killed. A script started with
+Ctrl-C ignored (a shell's background job: `cluau script.cluau &` in a
+shell script) leaves it ignored.
 
 ## Classes in scripts
 
@@ -737,7 +741,7 @@ every platform, Windows included (which accepts them).
 | `run(command, options?): { code: number, output: string, error: string, timedOut: boolean }` | runs a command to its end, capturing its standard output |
 | `exec(command, options?): (number, boolean)` | runs a command with the script's own output; its exit code, and whether it timed out |
 | `spawn(command, options?): Child` | starts a command that runs alongside the script |
-| `sleep(seconds)` | waits |
+| `sleep(seconds)` | waits (`math.huge`: until Ctrl-C; NaN is an error) |
 | `exit(code?)` | ends the script (0 by default) |
 
 A command is a list or a string:
@@ -755,9 +759,9 @@ The options (a table, all optional):
 |---|---|
 | `input: string` | the command's standard input (by default it reads the script's) |
 | `cwd: string` | the directory it runs in |
-| `env: { [string]: string }` | variables set on top of the script's environment |
+| `env: { [string]: string }` | variables set on top of the script's environment (a name is not empty and holds no `=`; no NUL byte in a name, a value or `cwd`) |
 | `stderr` (run only) | `"inherit"` (the default: it goes where the script's goes), `"capture"` (into `error`) or `"merge"` (into `output`, in order) |
-| `timeout: number` (run and exec) | seconds it may take; past them the command, and anything it started, is killed and `timedOut` is true |
+| `timeout: number` (run and exec) | seconds it may take; past them the command, and anything it started, is killed and `timedOut` is true. A command that has ended by then finished in time (`timedOut` is false) even if what it started still holds its output open: that is killed too, and the run returns |
 
 ```
 const process = require("@std/process")
@@ -772,6 +776,20 @@ const sorted = process.run({ "sort" }, { input = "b\na\n" }).output
 A program that cannot be started (not found, not executable, a missing
 `cwd`) is an error; a program that starts and fails is its exit code.
 
+On Windows the program is looked for on `PATH` (the child's, when `env`
+sets it), trying the extensions in `PATHEXT` (`{ "npm", "install" }` finds
+`npm.cmd`); the current directory is not searched unless the name says so
+(`.\tool.exe`). A batch file (`.bat`, `.cmd`) runs through `cmd.exe`, and
+its arguments are quoted so that each reaches it as it is, with nothing in
+them (`&`, `|`, `%NAME%`) taken as `cmd.exe`'s syntax; an argument with a
+line break cannot be passed to one, and is an error.
+
+A program still running when the script exits while waiting on it (a
+`run` or a child's read in a task, at `process.exit` or an error) is
+killed; a child the script is not waiting on is left to run. On Linux and
+macOS the script's own open files and sockets are not passed on to the
+programs it starts.
+
 `spawn` is for a command whose output the script reads while it runs (a
 build's progress, a server's log) or one it talks to. It takes `cwd`, `env`,
 `stderr = "inherit" | "merge"`, and `input = true` to write the command's
@@ -782,8 +800,15 @@ standard input. The `Child` it returns:
 | `readLine(): string?`, `lines()` | the next line of its output (`nil` once it has ended); every line, for a `for` loop |
 | `read(): string?` | whatever output there is next |
 | `write(...)`, `closeInput()` | sends text to its standard input; ends it |
-| `wait(): number` | waits for it to end (closing its input first), keeping any output left for `read`; its exit code |
+| `wait(): number` | waits for it to end (closing its input first), keeping any output left for `read`; its exit code (each `wait` gets it) |
 | `kill()` | ends it, and anything it started |
+
+Tasks may use one `Child` at once: reads share its output out between them
+(each line goes to one reader), and every `wait` gets the exit code. On
+Linux and macOS, a child that reads the script's terminal (no `input =
+true`, with the script's standard input a terminal) stays in the terminal's
+process group so that its reads work and Ctrl-C reaches it; `kill()` and a
+`timeout` then end the child itself but not what it started.
 | `id(): number` | its process id |
 
 ```
@@ -1404,12 +1429,16 @@ for (_, page in pages) {
   with the task's own stack in the report.
 - The standard library's blocking calls wait on their own: `@std/http`'s
   requests and downloads, `@std/net`'s waits, `process.run` and `process.exec`, a child's
-  `read`, `readLine`, `lines` and `wait`, `io.readLine`, `io.readAll` and
-  `input`, and `process.sleep`. In a task, the call runs on a thread of its
-  own while the task waits, and the other tasks run meanwhile; in the
+  `read`, `readLine`, `lines`, `write` and `wait`, `io.readLine`,
+  `io.readAll` and `input`, and `process.sleep`. In a task, the call runs
+  on a thread of its own while the task waits, and the other tasks run meanwhile; in the
   script's own code, the tasks run until the call is done. So three
   downloads in three tasks take as long as the slowest, not the three
   together.
+- A task cancelled while such a call waits takes nothing from it: a line
+  a child's or standard input's read got goes back for the next read.
+- A finished task keeps nothing once nothing refers to it, so a server
+  that runs a task for each connection stays the same size.
 - Tasks still take turns over the script's own code: a long computation
   without a `task.wait` holds the others up, as do the calls that finish at
   once (files, JSON, paths).

@@ -35,7 +35,6 @@ type State = {
 	thread: thread,
 	started: boolean,
 	args: { any },
-	results: { any },
 	waiters: { State },
 	wake: number,
 	order: number,
@@ -46,15 +45,26 @@ type State = {
 }
 
 // The tasks waiting to run again (or to start), each with when it is due,
-// and those waiting on a blocking call's job.
+// and those waiting on a blocking call's job. A cancelled task is left in
+// them and skipped when it comes up (finding it there would take long).
 const waiting: { State } = {}
 const onJobs: { State } = {}
+// The tasks still to finish; a finished one keeps only its results, and
+// both go with the task once nothing refers to it (a server makes a task
+// for each connection).
 const states: { [Task<any>]: State } = {}
+const known: { [Task<any>]: boolean } = setmetatable({}, { __mode = "k" }) :: any
+const resultsOf: { [Task<any>]: { any } } = setmetatable({}, { __mode = "k" }) :: any
 const byThread: { [thread]: State } = {}
-const counter = { next = 0 }
+// `since`: the count of finished jobs when CollectJobs looked last (a job
+// finishing after that ends an idle wait).
+const counter = { next = 0, since = 0 }
 // The last task that failed, and its error: an error that ends the script
 // is reported with that task's stack when it is this one (the runtime's).
-const failure: { message: any, thread: thread? } = { message = nil, thread = nil }
+// `count` goes up with each failure.
+const failure: { message: any, thread: thread?, count: number } = { message = nil, thread = nil, count = 0 }
+// What a task that cancels itself where it cannot yield raises to end.
+const cancelled = newproxy()
 
 // Into `waiting`, kept latest first so the next due is the last: found by
 // halving, so many tasks cost little each.
@@ -83,6 +93,7 @@ const Due = function(state: State, wake: number) {
 const Finish = function(state: State) {
 	state.task.done = true
 	byThread[state.thread] = nil
+	states[state.task] = nil
 	for (_, waiter in state.waiters) {
 		Due(waiter, time.monotonic())
 	}
@@ -91,6 +102,7 @@ const Finish = function(state: State) {
 
 // Runs the task until it waits or ends; its error is raised here.
 const Resume = function(state: State) {
+	const failures = failure.count
 	let results: { any }
 	if (state.started) {
 		const with = state.resumeWith
@@ -100,15 +112,29 @@ const Resume = function(state: State) {
 		state.started = true
 		results = table.pack(coroutine.resume(state.thread, table.unpack(state.args)))
 	}
+	if (state.task.done) {
+		// Cancelled while it ran (it ends with `cancelled`, or went on past a
+		// pcall): what it did since is dropped, and so is any job it started.
+		if (results[1] && results[2] == jobs.marker) {
+			jobs.forget(results[3])
+		}
+		return
+	}
 	if (!results[1]) {
+		// Another task's error, raised where this one ran the tasks (a wait
+		// inside a call it could not yield across), keeps that task's stack.
+		if (failure.count == failures || !rawequal(failure.message, results[2])) {
+			failure.thread = state.thread
+		}
 		failure.message = results[2]
-		failure.thread = state.thread
+		failure.count += 1
 		Finish(state)
 		error(results[2], 0)
 	}
 	if (coroutine.status(state.thread) == "dead") {
 		table.remove(results, 1)
-		state.results = results
+		results.n -= 1
+		resultsOf[state.task] = results
 		Finish(state)
 	} else if (results[2] == jobs.marker) {
 		state.job = results[3]
@@ -118,10 +144,13 @@ const Resume = function(state: State) {
 
 // The tasks whose job is done come due now.
 const CollectJobs = function() {
+	counter.since = jobs.completed()
 	let i = 1
 	while (i <= #onJobs) {
 		const state = onJobs[i]
-		if (jobs.done(state.job)) {
+		if (state.task.done) {
+			table.remove(onJobs, i) // cancelled
+		} else if (jobs.done(state.job)) {
 			table.remove(onJobs, i)
 			state.resumeWith = state.job
 			state.job = 0
@@ -133,21 +162,23 @@ const CollectJobs = function() {
 }
 
 // Sleeps `seconds` at most (none: until a job finishes), waking early when
-// a job finishes.
+// a job finishes (one since CollectJobs looked: then at once).
 const Idle = function(seconds: number?) {
-	if (jobs.pending() > 0) {
-		jobs.wait(seconds)
-	} else if (seconds != nil && seconds > 0) {
-		jobs.wait(seconds)
+	if (jobs.pending() > 0 || (seconds != nil && seconds > 0)) {
+		jobs.wait(seconds, counter.since)
 	}
 }
 
-// The first task due (the earliest, then the first made due), taken out.
+// The first task due (the earliest, then the first made due), taken out;
+// the cancelled ones on the way are dropped.
 const NextDue = function(): State? {
-	if (#waiting == 0) {
-		return nil
+	while (#waiting > 0) {
+		const state = table.remove(waiting) :: State
+		if (!state.task.done) {
+			return state
+		}
 	}
-	return table.remove(waiting)
+	return nil
 }
 
 // Runs the waiting tasks as they come due, sleeping between them, until
@@ -158,17 +189,19 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 		const state = NextDue()
 		const now = time.monotonic()
 		if (state == nil) {
-			// Nothing due: the jobs still running, or the deadline. A task on
-			// a job that finished since CollectJobs counts too (pending() no
-			// longer does).
-			if ((jobs.pending() > 0 || #onJobs > 0) && (deadline == nil || deadline > now)) {
-				Idle(if (deadline != nil) deadline - now else nil)
-				continue
+			// Nothing due: until the deadline, or while jobs still run. A task
+			// on a job that finished since CollectJobs counts too (pending()
+			// no longer does). A job finishing (even one no task waits on any
+			// more) ends an idle early, and the loop looks again.
+			if (deadline != nil) {
+				if (deadline > now) {
+					Idle(deadline - now)
+					continue
+				}
+				return
 			}
-			// Until the deadline: a job finishing (even one no task waits on
-			// any more) can end an idle early.
-			if (deadline != nil && deadline > now) {
-				Idle(deadline - now)
+			if (jobs.pending() > 0 || #onJobs > 0) {
+				Idle(nil)
 				continue
 			}
 			return
@@ -177,9 +210,7 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 			Insert(state) // back, in its place in line
 			if (deadline > now) {
 				Idle(deadline - now)
-				if (jobs.pending() > 0 || #onJobs > 0) {
-					continue
-				}
+				continue
 			}
 			return
 		}
@@ -189,9 +220,7 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 			Idle(state.wake - now)
 			continue
 		}
-		if (!state.task.done) {
-			Resume(state)
-		}
+		Resume(state)
 	}
 }
 
@@ -202,7 +231,6 @@ const Make = function(fn: (...any) -> ...any, args: { any }): State {
 		thread = coroutine.create(fn),
 		started = false,
 		args = args,
-		results = {},
 		waiters = {},
 		wake = 0,
 		order = 0,
@@ -210,6 +238,7 @@ const Make = function(fn: (...any) -> ...any, args: { any }): State {
 		resumeWith = nil,
 	}
 	states[task] = state
+	known[task] = true
 	byThread[state.thread] = state
 	return state
 }
@@ -257,19 +286,20 @@ const wait = function(seconds: number?): number {
 // Waits for the task to finish; returns what it returned (nothing when it
 // was cancelled).
 const join = function<R...>(task: Task<R...>): R... {
-	const target = states[task]
-	if (target == nil) {
+	if (!known[task]) {
 		error("task.join: not a task", 2)
 	}
 	if (!task.done) {
+		const target = states[task]
 		const state = Current()
 		if (state == target) {
 			error("task.join: a task cannot wait for itself", 2)
 		}
-		if (state != nil) {
+		if (state != nil && coroutine.isyieldable()) {
 			table.insert(target.waiters, state)
 			coroutine.yield()
 		} else {
+			// As in wait: the script's own code, or a call that cannot yield.
 			RunUntil(function(): boolean {
 				return task.done
 			})
@@ -278,7 +308,11 @@ const join = function<R...>(task: Task<R...>): R... {
 			}
 		}
 	}
-	return table.unpack(target.results)
+	const results = resultsOf[task]
+	if (results == nil) {
+		return
+	}
+	return table.unpack(results, 1, results.n)
 }
 
 // Stops the task: it does not run again, and what joins it gets nothing.
@@ -288,22 +322,22 @@ const cancel = function<R...>(task: Task<R...>) {
 		return
 	}
 	task.cancelled = true
-	for (i, each in waiting) {
-		if (each == state) {
-			table.remove(waiting, i)
-			break
-		}
+	// The job it waits on (or whose results it was to take) is dropped; a
+	// read gives back what it got.
+	if (state.job != 0) {
+		jobs.forget(state.job)
+		state.job = 0
 	}
-	for (i, each in onJobs) {
-		if (each == state) {
-			table.remove(onJobs, i)
-			jobs.forget(each.job)
-			break
-		}
+	if (state.resumeWith != nil) {
+		jobs.forget(state.resumeWith)
+		state.resumeWith = nil
 	}
 	Finish(state)
 	if (Current() == state) {
-		coroutine.yield() // never resumed
+		if (coroutine.isyieldable()) {
+			coroutine.yield() // never resumed
+		}
+		error(cancelled, 0) // ends the task (Resume drops it)
 	}
 }
 

@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <cctype>
 #include <cstdio>
@@ -136,7 +137,13 @@ __cluau_meta = {
 }
 )LUAU";
 
-		volatile std::sig_atomic_t g_Interrupt = 0;
+		// Set by the Ctrl-C handler and read by the job threads too: atomic
+		// (and lock-free, so the handler may set it).
+		std::atomic<int> g_Interrupt{ 0 };
+		// Counts every Ctrl-C and is never cleared, so a job's thread sees one
+		// even after the script's thread has raised it.
+		std::atomic<unsigned> g_Interrupts{ 0 };
+		static_assert(std::atomic<int>::is_always_lock_free && std::atomic<unsigned>::is_always_lock_free);
 		bool g_Interrupted = false; // the last run ended in an interrupt
 		detail::Profiler* g_Profiler = nullptr; // the profiling runtime's (one at a time)
 
@@ -164,6 +171,7 @@ __cluau_meta = {
 			if (g_Interrupt)
 				std::_Exit(130);
 			g_Interrupt = 1;
+			g_Interrupts++;
 	#ifdef _WIN32
 			std::signal(SIGINT, OnSigint);
 	#endif
@@ -174,6 +182,11 @@ __cluau_meta = {
 	#ifdef _WIN32
 			std::signal(SIGINT, OnSigint);
 	#else
+			// A SIGINT ignored by whoever started the script (a background
+			// job of a shell) stays ignored.
+			struct sigaction current = {};
+			if (sigaction(SIGINT, nullptr, &current) == 0 && current.sa_handler == SIG_IGN)
+				return;
 			// Without SA_RESTART, so a script blocked reading standard input
 			// gets its read back and stops at the first Ctrl-C.
 			struct sigaction action = {};
@@ -1106,16 +1119,17 @@ end
 				std::fflush(stdout);
 			}
 #endif
-			if (!std::getline(std::cin, line))
+			// The script's io.readLine reads from the same buffer.
+			if (!detail::ReadStandardInputLine(line))
 				return Read::End;
-			if (!line.empty() && line.back() == '\r')
-				line.pop_back();
 			return Read::Line;
 		}
 
 	} // namespace
 
 	bool detail::InterruptPending() { return g_Interrupt != 0; }
+
+	unsigned detail::InterruptCount() { return g_Interrupts; }
 
 	void detail::RaiseIfInterrupted(lua_State* L)
 	{
@@ -1124,7 +1138,8 @@ end
 		g_Interrupt = 0;
 		g_Interrupted = true;
 		std::cin.clear();
-		luaL_error(L, "interrupted");
+		lua_pushstring(L, "interrupted"); // no position: the message is the same wherever it stops
+		lua_error(L);
 	}
 
 	std::string Repr(lua_State* L, int index)

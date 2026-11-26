@@ -1,0 +1,11 @@
+shared lines	5000	codes	3	3	3
+write in a task	0	false	true
+echoed	hello	0
+after a cancelled read	first	second	0
+waited its time	true
+join inside sort	true	slow	true
+cancelled itself	true	true	0
+nested failure	false	tasks_child.cluau:107: failed here	true	true
+endless wait cancelled	true	true
+finished tasks let go	true
+exit: 0

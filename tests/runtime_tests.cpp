@@ -3,12 +3,14 @@
 #include "cluau/runtime.h"
 #include "DapServer.h"
 #include "Json.h"
+#include "Spawn.h"
 #include "LspServer.h"
 
 #include "lua.h"
 #include "lualib.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -1569,3 +1571,184 @@ TEST("debug: All Errors pauses at an error coroutine.resume catches")
 	d.Request("continue", Json::Object().Set("threadId", 1));
 	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
 }
+
+// ---- Child processes: Windows program lookup and batch-file arguments ----
+// (pure functions, so they are tested on every platform)
+
+TEST("spawn: a batch file's arguments reach it with nothing cmd.exe would read as syntax")
+{
+	using cluau::runtime::detail::BatchCommandLine;
+	auto line = [](std::vector<std::string> args) {
+		std::string out, why;
+		CHECK(BatchCommandLine("C:\\x\\a.bat", args, out, why));
+		return out;
+	};
+	const std::string head = "/e:ON /v:OFF /d /c \"\"C:\\x\\a.bat\"";
+	CHECK_EQ(line({}), head + "\"");
+	CHECK_EQ(line({ "plain", "a-b.c:d/e_f@1" }), head + " plain a-b.c:d/e_f@1\"");
+	// Metacharacters are quoted (cmd.exe takes them as text inside quotes).
+	CHECK_EQ(line({ "x&calc" }), head + " \"x&calc\"\"");
+	CHECK_EQ(line({ "a|b", "<c>", "^d", "(e)" }), head + " \"a|b\" \"<c>\" \"^d\" \"(e)\"\"");
+	// %NAME% is never expanded: each % is preceded by an empty substring of %cd%.
+	CHECK_EQ(line({ "%PATH%" }), head + " \"%%cd:~,%PATH%%cd:~,%\"\"");
+	// Quotes are doubled (after doubling the backslashes before them).
+	CHECK_EQ(line({ "say \"hi\"" }), head + " \"say \"\"hi\"\"\"\"");
+	CHECK_EQ(line({ "a\\\"b" }), head + " \"a\\\\\"\"b\"\"");
+	// An empty argument, and one ending in a backslash, are quoted.
+	CHECK_EQ(line({ "" }), head + " \"\"\"");
+	CHECK_EQ(line({ "dir\\" }), head + " \"dir\\\\\"\"");
+	CHECK_EQ(line({ "a\\b" }), head + " a\\b\"");
+	// Non-ASCII text is left as it is; the C1 control characters are quoted.
+	CHECK_EQ(line({ "caf\xC3\xA9" }), head + " caf\xC3\xA9\"");
+	CHECK_EQ(line({ "x\xC2\x85y" }), head + " \"x\xC2\x85y\"\"");
+
+	std::string out, why;
+	CHECK(!BatchCommandLine("C:\\x\\a.bat", { "one\ntwo" }, out, why));
+	CHECK(why.find("line break") != std::string::npos);
+	CHECK(!BatchCommandLine("C:\\x\\a.bat", { "one\rtwo" }, out, why));
+	CHECK(!BatchCommandLine("C:\\x\\a\".bat", {}, out, why));
+	CHECK(!BatchCommandLine("C:\\x\\", {}, out, why));
+}
+
+TEST("spawn: which programs are batch files")
+{
+	using cluau::runtime::detail::IsBatchFile;
+	CHECK(IsBatchFile("C:\\x\\a.bat"));
+	CHECK(IsBatchFile("C:\\x\\npm.CMD"));
+	CHECK(IsBatchFile("a.Bat. . ")); // Windows drops trailing dots and spaces
+	CHECK(!IsBatchFile("a.exe"));
+	CHECK(!IsBatchFile("bat"));
+	CHECK(!IsBatchFile("a.batch"));
+}
+
+TEST("spawn: Windows program lookup is PATH's (with PATHEXT), never the current directory's")
+{
+	using cluau::runtime::detail::FindProgram;
+	auto lower = [](std::string s) {
+		for (char& c : s)
+			c = (char)std::tolower((unsigned char)c);
+		return s;
+	};
+	const std::set<std::string> files = { "c:\\bin\\git.exe", "c:\\node\\npm.cmd", "c:\\tools\\tool.v2", "git.exe", ".\\local.exe", "c:\\bin\\only" };
+	auto isFile = [&](const std::string& path) { return files.count(lower(path)) > 0; };
+	const std::string path = ".;bin;C:\\node;\"C:\\bin\";C:\\tools\\";
+	CHECK_EQ(lower(FindProgram("git", path, "", isFile)), std::string("c:\\bin\\git.exe")); // not .\git.exe
+	CHECK_EQ(lower(FindProgram("git.exe", path, "", isFile)), std::string("c:\\bin\\git.exe"));
+	CHECK_EQ(lower(FindProgram("npm", path, ".COM;.EXE;.BAT;.CMD", isFile)), std::string("c:\\node\\npm.cmd"));
+	CHECK_EQ(FindProgram("npm", path, ".COM;.EXE", isFile), std::string()); // not in this PATHEXT
+	CHECK_EQ(lower(FindProgram("tool.v2", path, "", isFile)), std::string("c:\\tools\\tool.v2"));
+	CHECK_EQ(FindProgram("only", path, "", isFile), std::string()); // no extension, and none of PATHEXT's
+	CHECK_EQ(FindProgram("missing", path, "", isFile), std::string());
+	CHECK_EQ(FindProgram("", path, "", isFile), std::string());
+	// A path is taken as it is (with PATHEXT's extensions when it has none).
+	CHECK_EQ(lower(FindProgram("C:\\bin\\git", path, "", isFile)), std::string("c:\\bin\\git.exe"));
+	CHECK_EQ(FindProgram(".\\local", path, "", isFile), std::string(".\\local.EXE")); // named from the current directory
+	CHECK_EQ(FindProgram("local", ".", "", isFile), std::string());
+	CHECK_EQ(FindProgram("git.exe", "", "", isFile), std::string());
+}
+
+#ifndef _WIN32
+
+// ---- Ctrl-C during the waits on child processes and sleeps (POSIX) ----
+
+#include <csignal>
+#include <unistd.h>
+
+namespace {
+
+	// Runs the script with Ctrl-C caught, sending SIGINT to the process
+	// `after` seconds in; the exit status, and how long the run took.
+	std::pair<int, double> RunInterrupted(const std::string& source, double after = 0.3)
+	{
+		cluau::runtime::Options options;
+		options.CatchInterrupt = true;
+		const auto start = std::chrono::steady_clock::now();
+		std::thread signal([after] {
+			std::this_thread::sleep_for(std::chrono::duration<double>(after));
+			kill(getpid(), SIGINT);
+		});
+		const int status = Run(source, options);
+		signal.join();
+		return { status, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() };
+	}
+
+	// The pid a child wrote to the file, once it is there.
+	pid_t PidFrom(const std::string& file)
+	{
+		std::ifstream in(file);
+		long pid = 0;
+		in >> pid;
+		return (pid_t)pid;
+	}
+
+	// The process has gone (within two seconds).
+	bool Gone(pid_t pid)
+	{
+		for (int i = 0; i < 200; i++)
+		{
+			if (pid > 0 && kill(pid, 0) != 0)
+				return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return false;
+	}
+
+} // namespace
+
+TEST("interrupt: a Ctrl-C ends process.sleep, without @std/task and with it")
+{
+	auto [status, took] = RunInterrupted("require('@std/process').sleep(30)");
+	CHECK_EQ(status, 130);
+	CHECK(took < 3);
+	std::tie(status, took) = RunInterrupted("const task = require('@std/task')\n"
+											"task.spawn(function() { require('@std/process').sleep(30) })\n");
+	CHECK_EQ(status, 130);
+	CHECK(took < 3);
+}
+
+TEST("interrupt: a Ctrl-C ends a child's read, wait and write, and kills the child")
+{
+	const std::vector<std::string> calls = { "c:readLine()", "c:wait()", "c:write(string.rep('x', 4000000))" };
+	for (size_t i = 0; i < calls.size(); i++)
+	{
+		const std::string file = (TempDir() / ("child_pid_" + std::to_string(i))).string();
+		const std::string source = "const process = require('@std/process')\n"
+								   "const c = process.spawn({ 'sh', '-c', 'echo $$ > \"$0\"; exec sleep 30', '" +
+			file + "' }, { input = true })\n"
+				   "while (process.run({ 'cat', '" +
+			file + "' }).output == '') { process.sleep(0.01) }\n" + calls[i] + "\n";
+		auto [status, took] = RunInterrupted(source, 0.5);
+		CHECK_EQ(status, 130);
+		CHECK(took < 3);
+		CHECK(Gone(PidFrom(file)));
+	}
+}
+
+TEST("interrupt: a Ctrl-C kills the program a task runs")
+{
+	const std::string file = (TempDir() / "run_pid").string();
+	auto [status, took] = RunInterrupted("const process = require('@std/process')\n"
+										 "const task = require('@std/task')\n"
+										 "task.spawn(function() { process.run({ 'sh', '-c', 'echo $$ > \"$0\"; exec sleep 30', '" +
+											 file + "' }, { timeout = 60 }) })\n"
+													"let x = 0\n"
+													"while (true) { x += 1 }\n", // the script's thread is busy: the run's thread sees the Ctrl-C
+		0.5);
+	CHECK_EQ(status, 130);
+	CHECK(took < 3);
+	CHECK(Gone(PidFrom(file)));
+}
+
+TEST("interrupt: a SIGINT ignored by whoever started the script stays ignored")
+{
+	struct sigaction ignore = {}, old = {};
+	ignore.sa_handler = SIG_IGN;
+	sigemptyset(&ignore.sa_mask);
+	sigaction(SIGINT, &ignore, &old);
+	auto [status, took] = RunInterrupted("require('@std/process').sleep(0.6)", 0.2);
+	CHECK_EQ(status, 0);
+	CHECK(took >= 0.5);
+	sigaction(SIGINT, &old, nullptr);
+}
+
+#endif
