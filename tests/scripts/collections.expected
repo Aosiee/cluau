@@ -77,4 +77,5 @@ false	collections.cluau:233: set:add: the item is NaN, which a set cannot hold
 false	collections.cluau:237: set:add: the item is nil, which a set cannot hold
 false	collections.cluau:241: deque:pushBack: the item is nil, which a deque cannot hold
 false	collections.cluau:245: deque:pushFront: the item is nil, which a deque cannot hold
+false	false	2
 exit: 0

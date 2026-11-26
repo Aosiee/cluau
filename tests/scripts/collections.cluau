@@ -244,3 +244,7 @@ Fails(function() {
 	const maybe: collections.Deque<string?> = collections.deque()
 	maybe:pushFront(nil)
 })
+
+// NaN is never a member, and asking about it reads no table.
+const numbers = collections.set({ 1, 2 })
+print(numbers:has(0 / 0), numbers:remove(0 / 0), numbers:size())

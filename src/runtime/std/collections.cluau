@@ -279,13 +279,13 @@ function mostCommon<T>(items: { T }, n: number?): { Count<T> } {
 	const entries: { Count<T> } = {}
 	const entryOf: { [T]: Count<T> } = {}
 	for (i, item in items) {
+		if (item != item) {
+			Keyable("collections.mostCommon", `item {i}`, item)
+		}
 		const entry = entryOf[item]
 		if (entry != nil) {
 			entry.count += 1
 		} else {
-			if (item != item) {
-				Keyable("collections.mostCommon", `item {i}`, item)
-			}
 			const fresh = { item = item, count = 1 }
 			entryOf[item] = fresh
 			table.insert(entries, fresh)
@@ -325,10 +325,12 @@ function unique<T>(items: { T }): { T } {
 	const out: { T } = {}
 	const seen: { [T]: boolean } = {}
 	for (i, item in items) {
+		// NaN is refused before it is looked up: Luau's tables cannot even
+		// be read with it.
+		if (item != item) {
+			Keyable("collections.unique", `item {i}`, item)
+		}
 		if (!seen[item]) {
-			if (item != item) {
-				Keyable("collections.unique", `item {i}`, item)
-			}
 			seen[item] = true
 			table.insert(out, item)
 		}
@@ -580,11 +582,11 @@ function NewSet<T>(): Set<T> {
 
 function SetMethods.add<T>(self: Set<T>, item: T): boolean {
 	const data = SetOf(self)
-	if (data.slot[item] != nil) {
-		return false
-	}
 	if (item == nil || item != item) {
 		error(`set:add: the item is {if (item == nil) "nil" else "NaN"}, which a set cannot hold`, 2)
+	}
+	if (data.slot[item] != nil) {
+		return false
 	}
 	data.last += 1
 	data.slots[data.last] = item
@@ -595,8 +597,8 @@ function SetMethods.add<T>(self: Set<T>, item: T): boolean {
 
 function SetMethods.remove<T>(self: Set<T>, item: T): boolean {
 	const data = SetOf(self)
-	if (item == nil) {
-		return false
+	if (item == nil || item != item) {
+		return false // never a member
 	}
 	const at = data.slot[item]
 	if (at == nil) {
@@ -624,7 +626,7 @@ function SetMethods.remove<T>(self: Set<T>, item: T): boolean {
 }
 
 function SetMethods.has<T>(self: Set<T>, item: T): boolean {
-	return item != nil && SetOf(self).slot[item] != nil
+	return item != nil && item == item && SetOf(self).slot[item] != nil
 }
 
 function SetMethods.size<T>(self: Set<T>): number {
