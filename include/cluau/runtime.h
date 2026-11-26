@@ -4,7 +4,7 @@
 // script.py` runs Python: a .cluau file is translated (script mode), compiled
 // and run on Luau's VM, with `require` for .cluau / .luau modules and the
 // standard modules (`@std/fs`, `@std/path`, `@std/process`, `@std/io`,
-// `@std/json`). The translator (cluau.h) does not need it; the runtime builds
+// `@std/json` and the others docs/scripting.md lists). The translator (cluau.h) does not need it; the runtime builds
 // against Luau's VM and compiler.
 //
 // Errors are reported as `file:line: message` with a stack backtrace; the
@@ -40,8 +40,10 @@ namespace cluau::runtime {
 		// Scripts and modules compile to native code (Luau's code generator,
 		// on x64 and arm64; elsewhere they are interpreted either way).
 		bool Native = true;
-		// The sandbox: no file, network or process access. @std/fs and
-		// @std/http are not available, @std/process has only `args`,
+		// The sandbox: no file, network or process access. @std/fs,
+		// @std/http, @std/net, @std/sqlite, @std/zip and @std/tar are not
+		// available, nor what is built on them (@std/server,
+		// @std/websocket), @std/process has only `args`,
 		// `platform`, `script`, `exit` and `sleep`, and `require` loads
 		// modules only from under the main script's directory, its
 		// cluau_modules and the search path. Luau itself has no file or

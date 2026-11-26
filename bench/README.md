@@ -17,7 +17,8 @@ time build-rel/cluau --no-native bench/compute.cluau
 ```
 
 `compare.py` times two builds on these scripts and a one-line `-e`
-(the median of several runs each):
+(the median of several runs each, the builds taking turns; a run that fails
+stops it):
 
 ```sh
 python3 bench/compare.py ~/old/cluau build-rel/cluau

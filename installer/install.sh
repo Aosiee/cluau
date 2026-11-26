@@ -8,7 +8,7 @@
 #   sh install.sh [--version vX.Y.Z] [--prefix DIR] [--no-modify-path] [--uninstall]
 #
 # The command goes to PREFIX/bin (PREFIX is ~/.local unless --prefix names
-# another), the guides to PREFIX/share/doc/cluau. When PREFIX/bin is not on
+# another), the guides and the licences to PREFIX/share/doc/cluau. When PREFIX/bin is not on
 # PATH, a line adding it goes in the shell's startup file, marked so
 # --uninstall can take it out again; --no-modify-path leaves the startup
 # files alone.
@@ -25,8 +25,12 @@ set -eu
 
 repository="${CLUAU_REPOSITORY:-https://github.com/Aosiee/cluau}"
 repository="${repository%/}"
-repo="${repository#*://*/}" # owner/name
-server="${repository%/"$repo"}" # https://host
+# owner/name are the address's last two parts; the server is what comes
+# before them (a Forgejo or Gitea server may live under a path of its own).
+repo_name="${repository##*/}"
+repo_rest="${repository%/*}"
+repo="${repo_rest##*/}/$repo_name" # owner/name
+server="${repo_rest%/*}"           # https://host, or https://host/path
 version="${CLUAU_VERSION:-latest}"
 prefix="${CLUAU_PREFIX:-$HOME/.local}"
 download_url="${CLUAU_DOWNLOAD_URL:-}"
@@ -116,6 +120,9 @@ has_our_line() {
 	return 1
 }
 
+# The documents a release holds, installed beside the command.
+docs="README.md LICENSE THIRD_PARTY_NOTICES.md syntax.md scripting.md"
+
 # The startup files a PATH line may be in (the shell's own first).
 startup_files() {
 	case "$(basename "${SHELL:-sh}")" in
@@ -147,6 +154,10 @@ remove_marked_lines() {
 	cat "$tmp" >"$file"
 	rm -f "$tmp"
 	say "removed the PATH line from $file"
+	# A file that held nothing else (one this installer made) goes too.
+	if ! grep -q '[^[:space:]]' "$file"; then
+		rm -f "$file"
+	fi
 }
 
 if [ "$uninstall" = 1 ]; then
@@ -155,18 +166,25 @@ if [ "$uninstall" = 1 ]; then
 		rm -f "$bin_dir/cluau"
 		removed=1
 	fi
+	rm -f "$bin_dir/.cluau.new"
 	if [ -d "$doc_dir" ]; then
 		rm -rf "$doc_dir"
 		removed=1
 	fi
+	# The directories the install made, when nothing else is in them.
+	for dir in "$bin_dir" "$prefix/share/doc" "$prefix/share"; do
+		rmdir "$dir" 2>/dev/null || true
+	done
 	for file in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "${ZDOTDIR:-$HOME}/.zshrc"; do
 		remove_marked_lines "$file"
 	done
 	fish_file="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/cluau.fish"
-	remove_marked_lines "$fish_file"
-	if [ -f "$fish_file" ] && ! grep -q . "$fish_file"; then
-		rm -f "$fish_file"
+	if has_our_line "$fish_file" && command -v fish >/dev/null 2>&1; then
+		# Earlier installers added the directory to fish's universal
+		# fish_user_paths, which outlives the file.
+		fish -c 'if set -l i (contains -i -- $argv[1] $fish_user_paths); set -U -e fish_user_paths[$i]; end' "$bin_dir" 2>/dev/null || true
 	fi
+	remove_marked_lines "$fish_file"
 	if [ "$removed" = 1 ]; then
 		say "removed cluau from $prefix"
 	else
@@ -188,11 +206,23 @@ Darwin-x86_64) platform="macos-x86_64" ;;
 	;;
 esac
 
+# A download runs in the background and is waited for, so that a signal
+# stops the install at once (a shell runs its traps only between commands,
+# and `wait` is one it interrupts).
+fetch_pid=""
 if command -v curl >/dev/null 2>&1; then
-	fetch() { curl -fsSL "$1" -o "$2"; }
+	fetch() {
+		curl -fsSL "$1" -o "$2" &
+		fetch_pid=$!
+		wait "$fetch_pid"
+	}
 	fetch_text() { curl -fsSL "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-	fetch() { wget -q "$1" -O "$2"; }
+	fetch() {
+		wget -q "$1" -O "$2" &
+		fetch_pid=$!
+		wait "$fetch_pid"
+	}
 	fetch_text() { wget -qO- "$1"; }
 else
 	fail "downloading needs curl or wget"
@@ -233,7 +263,17 @@ else
 fi
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT INT TERM
+# Whatever happens, nothing half-made is left: a download still running,
+# the downloads, and a new command not yet in place.
+cleanup() {
+	if [ -n "$fetch_pid" ]; then
+		kill "$fetch_pid" 2>/dev/null || true
+	fi
+	rm -rf "$work" "$bin_dir/.cluau.new"
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 say "downloading cluau $version ($platform)"
 get "$archive" "$work/$archive"
@@ -248,14 +288,24 @@ unpacked="$work/cluau-$version-$platform"
 [ -f "$unpacked/cluau" ] || fail "$archive holds no cluau command"
 
 mkdir -p "$bin_dir" "$doc_dir"
-# Into place by a rename, so a cluau that is running is not overwritten.
+# The new command runs here before it replaces anything (from the directory
+# it goes to: a temporary directory may not allow running programs). Then
+# into place by a rename, so a cluau that is running is not overwritten.
 cp "$unpacked/cluau" "$bin_dir/.cluau.new"
 chmod 755 "$bin_dir/.cluau.new"
+if ! installed="$("$bin_dir/.cluau.new" --version 2>"$work/version-error")"; then
+	rm -f "$bin_dir/.cluau.new"
+	if [ -s "$work/version-error" ]; then
+		sed 's/^/  /' "$work/version-error" >&2
+	fi
+	fail "cluau $version does not run on this system: nothing was changed"
+fi
 mv -f "$bin_dir/.cluau.new" "$bin_dir/cluau"
-for doc in README.md LICENSE syntax.md scripting.md; do
-	[ -f "$unpacked/$doc" ] && cp "$unpacked/$doc" "$doc_dir/"
+for doc in $docs; do
+	if [ -f "$unpacked/$doc" ]; then
+		cp "$unpacked/$doc" "$doc_dir/"
+	fi
 done
-installed="$("$bin_dir/cluau" --version 2>/dev/null)" || fail "the installed $bin_dir/cluau does not run on this system"
 say "installed $installed to $bin_dir/cluau"
 
 case ":$PATH:" in
@@ -268,7 +318,9 @@ case ":$PATH:" in
 			say "$file already adds $bin_dir to PATH: open a new shell to use \`cluau\`"
 		else
 			if [ "${file##*.}" = "fish" ]; then
-				printf 'fish_add_path "%s" %s\n' "$bin_dir" "$marker" >>"$file"
+				# --path: PATH itself, which lasts as long as this file
+				# (not the universal fish_user_paths, which outlives it).
+				printf 'fish_add_path --path "%s" %s\n' "$bin_dir" "$marker" >>"$file"
 			else
 				printf 'export PATH="%s:$PATH" %s\n' "$bin_dir" "$marker" >>"$file"
 			fi

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Times two cluau builds on the same scripts (the median of several runs
-# each) and prints the change: a release's speed against an earlier one's.
+# each, the two builds taking turns) and prints the change: a release's
+# speed against an earlier one's. A run that fails stops it.
 #
 #   python3 bench/compare.py <old cluau> <new cluau>
 
@@ -19,13 +20,27 @@ CASES = [
 ]
 
 
-def median(command, runs):
-    times = []
+def run(command):
+    """Runs a case once and returns how long it took; a run that fails stops the comparison."""
+    start = time.perf_counter()
+    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
+    elapsed = time.perf_counter() - start
+    if result.returncode != 0:
+        error = result.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"{' '.join(command)} exited with status {result.returncode}" + (f": {error}" if error else ""))
+    return elapsed
+
+
+def medians(old, new, runs):
+    """The median time of each command, their runs taking turns (so that a
+    machine that slows down or speeds up meanwhile affects both alike)."""
+    run(old)  # once each first: a build that fails stops here, and caches are warm
+    run(new)
+    a, b = [], []
     for _ in range(runs):
-        start = time.perf_counter()
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        times.append(time.perf_counter() - start)
-    return statistics.median(times)
+        a.append(run(old))
+        b.append(run(new))
+    return statistics.median(a), statistics.median(b)
 
 
 def main():
@@ -33,11 +48,14 @@ def main():
         print("usage: python3 bench/compare.py <old cluau> <new cluau>", file=sys.stderr)
         return 2
     old, new = sys.argv[1], sys.argv[2]
-    print(f"{'case':16} {'old':>10} {'new':>10} {'change':>8}")
+    print(f"{'case':16} {'old':>10} {'new':>10} {'change':>8}", flush=True)
     for name, args, runs in CASES:
-        a = median([old] + args, runs)
-        b = median([new] + args, runs)
-        print(f"{name:16} {a * 1000:9.1f}ms {b * 1000:9.1f}ms {100 * (b - a) / a:+7.0f}%")
+        try:
+            a, b = medians([old] + args, [new] + args, runs)
+        except (OSError, RuntimeError) as error:
+            print(f"compare.py: {name}: {error}", file=sys.stderr)
+            return 1
+        print(f"{name:16} {a * 1000:9.1f}ms {b * 1000:9.1f}ms {100 * (b - a) / a:+7.0f}%", flush=True)
     return 0
 
 
