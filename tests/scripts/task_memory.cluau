@@ -1,0 +1,18 @@
+// Finished tasks are not kept: a server that spawns a task for each
+// connection keeps a flat heap however many it has served.
+const task = require("@std/task")
+
+const Round = function() {
+	for (i = 1, 5000) {
+		task.join(task.spawn(function(): number {
+			return i
+		}))
+	}
+}
+Round()
+const before = gcinfo()
+for (round = 1, 4) {
+	Round()
+}
+// 20000 more tasks: about 2 KiB each if they were kept (40 MiB).
+print("heap grew by less than 8 MiB", gcinfo() - before < 8192)

@@ -6,10 +6,12 @@
 const fs = require("@std/fs")
 const path = require("@std/path")
 const process = require("@std/process")
-const time = require("@std/time")
 
 const cluau = process.executable
-const work = path.join(fs.tempDir(), `cluau-packages-{process.platform}-{math.floor(time.now() * 1000)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const work = fs.tempFile("cluau-packages")
+fs.remove(work)
 const app = path.join(work, "app")
 fs.mkdir(app)
 

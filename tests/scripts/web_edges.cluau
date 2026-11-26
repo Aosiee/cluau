@@ -13,12 +13,15 @@ const path = require("@std/path")
 const time = require("@std/time")
 const process = require("@std/process")
 
-const site = path.join(fs.tempDir(), `cluau-web-edges-{math.floor(time.now() * 1000)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const site = fs.tempFile("cluau-web-edges")
+fs.remove(site)
 fs.mkdir(path.join(site, ".git"))
 fs.write(path.join(site, "page.txt"), "a page")
 fs.write(path.join(site, ".env"), "SECRET=1")
 fs.write(path.join(site, ".git", "config"), "[core]")
-const outside = path.join(fs.tempDir(), `cluau-web-edges-outside-{math.floor(time.now() * 1000)}.txt`)
+const outside = fs.tempFile("cluau-web-edges-outside") // a name of its own: two runs at once do not share it
 fs.write(outside, "outside the site")
 
 let calls = 0

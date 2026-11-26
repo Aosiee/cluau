@@ -78,7 +78,7 @@ for (_, attempt in attempts) {
 }
 
 // A file: written, closed, opened again read-only.
-const file = path.join(fs.tempDir(), `cluau-sqlite-test-{math.floor(os.clock() * 1e6)}.db`)
+const file = fs.tempFile("cluau-sqlite-test") // a name of its own: two runs at once do not share it
 const disk = sqlite.open(file)
 disk:exec("CREATE TABLE notes (text TEXT)")
 disk:run("INSERT INTO notes VALUES (?)", "kept")

@@ -22,6 +22,8 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -969,6 +971,29 @@ static int Main(int argc, char** argv)
 #endif
 }
 
+// Output still in stdout's buffer is written when the process ends, and a
+// failure there (a full disk, a closed pipe on Windows) would otherwise go
+// unseen: it is reported, and the exit status says so. A failure on stderr
+// cannot be reported anywhere, but it fails the exit status too.
+static int Finish(int code)
+{
+	errno = 0;
+	std::cout.flush();
+	const bool outFailed = std::fflush(stdout) != 0 || std::ferror(stdout) || std::cout.bad();
+	const int err = errno;
+	if (outFailed)
+	{
+		// The reason is known when this flush is the write that failed; an
+		// earlier one (during the run) has left only the stream's error flag.
+		std::string reason = err ? std::strerror(err) : "";
+		if (!reason.empty())
+			reason = ": " + std::string(1, (char)std::tolower((unsigned char)reason[0])) + reason.substr(1);
+		std::fprintf(stderr, "cluau: cannot write standard output%s\n", reason.c_str());
+	}
+	const bool errFailed = std::fflush(stderr) != 0 || std::ferror(stderr);
+	return code == 0 && (outFailed || errFailed) ? 1 : code;
+}
+
 #if defined(_WIN32) && defined(_MSC_VER)
 // Windows hands a narrow main its arguments in the ANSI code page (a
 // character outside it arrives as '?'); the wide ones, as UTF-8, are what
@@ -982,8 +1007,8 @@ int wmain(int argc, wchar_t** wide)
 	for (std::string& arg : args)
 		argv.push_back(arg.data());
 	argv.push_back(nullptr);
-	return Main(argc, argv.data());
+	return Finish(Main(argc, argv.data()));
 }
 #else
-int main(int argc, char** argv) { return Main(argc, argv); }
+int main(int argc, char** argv) { return Finish(Main(argc, argv)); }
 #endif

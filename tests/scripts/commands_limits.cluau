@@ -59,8 +59,11 @@ if (process.platform == "windows") {
 	print("no zombies", true)
 	print("files kept from children", true)
 } else {
-	const dir = fs.tempDir()
-	const script = path.join(dir, `cluau-limits-{math.floor(time.now() * 1000)}.cluau`)
+	// A name of its own (two runs at once do not share it), with the
+	// extension a script has.
+	const unique = fs.tempFile("cluau-limits")
+	const script = `{unique}.cluau`
+	fs.rename(unique, script)
 
 	// After a program has run, a write to a closed pipe still ends the script
 	// (`cluau x | head -1` stops).

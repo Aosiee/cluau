@@ -1,0 +1,14 @@
+end of a script	1	true
+a long output	1	true
+process.exit()	1	true
+process.exit(3)	3	true
+an uncaught error	1	true
+a task's end	1	true
+standard input	1	true
+the REPL	1	true
+--version	1	true
+--help	1	true
+fmt	1	true
+written	0	x
+
+exit: 0

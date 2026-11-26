@@ -13,7 +13,10 @@ const test = require("@std/test")
 const io = require("@std/io")
 
 // fs.glob, in a scratch directory of its own.
-const dir = path.join(fs.tempDir(), `cluau-stdlib-{process.platform}-{math.floor(time.now() * 1000)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const dir = fs.tempFile("cluau-stdlib")
+fs.remove(dir)
 fs.mkdir(path.join(dir, "src", "deep"))
 for (_, name in { "a.txt", "b.md", ".hidden.txt", "src/c.txt", "src/deep/d.txt", "src/deep/e.log" }) {
 	fs.write(path.join(dir, name), name)

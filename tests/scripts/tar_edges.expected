@@ -1,4 +1,4 @@
-false	tar_edges.cluau:75: archive:extract: "..\000/..\000/escaped.txt" holds a NUL byte: nothing more extracted
+false	tar_edges.cluau:77: archive:extract: "..\000/..\000/escaped.txt" holds a NUL byte: nothing more extracted
 escaped	false	false
 pax size	"big.txt"	5	1600000000
 pax size	"next.txt"	3	1600000000
@@ -11,18 +11,18 @@ old gnu	"./a.txt"	0	1600000000
 prefix	"some/dir/file.txt"	0	1600000000
 gnu sparse	"sparse.bin"	5242880	1600000000
 gnu sparse	"after.txt"	2	1600000000
-false	tar_edges.cluau:101: archive:read: 'sparse.bin' is a sparse file, which @std/tar does not read
-false	tar_edges.cluau:104: archive:extract: 'sparse.bin' is a sparse file, which @std/tar does not extract: nothing more extracted
+false	tar_edges.cluau:103: archive:read: 'sparse.bin' is a sparse file, which @std/tar does not read
+false	tar_edges.cluau:106: archive:extract: 'sparse.bin' is a sparse file, which @std/tar does not extract: nothing more extracted
 pax sparse	"./sparse.bin"	5242880	1600000000
 negative	"old.txt"	0	-86400
 positive	"new.txt"	0	256
 signed sum	"é.txt"	0	1600000000
 bad sum	error	tar: the data is not a tar archive (a header's checksum does not match at byte 0)
-mode	-1	false	tar_edges.cluau:123: writer: the mode -1 is not a whole number from 0 to 0o7777777 (0644 is 420)
-mode	2097152	false	tar_edges.cluau:123: writer: the mode 2097152 is not a whole number from 0 to 0o7777777 (0644 is 420)
-mode	nan	false	tar_edges.cluau:123: writer: the mode nan is not a whole number from 0 to 0o7777777 (0644 is 420)
-mode	1.5	false	tar_edges.cluau:123: writer: the mode 1.5 is not a whole number from 0 to 0o7777777 (0644 is 420)
+mode	-1	false	tar_edges.cluau:125: writer: the mode -1 is not a whole number from 0 to 0o7777777 (0644 is 420)
+mode	2097152	false	tar_edges.cluau:125: writer: the mode 2097152 is not a whole number from 0 to 0o7777777 (0644 is 420)
+mode	nan	false	tar_edges.cluau:125: writer: the mode nan is not a whole number from 0 to 0o7777777 (0644 is 420)
+mode	1.5	false	tar_edges.cluau:125: writer: the mode 1.5 is not a whole number from 0 to 0o7777777 (0644 is 420)
 mode kept	f	2097151
 mode kept	g	0
-false	tar_edges.cluau:131: writer: the name "a\000b" holds a NUL byte
+false	tar_edges.cluau:133: writer: the name "a\000b" holds a NUL byte
 exit: 0

@@ -1166,9 +1166,18 @@ namespace cluau::runtime::detail {
 			const double status = luaL_optnumber(L, 1, 0);
 			if (!(status >= 0 && status <= 255 && status == std::floor(status)))
 				luaL_argerror(L, 1, "an exit status is a whole number from 0 to 255");
-			const int code = (int)status;
-			std::fflush(stdout);
-			std::fflush(stderr);
+			int code = (int)status;
+			// Output the exit would flush is flushed here, so a failure to
+			// write it is reported and fails the exit status, not lost.
+			errno = 0;
+			if (std::fflush(stdout) != 0 || std::ferror(stdout))
+			{
+				const int err = errno;
+				std::fprintf(stderr, "cluau: cannot write standard output%s%s\n", err ? ": " : "", err ? ErrnoMessage(err).c_str() : "");
+				code = code ? code : 1;
+			}
+			if ((std::fflush(stderr) != 0 || std::ferror(stderr)) && code == 0)
+				code = 1;
 			if (g_ExitHook)
 				g_ExitHook(code);
 			std::exit(code);

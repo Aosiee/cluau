@@ -1,0 +1,104 @@
+// A task cancelled while it waits on a socket takes nothing from it: what
+// its read got goes back for the next read, and a connection its accept
+// got is the next accept's.
+const task = require("@std/task")
+const net = require("@std/net")
+const jobs = require("@std/_jobs")
+
+// Until a job finishes, without letting the tasks run (so the one waiting
+// on it is not resumed before it is cancelled).
+function UntilJobDone(since: number) {
+	const start = os.clock()
+	while (jobs.completed() == since and os.clock() - start < 10) {
+	}
+}
+
+const server = net.listen("127.0.0.1", 0)
+const client = net.connect("127.0.0.1", server.port)
+const conn = server:accept()
+// A read that loses its data fails here instead of waiting for ever.
+conn:setTimeout(5)
+
+// Cancelled while the read waits: the line it then gets goes back.
+let t = task.spawn(function() {
+	conn:readLine()
+})
+task.wait(0.05)
+task.cancel(t)
+client:write("first\nsecond\n")
+print("after a read cancelled while it waits:", conn:readLine(), conn:readLine())
+
+// Cancelled after the read got its line, before the task took it (the
+// script's code lets no task run meanwhile): the line goes back with its
+// line break.
+client:write("one\r\ntwo\n")
+let since = jobs.completed()
+t = task.spawn(function() {
+	conn:readLine()
+})
+UntilJobDone(since)
+task.cancel(t)
+print("after a read cancelled once it was done:", repr(conn:read(100)))
+
+// The same for read and readAll.
+client:write("abcdef")
+since = jobs.completed()
+t = task.spawn(function() {
+	conn:read(3)
+})
+UntilJobDone(since)
+task.cancel(t)
+print("after a cancelled read:", conn:read(100))
+client:write("the rest")
+client:close()
+since = jobs.completed()
+t = task.spawn(function() {
+	conn:readAll()
+})
+UntilJobDone(since)
+task.cancel(t)
+print("after a cancelled readAll:", conn:readAll())
+conn:close()
+
+// Cancelled while the accept waits: the next accept gets the client.
+t = task.spawn(function() {
+	server:accept()
+})
+task.wait(0.05)
+task.cancel(t)
+const accepting = task.spawn(function(): any {
+	const c = server:accept({ timeout = 5 })
+	return c:readLine()
+})
+const second = net.connect("127.0.0.1", server.port)
+second:write("hello\n")
+print("after an accept cancelled while it waits:", pcall(task.join, accepting))
+second:close()
+
+// Cancelled after the accept got its client, before the task took it: the
+// next accept gets it at once.
+const waiting = net.connect("127.0.0.1", server.port)
+waiting:write("queued\n")
+since = jobs.completed()
+t = task.spawn(function() {
+	server:accept()
+})
+UntilJobDone(since)
+task.cancel(t)
+const queued = server:accept({ timeout = 5 })
+print("after an accept cancelled once it was done:", queued:readLine())
+queued:close()
+waiting:close()
+
+// A connection queued for an accept that never comes is closed with the
+// server: its client sees the end.
+const third = net.connect("127.0.0.1", server.port)
+third:setTimeout(5)
+since = jobs.completed()
+t = task.spawn(function() {
+	server:accept()
+})
+UntilJobDone(since)
+task.cancel(t)
+server:close()
+print("a queued connection closes with the server:", repr(third:readAll()))
