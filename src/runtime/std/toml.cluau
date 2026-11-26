@@ -1,0 +1,1192 @@
+// @std/toml: TOML 1.0.0 documents (https://toml.io/en/v1.0.0) read into
+// tables and written back.
+//
+//   const toml = require("@std/toml")
+//   const config = toml.decode('name = "demo"\n[server]\nport = 8080\n')
+//   print(config.name, (config.server :: { port: number }).port)   // demo 8080
+//   print(toml.encode({ name = "demo", server = { port = 8080 } }))
+//
+// Integers and floats are both Luau numbers. An integer outside -2^53 to
+// 2^53 is an error, since a number holds integers exactly only that far.
+// Dates and times are DateTime tables (see below), frozen, that write
+// themselves as TOML text.
+
+// A date, a time or both, as TOML has them. The fields a kind has are set:
+// a localDate has year, month and day; a localTime hour, minute and second;
+// a localDateTime all six; an offsetDateTime also offset and time.
+export type DateTime = {
+	kind: "offsetDateTime" | "localDateTime" | "localDate" | "localTime",
+	year: number?,
+	month: number?,
+	day: number?,
+	hour: number?,
+	minute: number?,
+	second: number?, // with its fraction, to the nanosecond
+	offset: number?, // seconds east of UTC
+	time: number?, // the moment as @std/time has times: seconds since 1970-01-01 UTC
+}
+export type Options = { multiline: boolean? }
+
+type Table = { [string]: unknown }
+// How a table of the document came to be, which decides what may still add
+// to it: "implicit" (named only on a header's path, as a is by [a.b]),
+// "header" (by [name], or an element of [[name]]), "dotted" (by a dotted
+// key), "tables" (the array [[name]] makes). An inline table or an array
+// written as a value has none: nothing adds to it.
+type Made = "implicit" | "header" | "dotted" | "tables"
+type Failure = { message: string, where: string }
+
+const kQuote = string.byte("\"")
+const kApostrophe = string.byte("'")
+const kBackslash = string.byte("\\")
+const kNewline = string.byte("\n")
+const kHash = string.byte("#")
+const kEquals = string.byte("=")
+const kDot = string.byte(".")
+const kComma = string.byte(",")
+const kOpen = string.byte("[")
+const kClose = string.byte("]")
+const kBrace = string.byte("{")
+const kBraceClose = string.byte("}")
+const kDepth = 1000
+const kExact = 2 ^ 53
+
+// What an empty array decoded (or a table toml.array marks) carries, so
+// that it encodes as [] rather than as a table.
+const kArray = table.freeze({})
+
+const kEscapes: { [string]: string } = {
+	b = "\b",
+	t = "\t",
+	n = "\n",
+	f = "\f",
+	r = "\r",
+	["\""] = "\"",
+	["\\"] = "\\",
+}
+const kNamedEscapes: { [string]: string } = {
+	["\b"] = "\\b",
+	["\t"] = "\\t",
+	["\n"] = "\\n",
+	["\f"] = "\\f",
+	["\r"] = "\\r",
+	["\""] = "\\\"",
+	["\\"] = "\\\\",
+}
+
+// ---- names and text ----------------------------------------------------
+
+function Escaped(c: string): string {
+	return kNamedEscapes[c] or string.format("\\u%04X", string.byte(c))
+}
+
+// `text` as a basic string: quotes, backslashes and control characters
+// escaped.
+function QuoteText(text: string): string {
+	const escaped = string.gsub(text, "[\0-\31\127\"\\]", Escaped)
+	return "\"" .. escaped .. "\""
+}
+
+// A key as written: bare when it can be, quoted otherwise.
+function KeyText(key: string): string {
+	return if (string.find(key, "^[A-Za-z0-9_%-]+$") != nil) key else QuoteText(key)
+}
+
+// The first `count` parts of a dotted key, as written.
+function Name(parts: { string }, count: number?): string {
+	const shown: { string } = {}
+	for (i = 1, count or #parts) {
+		table.insert(shown, KeyText(parts[i]))
+	}
+	return table.concat(shown, ".")
+}
+
+// ---- dates and times ---------------------------------------------------
+
+function DaysIn(year: number, month: number): number {
+	if (month == 2) {
+		const leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+		return if (leap) 29 else 28
+	}
+	return if (month == 4 || month == 6 || month == 9 || month == 11) 30 else 31
+}
+
+// Days from 1970-01-01 to the date (proleptic Gregorian).
+function DaysFromCivil(year: number, month: number, day: number): number {
+	const y = if (month <= 2) year - 1 else year
+	const era = math.floor(y / 400)
+	const yearOfEra = y - era * 400
+	const dayOfYear = math.floor((153 * ((month + 9) % 12) + 2) / 5) + day - 1
+	const dayOfEra = yearOfEra * 365 + math.floor(yearOfEra / 4) - math.floor(yearOfEra / 100) + dayOfYear
+	return era * 146097 + dayOfEra - 719468
+}
+
+function DateText(value: DateTime): string {
+	return string.format("%04d-%02d-%02d", value.year or 0, value.month or 0, value.day or 0)
+}
+
+function TimeText(value: DateTime): string {
+	const second = value.second or 0
+	const whole = math.floor(second)
+	let fraction = ""
+	if (second != whole) {
+		// Nine digits at most (what the decoder keeps), trailing zeros left out.
+		fraction = string.format("%.9f", second - whole)
+		fraction = if (string.sub(fraction, 1, 1) == "1") ".999999999" else string.sub(fraction, 2)
+		fraction = string.gsub(fraction, "0+$", "")
+	}
+	return string.format("%02d:%02d:%02d", value.hour or 0, value.minute or 0, whole) .. fraction
+}
+
+function DateTimeText(value: DateTime): string {
+	switch (value.kind) {
+		case "localDate":
+			return DateText(value)
+		case "localTime":
+			return TimeText(value)
+		case "localDateTime":
+			return DateText(value) .. "T" .. TimeText(value)
+		default:
+			const offset = value.offset or 0
+			if (offset == 0) {
+				return DateText(value) .. "T" .. TimeText(value) .. "Z"
+			}
+			const minutes = math.abs(offset) ~/ 60
+			const sign = if (offset < 0) "-" else "+"
+			return DateText(value) .. "T" .. TimeText(value) .. string.format("%s%02d:%02d", sign, minutes ~/ 60, minutes % 60)
+	}
+}
+
+const kDateTime = table.freeze({
+	__tostring = DateTimeText,
+	__eq = function(a: DateTime, b: DateTime): boolean {
+		return DateTimeText(a) == DateTimeText(b)
+	},
+})
+
+function MakeDateTime(fields: DateTime): DateTime {
+	if (fields.kind == "offsetDateTime") {
+		const days = DaysFromCivil(fields.year or 0, fields.month or 0, fields.day or 0)
+		const seconds = (fields.hour or 0) * 3600 + (fields.minute or 0) * 60 + (fields.second or 0)
+		fields.time = days * 86400 + seconds - (fields.offset or 0)
+	}
+	const value: unknown = setmetatable(fields, kDateTime)
+	return table.freeze(value :: DateTime)
+}
+
+function IsDateTime(value: unknown): boolean {
+	return type(value) == "table" && getmetatable(value) == kDateTime
+}
+
+// ---- decoding ----------------------------------------------------------
+
+// The document being read, where in it, and how its tables came to be.
+let src = ""
+let pos = 1
+let len = 0
+let made: { [unknown]: Made } = {}
+let depth = 0
+
+// Line and column of a byte of the document.
+function Where(at: number): string {
+	const before = string.sub(src, 1, at - 1)
+	const _, breaks = string.gsub(before, "\n", "")
+	const lineStart = (string.find(before, "\n[^\n]*$") or 0) + 1
+	const column = (utf8.len(string.sub(before, lineStart)) or (at - lineStart)) + 1
+	return `line {breaks + 1}, column {column}`
+}
+
+function Fail(message: string, at: number?): never {
+	const failure: Failure = { message = message, where = Where(at or pos) }
+	error(failure, 0)
+}
+
+// What is at `pos`, for a message: "'x'", "the end of the line", ...
+function Found(): string {
+	if (pos > len) {
+		return "the end of the document"
+	}
+	const c = string.byte(src, pos)
+	if (c == kNewline) {
+		return "the end of the line"
+	}
+	if (c < 32 || c == 127) {
+		return string.format("the control character U+%04X", c)
+	}
+	return `'{string.match(src, "^[\0-\127\194-\244][\128-\191]*", pos) or string.sub(src, pos, pos)}'`
+}
+
+// A piece of the document as a message shows it.
+function Shown(text: string): string {
+	const cut = if (#text > 40) utf8.offset(text, 38) else nil
+	return if (cut != nil && cut <= #text) `'{string.sub(text, 1, cut - 1)}...'` else `'{text}'`
+}
+
+function Describe(value: unknown): string {
+	if (type(value) == "table") {
+		switch (made[value]) {
+			case "header": return "a table with its own [header]"
+			case "dotted": return "a table made by dotted keys"
+			case "tables": return "an array of tables"
+			case "implicit": return "a table"
+			default:
+				if (IsDateTime(value)) {
+					return "a date or time"
+				}
+				const list = value :: { unknown }
+				if (list[1] != nil || getmetatable(value) == kArray) {
+					return "an array"
+				}
+				return "an inline table"
+		}
+	}
+	return `a {type(value)}`
+}
+
+function SkipSpace() {
+	const _, last = string.find(src, "^[ \t]*", pos)
+	pos = (last :: number) + 1
+}
+
+// A comment, to the end of its line (which it leaves to be read).
+function Comment() {
+	const _, last = string.find(src, "^#[^\0-\8\10-\31\127]*", pos)
+	pos = (last :: number) + 1
+	if (pos <= len && string.byte(src, pos) != kNewline) {
+		Fail(`{Found()} in a comment`)
+	}
+}
+
+// Spaces, line breaks and comments (between an array's values).
+function Blank() {
+	while (true) {
+		SkipSpace()
+		const c = string.byte(src, pos)
+		if (c == kNewline) {
+			pos += 1
+		} else if (c == kHash) {
+			Comment()
+		} else {
+			return
+		}
+	}
+}
+
+// The end of a line holding a key = value or a [header]: spaces and a
+// comment may follow it.
+function LineEnd() {
+	SkipSpace()
+	if (pos <= len && string.byte(src, pos) == kHash) {
+		Comment()
+	}
+	if (pos > len) {
+		return
+	}
+	if (string.byte(src, pos) != kNewline) {
+		Fail(`expected the end of the line, found {Found()}`)
+	}
+	pos += 1
+}
+
+function Deeper(at: number) {
+	depth += 1
+	if (depth > kDepth) {
+		Fail(`arrays and inline tables nest more than {kDepth} deep`, at)
+	}
+}
+
+// A backslash escape in a basic string; `pos` is at the backslash.
+function Escape(): string {
+	const letter = string.sub(src, pos + 1, pos + 1)
+	const named = kEscapes[letter]
+	if (named != nil) {
+		pos += 2
+		return named
+	}
+	if (letter == "u" || letter == "U") {
+		const count = if (letter == "u") 4 else 8
+		const hex = string.sub(src, pos + 2, pos + 1 + count)
+		if (#hex != count || string.find(hex, "^%x+$") == nil) {
+			Fail(`\\{letter} takes {count} hexadecimal digits`)
+		}
+		const code = tonumber(hex, 16) :: number
+		if (code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+			Fail(`\\{letter}{hex} is not a Unicode character`)
+		}
+		pos += 2 + count
+		return utf8.char(code)
+	}
+	pos += 1
+	return Fail(`\\ before {Found()} is not an escape (TOML has \\b \\t \\n \\f \\r \\" \\\\ \\uXXXX \\UXXXXXXXX)`, pos - 1)
+}
+
+// "...": on one line, with escapes.
+function BasicString(): string {
+	const at = pos
+	pos += 1
+	const out: { string } = {}
+	while (true) {
+		const first, last = string.find(src, "^[^\"\\\0-\8\10-\31\127]+", pos)
+		if (first != nil && last != nil) {
+			table.insert(out, string.sub(src, first, last))
+			pos = last + 1
+		}
+		const c = string.byte(src, pos)
+		if (c == kQuote) {
+			pos += 1
+			return table.concat(out)
+		}
+		if (c != kBackslash) {
+			break
+		}
+		table.insert(out, Escape())
+	}
+	if (pos > len || string.byte(src, pos) == kNewline) {
+		return Fail("a string has no closing quote", at)
+	}
+	return Fail(`{Found()} in a string (write it as an escape)`)
+}
+
+// """...""": over lines, with escapes; a line break straight after the
+// opening quotes is left out, and a backslash ending a line takes the line
+// break and the spaces after it.
+function MultilineBasicString(): string {
+	const at = pos
+	pos += 3
+	if (string.byte(src, pos) == kNewline) {
+		pos += 1
+	}
+	const out: { string } = {}
+	while (true) {
+		const first, last = string.find(src, "^[^\"\\\0-\8\11-\31\127]+", pos)
+		if (first != nil && last != nil) {
+			table.insert(out, string.sub(src, first, last))
+			pos = last + 1
+		}
+		const c = string.byte(src, pos)
+		if (c == kQuote) {
+			if (string.sub(src, pos, pos + 2) == "\"\"\"") {
+				pos += 3
+				// One or two quotes more are the string's last characters.
+				for (_ = 1, 2) {
+					if (string.byte(src, pos) != kQuote) {
+						break
+					}
+					table.insert(out, "\"")
+					pos += 1
+				}
+				return table.concat(out)
+			}
+			table.insert(out, "\"")
+			pos += 1
+		} else if (c == kBackslash) {
+			const _, lineEnd = string.find(src, "^\\[ \t]*\n", pos)
+			if (lineEnd != nil) {
+				const _, last = string.find(src, "^[ \t\n]*", lineEnd + 1)
+				pos = (last :: number) + 1
+			} else {
+				table.insert(out, Escape())
+			}
+		} else {
+			break
+		}
+	}
+	if (pos > len) {
+		return Fail("a multi-line string has no closing \"\"\"", at)
+	}
+	return Fail(`{Found()} in a string (write it as an escape)`)
+}
+
+// '...': on one line, as written.
+function LiteralString(): string {
+	const at = pos
+	const _, last = string.find(src, "^'[^'\0-\8\10-\31\127]*", pos)
+	pos = (last :: number) + 1
+	const c = string.byte(src, pos)
+	if (c == kApostrophe) {
+		pos += 1
+		return string.sub(src, at + 1, pos - 2)
+	}
+	if (pos > len || c == kNewline) {
+		return Fail("a string has no closing quote", at)
+	}
+	return Fail(`{Found()} in a string`)
+}
+
+// '''...''': over lines, as written (but for a line break straight after
+// the opening quotes).
+function MultilineLiteralString(): string {
+	const at = pos
+	pos += 3
+	if (string.byte(src, pos) == kNewline) {
+		pos += 1
+	}
+	const start = pos
+	while (true) {
+		const _, last = string.find(src, "^[^'\0-\8\11-\31\127]*", pos)
+		pos = (last :: number) + 1
+		const c = string.byte(src, pos)
+		if (c == kApostrophe) {
+			if (string.sub(src, pos, pos + 2) == "'''") {
+				let text = string.sub(src, start, pos - 1)
+				pos += 3
+				for (_ = 1, 2) {
+					if (string.byte(src, pos) != kApostrophe) {
+						break
+					}
+					text ..= "'"
+					pos += 1
+				}
+				return text
+			}
+			pos += 1
+		} else {
+			break
+		}
+	}
+	if (pos > len) {
+		return Fail("a multi-line string has no closing '''", at)
+	}
+	return Fail(`{Found()} in a string`)
+}
+
+// A key: bare, quoted or dotted (parts joined by dots, spaces around them
+// allowed).
+function Key(): { string } {
+	const parts: { string } = {}
+	while (true) {
+		SkipSpace()
+		const c = string.byte(src, pos)
+		if (c == kQuote) {
+			table.insert(parts, BasicString())
+		} else if (c == kApostrophe) {
+			table.insert(parts, LiteralString())
+		} else {
+			const first, last = string.find(src, "^[A-Za-z0-9_%-]+", pos)
+			if (first == nil || last == nil) {
+				return Fail(`expected a key, found {Found()}`)
+			}
+			table.insert(parts, string.sub(src, first, last))
+			pos = last + 1
+		}
+		SkipSpace()
+		if (string.byte(src, pos) != kDot) {
+			break
+		}
+		pos += 1
+	}
+	return parts
+}
+
+// Whether `text` is digits of `set`, an underscore only between two.
+function Digits(text: string, set: string): boolean {
+	return string.find(text, `^[{set}_]+$`) != nil && string.find(text, "^_") == nil && string.find(text, "_$") == nil
+		&& string.find(text, "__", 1, true) == nil
+}
+
+// An integer in base 16, 8 or 2, digits checked.
+function Based(digits: string, base: number, word: string, at: number): number {
+	let value = 0
+	for (i = 1, #digits) {
+		const digit = tonumber(string.sub(digits, i, i), 16)
+		if (digit != nil) {
+			if (value > (kExact - digit) / base) {
+				Fail(`{Shown(word)} is past 2^53, the largest integer a number holds exactly`, at)
+			}
+			value = value * base + digit
+		}
+	}
+	return value
+}
+
+// A number token as TOML reads it, or nil when it is not one.
+function ReadNumber(word: string, at: number): number? {
+	const sign = string.match(word, "^[%+%-]") or ""
+	const body = string.sub(word, #sign + 1)
+	if (body == "inf") {
+		return if (sign == "-") -math.huge else math.huge
+	}
+	if (body == "nan") {
+		return 0 / 0
+	}
+	const prefix = string.sub(body, 1, 2)
+	if (prefix == "0x" || prefix == "0o" || prefix == "0b") {
+		const set = if (prefix == "0x") "%x" else if (prefix == "0o") "0-7" else "01"
+		const digits = string.sub(body, 3)
+		if (!Digits(digits, set)) {
+			return nil
+		}
+		if (sign != "") {
+			Fail(`{Shown(word)}: a hexadecimal, octal or binary integer has no sign`, at)
+		}
+		return Based(string.gsub(digits, "_", ""), if (prefix == "0x") 16 else if (prefix == "0o") 8 else 2, word, at)
+	}
+	const whole = string.match(body, "^[%d_]+")
+	if (whole == nil || !Digits(whole, "%d")) {
+		return nil
+	}
+	const rest = string.sub(body, #whole + 1)
+	if (rest != "") {
+		// A float: a fraction, an exponent or both.
+		let exponent = rest
+		if (string.sub(rest, 1, 1) == ".") {
+			const fraction = string.match(rest, "^%.([%d_]+)")
+			if (fraction == nil || !Digits(fraction, "%d")) {
+				return nil
+			}
+			exponent = string.sub(rest, #fraction + 2)
+		}
+		if (exponent != "") {
+			const power = string.match(exponent, "^[eE][%+%-]?([%d_]+)$")
+			if (power == nil || !Digits(power, "%d")) {
+				return nil
+			}
+		}
+	}
+	if (#whole > 1 && string.sub(whole, 1, 1) == "0") {
+		Fail(`{Shown(word)}: a decimal number has no leading zeros`, at)
+	}
+	const text = string.gsub(word, "_", "")
+	if (rest == "") {
+		const digits = string.gsub(whole, "_", "")
+		if (#digits > 16 || (#digits == 16 && digits > "9007199254740992")) {
+			Fail(`{Shown(word)} is past 2^53, the largest integer a number holds exactly`, at)
+		}
+		// + 0 makes -0 the integer 0.
+		return (tonumber(text) :: number) + 0
+	}
+	return tonumber(text)
+}
+
+function Number(): number {
+	const at = pos
+	const first, last = string.find(src, "^[%w_%.%+%-]+", pos)
+	if (first == nil || last == nil) {
+		return Fail(`expected a value, found {Found()}`)
+	}
+	const word = string.sub(src, first, last)
+	pos = last + 1
+	const value = ReadNumber(word, at)
+	if (value == nil) {
+		return Fail(`{Shown(word)} is not a value (a string, number, true, false, date or time, [array] or {"{"}inline table{"}"})`, at)
+	}
+	return value
+}
+
+// hh:mm:ss with an optional fraction, into `fields`.
+function ReadTime(fields: DateTime, at: number) {
+	const hour, minute, second = string.match(src, "^(%d%d):(%d%d):(%d%d)", pos)
+	if (hour == nil || minute == nil || second == nil) {
+		Fail("a time is written hh:mm:ss (seconds included)")
+	}
+	pos += 8
+	fields.hour = tonumber(hour :: string)
+	fields.minute = tonumber(minute :: string)
+	fields.second = tonumber(second :: string)
+	const fraction = string.match(src, "^%.(%d+)", pos)
+	if (fraction != nil) {
+		pos += 1 + #fraction
+		// Past nanoseconds, the digits are cut off (TOML truncates).
+		fields.second = (fields.second or 0) + (tonumber("0." .. string.sub(fraction, 1, 9)) :: number)
+	}
+	if ((fields.hour or 0) > 23 || (fields.minute or 0) > 59 || (fields.second or 0) >= 60) {
+		Fail(`{Shown(string.sub(src, at, pos - 1))} is not a valid time`, at)
+	}
+}
+
+function DateOrTime(): DateTime {
+	const at = pos
+	const fields: DateTime = { kind = "localTime" }
+	const year, month, day = string.match(src, "^(%d%d%d%d)%-(%d%d)%-(%d%d)", pos)
+	if (year == nil || month == nil || day == nil) {
+		ReadTime(fields, at)
+		return MakeDateTime(fields)
+	}
+	pos += 10
+	const y = tonumber(year) :: number
+	const m = tonumber(month) :: number
+	const d = tonumber(day) :: number
+	if (m < 1 || m > 12 || d < 1 || d > DaysIn(y, m)) {
+		Fail(`{Shown(string.sub(src, at, pos - 1))} is not a valid date`, at)
+	}
+	fields.kind = "localDate"
+	fields.year = y
+	fields.month = m
+	fields.day = d
+	const delimiter = string.sub(src, pos, pos)
+	if (delimiter == "T" || delimiter == "t" || (delimiter == " " && string.find(src, "^%d", pos + 1) != nil)) {
+		pos += 1
+		ReadTime(fields, at)
+		fields.kind = "localDateTime"
+		const zone = string.sub(src, pos, pos)
+		if (zone == "Z" || zone == "z") {
+			pos += 1
+			fields.kind = "offsetDateTime"
+			fields.offset = 0
+		} else if (zone == "+" || zone == "-") {
+			const hours, minutes = string.match(src, "^[%+%-](%d%d):(%d%d)", pos)
+			if (hours == nil || minutes == nil || (tonumber(hours) :: number) > 23 || (tonumber(minutes) :: number) > 59) {
+				Fail("an offset is written +hh:mm or -hh:mm (hh under 24)")
+			}
+			pos += 6
+			const offset = (tonumber(hours) :: number) * 3600 + (tonumber(minutes) :: number) * 60
+			fields.kind = "offsetDateTime"
+			fields.offset = if (zone == "-") -offset else offset
+		}
+	}
+	return MakeDateTime(fields)
+}
+
+// `value` at `key` (dotted, from `target`): the tables on its path are made
+// as needed, and nothing is defined twice.
+function Assign(target: Table, section: { string }, key: { string }, value: unknown, at: number) {
+	const full = table.clone(section)
+	table.move(key, 1, #key, #full + 1, full)
+	let t = target
+	for (i = 1, #key - 1) {
+		const child = t[key[i]]
+		if (child == nil) {
+			const fresh: Table = {}
+			made[fresh] = "dotted"
+			t[key[i]] = fresh
+			t = fresh
+		} else {
+			const how = if (type(child) == "table") made[child] else nil
+			if (how != "implicit" && how != "dotted") {
+				Fail(`cannot define {Name(full)} with a dotted key: {Name(full, #section + i)} is {Describe(child)}`, at)
+			}
+			made[child] = "dotted"
+			t = child :: Table
+		}
+	}
+	const last = key[#key]
+	if (t[last] != nil) {
+		Fail(`{Name(full)} is defined twice`, at)
+	}
+	t[last] = value
+}
+
+function Array(): { unknown } {
+	const at = pos
+	pos += 1
+	Deeper(at)
+	const list: { unknown } = {}
+	while (true) {
+		Blank()
+		if (string.byte(src, pos) == kClose) {
+			pos += 1
+			break
+		}
+		table.insert(list, Value())
+		Blank()
+		const c = string.byte(src, pos)
+		if (c == kComma) {
+			pos += 1
+		} else if (c == kClose) {
+			pos += 1
+			break
+		} else {
+			Fail(`expected ',' or ']' in an array, found {Found()}`)
+		}
+	}
+	depth -= 1
+	if (#list == 0) {
+		setmetatable(list, kArray)
+	}
+	return list
+}
+
+function InlineTable(): Table {
+	const at = pos
+	pos += 1
+	Deeper(at)
+	const t: Table = {}
+	SkipSpace()
+	if (string.byte(src, pos) == kBraceClose) {
+		pos += 1
+		depth -= 1
+		return t
+	}
+	while (true) {
+		SkipSpace()
+		if (string.byte(src, pos) == kNewline) {
+			Fail("an inline table is written on one line")
+		}
+		const keyAt = pos
+		const key = Key()
+		if (string.byte(src, pos) != kEquals) {
+			Fail(`expected '=' after the key, found {Found()}`)
+		}
+		pos += 1
+		SkipSpace()
+		Assign(t, {}, key, Value(), keyAt)
+		SkipSpace()
+		const c = string.byte(src, pos)
+		if (c == kBraceClose) {
+			pos += 1
+			break
+		}
+		if (c != kComma) {
+			Fail(`expected ',' or '{"}"}' in an inline table, found {Found()}`)
+		}
+		pos += 1
+		SkipSpace()
+		if (string.byte(src, pos) == kBraceClose) {
+			Fail("an inline table has no comma after its last value")
+		}
+	}
+	depth -= 1
+	return t
+}
+
+function Value(): unknown {
+	const c = string.byte(src, pos)
+	if (c == kQuote) {
+		return if (string.sub(src, pos, pos + 2) == "\"\"\"") MultilineBasicString() else BasicString()
+	}
+	if (c == kApostrophe) {
+		return if (string.sub(src, pos, pos + 2) == "'''") MultilineLiteralString() else LiteralString()
+	}
+	if (c == kOpen) {
+		return Array()
+	}
+	if (c == kBrace) {
+		return InlineTable()
+	}
+	if (string.sub(src, pos, pos + 3) == "true") {
+		pos += 4
+		return true
+	}
+	if (string.sub(src, pos, pos + 4) == "false") {
+		pos += 5
+		return false
+	}
+	if (string.find(src, "^%d%d%d%d%-", pos) != nil || string.find(src, "^%d%d:", pos) != nil) {
+		return DateOrTime()
+	}
+	return Number()
+}
+
+function KeyValue(target: Table, section: { string }) {
+	const at = pos
+	const key = Key()
+	if (string.byte(src, pos) != kEquals) {
+		Fail(`expected '=' after the key, found {Found()}`)
+	}
+	pos += 1
+	SkipSpace()
+	Assign(target, section, key, Value(), at)
+}
+
+// [name] or [[name]]: the table the lines after it define, and its name.
+function Header(root: Table): (Table, { string }) {
+	const at = pos
+	pos += 1
+	const tables = string.byte(src, pos) == kOpen
+	if (tables) {
+		pos += 1
+	}
+	const key = Key()
+	if (string.byte(src, pos) != kClose || (tables && string.byte(src, pos + 1) != kClose)) {
+		Fail(`expected '{if (tables) "]]" else "]"}' after the table's name, found {Found()}`)
+	}
+	pos += if (tables) 2 else 1
+	const shown = if (tables) `[[{Name(key)}]]` else `[{Name(key)}]`
+	let t = root
+	for (i = 1, #key - 1) {
+		const child = t[key[i]]
+		if (child == nil) {
+			const fresh: Table = {}
+			made[fresh] = "implicit"
+			t[key[i]] = fresh
+			t = fresh
+		} else {
+			const how = if (type(child) == "table") made[child] else nil
+			if (how == "tables") {
+				// The array's last table, which [[name]] added most recently.
+				const list = child :: { Table }
+				t = list[#list]
+			} else if (how == nil) {
+				Fail(`cannot define {shown}: {Name(key, i)} is {Describe(child)}`, at)
+			} else {
+				t = child :: Table
+			}
+		}
+	}
+	const last = key[#key]
+	const child = t[last]
+	if (tables) {
+		let list: { Table }
+		if (child == nil) {
+			list = {}
+			made[list] = "tables"
+			t[last] = list
+		} else if (type(child) == "table" && made[child] == "tables") {
+			list = child :: { Table }
+		} else {
+			return Fail(`cannot define {shown}: {Name(key)} is already {Describe(child)}`, at)
+		}
+		const element: Table = {}
+		made[element] = "header"
+		table.insert(list, element)
+		return element, key
+	}
+	if (child == nil) {
+		const fresh: Table = {}
+		made[fresh] = "header"
+		t[last] = fresh
+		return fresh, key
+	}
+	const how = if (type(child) == "table") made[child] else nil
+	if (how == "implicit") {
+		made[child] = "header"
+		return child :: Table, key
+	}
+	if (how == "header") {
+		return Fail(`{shown} is defined twice`, at)
+	}
+	return Fail(`cannot define {shown}: {Name(key)} is already {Describe(child)}`, at)
+}
+
+function Document(): Table {
+	const valid, bad = utf8.len(src)
+	if (valid == nil) {
+		Fail("the text is not UTF-8", bad)
+	}
+	const root: Table = {}
+	made[root] = "header"
+	let current = root
+	let section: { string } = {}
+	while (true) {
+		SkipSpace()
+		if (pos > len) {
+			break
+		}
+		const c = string.byte(src, pos)
+		if (c == kNewline) {
+			pos += 1
+		} else if (c == kHash) {
+			Comment()
+		} else {
+			if (c == kOpen) {
+				current, section = Header(root)
+			} else {
+				KeyValue(current, section)
+			}
+			LineEnd()
+		}
+	}
+	return root
+}
+
+// Reads `text` from the start with `read`, then forgets it.
+function Read<T>(text: string, read: () -> T): (boolean, unknown) {
+	src = text
+	pos = 1
+	len = #text
+	made = {}
+	depth = 0
+	const ok, result = pcall(read)
+	src = ""
+	made = {}
+	return ok, result
+}
+
+function Failed(name: string, result: unknown): never {
+	if (type(result) == "table") {
+		const failure = result :: Failure
+		error(`{name}: {failure.message} ({failure.where})`, 3)
+	}
+	error(result, 0)
+}
+
+// The document's tables and values. Line breaks may be \n or \r\n (read as
+// \n, in multi-line strings too); a byte order mark at the start is
+// passed over.
+function decode(text: string): { [string]: unknown } {
+	let normal = string.gsub(text, "\r\n", "\n")
+	if (string.sub(normal, 1, 3) == "\u{FEFF}") {
+		normal = string.sub(normal, 4)
+	}
+	const ok, result = Read(normal, Document)
+	if (!ok) {
+		Failed("toml.decode", result)
+	}
+	return result :: { [string]: unknown }
+}
+
+// A date, a time or both, from its TOML text ("1979-05-27T07:32:00Z",
+// "1979-05-27", "07:32:00.5"; time.iso's output is one).
+function datetime(text: string): DateTime {
+	const ok, result = Read(text, function(): DateTime {
+		if (utf8.len(src) == nil) {
+			Fail("the text is not UTF-8")
+		}
+		if (string.find(src, "^%d%d%d%d%-") == nil && string.find(src, "^%d%d:") == nil) {
+			Fail("expected a date or a time (1979-05-27, 07:32:00, 1979-05-27T07:32:00Z)")
+		}
+		const value = DateOrTime()
+		if (pos <= len) {
+			Fail(`{Shown(string.sub(src, pos))} after the date or time`)
+		}
+		return value
+	})
+	if (!ok) {
+		Failed("toml.datetime", result)
+	}
+	return result :: DateTime
+}
+
+// Marks a table (or a new one) to encode as an array: an empty table is
+// otherwise a table.
+function array<T>(value: T?): T {
+	const list: unknown = if (value == nil) {} else value
+	if (type(list) != "table") {
+		error(`toml.array: expected a table, not a {type(list)}`, 2)
+	}
+	setmetatable(list :: { unknown }, kArray)
+	return list :: T
+}
+
+// ---- encoding ----------------------------------------------------------
+
+// The lines written so far, the options, and the tables being written (a
+// table met again inside itself has no TOML form).
+let lines: { string } = {}
+let multiline = false
+let open: { [unknown]: boolean } = {}
+
+function Refuse(message: string): never {
+	const failure: Failure = { message = message, where = "" }
+	error(failure, 0)
+}
+
+function PathName(path: string): string {
+	return if (path == "") "the document" else path
+}
+
+function ChildPath(path: string, key: string): string {
+	return if (path == "") KeyText(key) else `{path}.{KeyText(key)}`
+}
+
+type Shape = "table" | "array" | "datetime" | "value"
+
+// What a value is written as: a table of names, an array (keys 1 to n),
+// a date or time, or a value of its own.
+function ShapeOf(value: unknown, path: string): Shape {
+	if (type(value) != "table") {
+		return "value"
+	}
+	if (IsDateTime(value)) {
+		return "datetime"
+	}
+	let count = 0
+	let names = 0
+	let top = 0
+	for (key in value :: { [unknown]: unknown }) {
+		count += 1
+		if (type(key) == "string") {
+			if (utf8.len(key) == nil) {
+				Refuse(`{PathName(path)} has a key that is not UTF-8 text`)
+			}
+			names += 1
+		} else if (type(key) == "number" && key >= 1 && key == math.floor(key)) {
+			top = math.max(top, key)
+		} else {
+			Refuse(`{PathName(path)} has the key {tostring(key)} ({type(key)}): a table's keys are text, an array's 1 to n`)
+		}
+	}
+	const sequence = names == 0 && top == count
+	if (getmetatable(value) == kArray) {
+		if (!sequence) {
+			Refuse(`{PathName(path)} is marked as an array but has keys other than 1 to n`)
+		}
+		return "array"
+	}
+	if (count == 0 || names == count) {
+		return "table"
+	}
+	if (sequence) {
+		return "array"
+	}
+	return Refuse(`{PathName(path)} is neither an array (keys 1 to n) nor a table of names`)
+}
+
+// Whether an array is written as [[name]] sections: it has tables only.
+function OfTables(list: { unknown }, path: string): boolean {
+	if (#list == 0) {
+		return false
+	}
+	for (i, item in list) {
+		if (ShapeOf(item, `{path}[{i}]`) != "table") {
+			return false
+		}
+	}
+	return true
+}
+
+function SortedKeys(t: Table): { string } {
+	const keys: { string } = {}
+	for (key in t) {
+		table.insert(keys, key)
+	}
+	table.sort(keys)
+	return keys
+}
+
+function Enter(value: unknown, path: string) {
+	if (open[value]) {
+		Refuse(`{PathName(path)} is a table that holds it (a cycle)`)
+	}
+	open[value] = true
+}
+
+function NumberText(n: number): string {
+	if (n != n) {
+		return "nan"
+	}
+	if (n == math.huge) {
+		return "inf"
+	}
+	if (n == -math.huge) {
+		return "-inf"
+	}
+	if (n == math.floor(n) && math.abs(n) <= kExact) {
+		return if (n == 0 && 1 / n < 0) "-0.0" else string.format("%.0f", n)
+	}
+	// The shortest digits that read back as the same number.
+	let text = string.format("%.17g", n)
+	for (precision = 1, 16) {
+		const shorter = string.format(`%.{precision}g`, n)
+		if (tonumber(shorter) == n) {
+			text = shorter
+			break
+		}
+	}
+	return if (string.find(text, "[%.e]") == nil) text .. ".0" else text
+}
+
+function StringText(text: string, path: string, lineValue: boolean): string {
+	if (utf8.len(text) == nil) {
+		Refuse(`{PathName(path)} is not UTF-8 text`)
+	}
+	if (lineValue && multiline && string.find(text, "\n", 1, true) != nil) {
+		// """ with its line breaks and tabs as they are; three quotes in a row
+		// have one escaped.
+		const escaped = string.gsub(text, "[\0-\8\11-\31\127\\]", Escaped)
+		const quoted = string.gsub(escaped, "\"\"\"", "\"\"\\\"")
+		return "\"\"\"\n" .. quoted .. "\"\"\""
+	}
+	return QuoteText(text)
+}
+
+// A value as written after `key = ` (`lineValue`) or inside an array or an
+// inline table.
+function ValueText(value: unknown, path: string, lineValue: boolean): string {
+	if (type(value) == "string") {
+		return StringText(value, path, lineValue)
+	}
+	if (type(value) == "number") {
+		return NumberText(value)
+	}
+	if (type(value) == "boolean") {
+		return if (value) "true" else "false"
+	}
+	switch (ShapeOf(value, path)) {
+		case "datetime":
+			return tostring(value)
+		case "array":
+			Enter(value, path)
+			const list = value :: { unknown }
+			const items: { string } = {}
+			for (i, item in list) {
+				table.insert(items, ValueText(item, `{path}[{i}]`, false))
+			}
+			open[value] = nil
+			return "[" .. table.concat(items, ", ") .. "]"
+		case "table":
+			Enter(value, path)
+			const t = value :: Table
+			const pairs: { string } = {}
+			for (_, key in SortedKeys(t)) {
+				table.insert(pairs, `{KeyText(key)} = {ValueText(t[key], ChildPath(path, key), false)}`)
+			}
+			open[value] = nil
+			return if (#pairs == 0) "{}" else "{ " .. table.concat(pairs, ", ") .. " }"
+		default:
+			return Refuse(`{PathName(path)} is a {type(value)}, which TOML has no form for`)
+	}
+}
+
+function HeaderLine(text: string) {
+	if (#lines > 0) {
+		table.insert(lines, "")
+	}
+	table.insert(lines, text)
+}
+
+// A table's values, then its tables as [header] sections and its arrays of
+// tables as [[header]] ones. A table holding only tables has no header of
+// its own (its sections name it).
+function Section(t: Table, header: string, path: string, element: boolean) {
+	Enter(t, path)
+	const values: { string } = {}
+	const tables: { string } = {}
+	for (_, key in SortedKeys(t)) {
+		const value = t[key]
+		const shape = ShapeOf(value, ChildPath(path, key))
+		if (shape == "table" || (shape == "array" && OfTables(value :: { unknown }, ChildPath(path, key)))) {
+			table.insert(tables, key)
+		} else {
+			table.insert(values, key)
+		}
+	}
+	if (element) {
+		HeaderLine(`[[{header}]]`)
+	} else if (header != "" && (#values > 0 || #tables == 0)) {
+		HeaderLine(`[{header}]`)
+	}
+	for (_, key in values) {
+		table.insert(lines, `{KeyText(key)} = {ValueText(t[key], ChildPath(path, key), true)}`)
+	}
+	for (_, key in tables) {
+		const value = t[key]
+		const name = if (header == "") KeyText(key) else `{header}.{KeyText(key)}`
+		const at = ChildPath(path, key)
+		if (ShapeOf(value, at) == "table") {
+			Section(value :: Table, name, at, false)
+		} else {
+			for (i, item in value :: { Table }) {
+				Section(item, name, `{at}[{i}]`, true)
+			}
+		}
+	}
+	open[t] = nil
+}
+
+// A table as a TOML document: keys sorted, so the output is the same every
+// run. `options.multiline` writes a string holding a line break as a
+// """multi-line string""".
+function encode(value: { [string]: unknown }, options: Options?): string {
+	lines = {}
+	open = {}
+	multiline = options != nil && options.multiline == true
+	const ok, result = pcall(function() {
+		if (type(value) != "table" || ShapeOf(value, "") != "table") {
+			Refuse("a document is a table of names (not an array, a date or a value)")
+		}
+		Section(value, "", "", false)
+	})
+	const written = lines
+	lines = {}
+	open = {}
+	if (!ok) {
+		if (type(result) == "table") {
+			error(`toml.encode: {(result :: Failure).message}`, 2)
+		}
+		error(result, 0)
+	}
+	return if (#written == 0) "" else table.concat(written, "\n") .. "\n"
+}
+
+return { decode = decode, encode = encode, datetime = datetime, array = array }

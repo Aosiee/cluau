@@ -3269,7 +3269,7 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_SQLITE
 										 + ", @std/sqlite"
 #endif
-										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv, @std/test";
+										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv, @std/toml, @std/test";
 		return names.c_str();
 	}
 

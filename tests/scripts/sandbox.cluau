@@ -15,3 +15,4 @@ const missing, missingWhy = pcall(require, "../check/lib/none")
 print(outside, string.gsub(tostring(outsideWhy), "greet", "?") == string.gsub(tostring(missingWhy), "none", "?")) // allow-any: pcall's error values
 
 print(require("@std/json").encode({ ran = true }))
+print(require("@std/toml").decode("ran = true").ran)

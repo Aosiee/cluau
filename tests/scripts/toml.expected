@@ -1,0 +1,175 @@
+{[""] = "empty", ["3"] = {["14"] = "pi"}, ["bare_key-1"] = 1, ["literal \"key\""] = 3, ["quoted key"] = 2, ab = "ab", site = {["google.com"] = {ok = true}}}
+basic	"tab\t quote\" backslash\\ \008\012\r\n é 😀 \000"
+literal	"C:\\Users\\nodejs\\templates"
+tabbed	"a\tb"
+multi	"Roses are red\nViolets are blue"
+joined	"The quick brown fox."
+quotes	"Here are two quotation marks: \"\". Simple enough.\""
+literal_multi	"The first newline is\ntrimmed in raw strings.\n   All other whitespace\n   is preserved. \\n"
+apostrophes	"Two apostrophes end this: ''"
+plus	99
+minus	-17
+zero	0
+grouped	1000000
+hex	3735928559
+octal	493
+binary	214
+top	9007199254740992
+bottom	-9007199254740992
+fraction	3.1415
+exponent	5e+22
+both	-6.626e-34
+grouped_float	224617.445991228
+small	5e-324
+zero is 0, not -0:	true	float_zero is -0:	true
+infinite:	true	nan:	true
+{f = false, t = true}
+odt1	offsetDateTime	1979-05-27T07:32:00Z	1979	5	27	7	32	0	0	296638320
+odt2	offsetDateTime	1979-05-27T00:32:00-07:00	1979	5	27	0	32	0	-25200	296638320
+odt3	offsetDateTime	1979-05-27T00:32:00.999999+05:30	1979	5	27	0	32	0.999999	19800	296593320.999999
+odt4	offsetDateTime	1979-05-27T07:32:00Z	1979	5	27	7	32	0	0	296638320
+ldt	localDateTime	1979-05-27T07:32:00.123456789	1979	5	27	7	32	0.123456789	nil	nil
+ld	localDate	1979-05-27	1979	5	27	nil	nil	nil	nil	nil
+lt	localTime	00:32:00.5	nil	nil	nil	0	32	0.5	nil	nil
+odt1 and odt4 are the same:	true	odt1 and odt2 are the same moment:	true
+made from text:	2026-11-24T21:05:09.25+01:00	true
+false	toml.cluau:100: attempt to modify a readonly table
+false	toml.datetime: ' tomorrow' after the date or time (line 1, column 11)
+false	toml.datetime: '2023-02-29' is not a valid date (line 1, column 1)
+{empty = {}, integers = {1, 2, 3}, lines = {1, 2, 3}, mixed = {0.1, "two", "three", {4}, {five = 5}, 1979-05-27}, nested = {{1, 2}, {"a", {"b"}}}}
+{animal = {type = {legs = 4, name = "pug"}}, empty = {}, name = {first = "Tom", last = "Preston-Werner"}, nested = {a = {b = {c = 1}}, list = {{d = 2}}}, point = {x = 1, y = 2}}
+{a = {b = {c = {x = 1}}, z = 3}, d = {["e f"] = {g = {y = 2}}}, fruit = {apple = {color = "red", taste = {sweet = true}, texture = {smooth = true}}}}
+{fruits = {{name = "apple", physical = {color = "red"}, varieties = {{name = "red delicious"}, {name = "granny smith"}}}, {name = "banana", varieties = {{name = "plantain"}}}}, products = {{name = "Hammer", sku = 738594937}, {}, {color = "gray", name = "Nail"}}}
+{a = "x\ny", t = {b = 1}}
+toml.decode: a is defined twice (line 2, column 1)
+toml.decode: a is defined twice (line 2, column 1)
+toml.decode: [a] is defined twice (line 3, column 1)
+toml.decode: cannot define [a.b]: a.b is already a table made by dotted keys (line 3, column 1)
+toml.decode: cannot define [a]: a is already a table made by dotted keys (line 2, column 1)
+toml.decode: cannot define a.c with a dotted key: a is an inline table (line 2, column 1)
+toml.decode: cannot define [a.c]: a is an inline table (line 2, column 1)
+toml.decode: cannot define b.d with a dotted key: b is an inline table (line 1, column 22)
+toml.decode: cannot define a.b.c.t with a dotted key: a.b.c is a table with its own [header] (line 4, column 1)
+toml.decode: cannot define [[a]]: a is already an array (line 2, column 1)
+toml.decode: cannot define [a]: a is already an array of tables (line 2, column 1)
+toml.decode: cannot define [[a]]: a is already a table with its own [header] (line 2, column 1)
+toml.decode: cannot define [a.b]: a is a number (line 2, column 1)
+toml.decode: cannot define a.b.c with a dotted key: a.b is a number (line 2, column 1)
+toml.decode: expected a value, found the end of the document (line 1, column 5)
+toml.decode: expected '=' after the key, found the end of the document (line 1, column 2)
+toml.decode: expected a key, found '=' (line 1, column 1)
+toml.decode: expected the end of the line, found 'b' (line 1, column 7)
+toml.decode: expected ']' after the table's name, found the end of the document (line 1, column 3)
+toml.decode: expected ']]' after the table's name, found ']' (line 1, column 4)
+toml.decode: expected a key, found ']' (line 1, column 2)
+toml.decode: expected a key, found '.' (line 1, column 3)
+toml.decode: a string has no closing quote (line 1, column 5)
+toml.decode: a multi-line string has no closing """ (line 1, column 5)
+toml.decode: a string has no closing quote (line 1, column 5)
+toml.decode: \ before 'x' is not an escape (TOML has \b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX) (line 1, column 6)
+toml.decode: \uD800 is not a Unicode character (line 1, column 6)
+toml.decode: \u takes 4 hexadecimal digits (line 1, column 6)
+toml.decode: \ before ' ' is not an escape (TOML has \b \t \n \f \r \" \\ \uXXXX \UXXXXXXXX) (line 1, column 8)
+toml.decode: the control character U+0007 in a string (write it as an escape) (line 1, column 11)
+toml.decode: the control character U+007F in a comment (line 1, column 18)
+toml.decode: expected the end of the line, found the control character U+000D (line 1, column 6)
+toml.decode: '01': a decimal number has no leading zeros (line 1, column 5)
+toml.decode: '1__0' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '_1' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '1.' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '.5' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '1e' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '-0x1': a hexadecimal, octal or binary integer has no sign (line 1, column 5)
+toml.decode: '0X1' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '9007199254740993' is past 2^53, the largest integer a number holds exactly (line 1, column 5)
+toml.decode: '0x20000000000001' is past 2^53, the largest integer a number holds exactly (line 1, column 5)
+toml.decode: 'Inf' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: 'TRUE' is not a value (a string, number, true, false, date or time, [array] or {inline table}) (line 1, column 5)
+toml.decode: '1979-02-29' is not a valid date (line 1, column 5)
+toml.decode: '1979-05-27T24:00:00' is not a valid time (line 1, column 5)
+toml.decode: a time is written hh:mm:ss (seconds included) (line 1, column 16)
+toml.decode: an offset is written +hh:mm or -hh:mm (hh under 24) (line 1, column 24)
+toml.decode: expected the end of the line, found 'Z' (line 1, column 13)
+toml.decode: expected ',' or ']' in an array, found '2' (line 1, column 8)
+toml.decode: expected a value, found ',' (line 1, column 8)
+toml.decode: an inline table has no comma after its last value (line 1, column 14)
+toml.decode: expected ',' or '}' in an inline table, found the end of the line (line 1, column 12)
+toml.decode: expected the end of the line, found 'x' (line 3, column 9)
+toml.decode: the text is not UTF-8 (line 1, column 6)
+toml.decode: arrays and inline tables nest more than 1000 deep (line 1, column 1005)
+list = []
+mixed = [1, "two", { three = 3 }, []]
+title = "TOML Example"
+
+[database]
+data = [["delta", "phi"], [3.14]]
+enabled = true
+ports = [8000, 8001, 8002]
+
+[database.temp_targets]
+case = 72
+cpu = 79.5
+
+[empty]
+
+[owner]
+dob = 1979-05-27T07:32:00-08:00
+name = "Tom"
+
+[[products]]
+name = "Hammer"
+sku = 738594937
+
+[[products]]
+
+[[products]]
+color = "gray"
+name = "Nail"
+
+[servers.alpha]
+ip = "10.0.0.1"
+role = "frontend"
+
+[servers.beta]
+ip = "10.0.0.2"
+role = "backend"
+the same again:	true
+"" = "control \u0000 \u001B \u007F, line\nbreak\r\n"
+-_09azAZ = 2
+"a.b" = 1
+"two words" = "a \"quote\", a \\ and a tab\t"
+"é" = "é 😀"
+big = 1e+300
+inf = inf
+minus_inf = -inf
+nan = nan
+negative = -42
+negative_zero = -0.0
+past = 9007199254740994.0
+tenth = 0.1
+third = 0.3333333333333333
+tiny = 5e-324
+whole = 9007199254740992
+ld = 1979-05-27
+ldt = 1979-05-27T07:32:00
+lt = 07:32:00.000001
+odt = 1979-05-27T07:32:00.5Z
+inline = ["Roses are red\n\tViolets are blue\n\"\"\" three quotes, and one at the end\""]
+verse = """
+Roses are red
+	Violets are blue
+""\" three quotes, and one at the end""""
+reads back:	true
+""
+toml.encode: inner.back is a table that holds it (a cycle)
+toml.encode: f is a function, which TOML has no form for
+toml.encode: a.b[3] is a thread, which TOML has no form for
+toml.encode: a is neither an array (keys 1 to n) nor a table of names
+toml.encode: a is neither an array (keys 1 to n) nor a table of names
+toml.encode: a has the key true (boolean): a table's keys are text, an array's 1 to n
+toml.encode: a is marked as an array but has keys other than 1 to n
+toml.encode: the document has a key that is not UTF-8 text
+toml.encode: s is not UTF-8 text
+toml.encode: a document is a table of names (not an array, a date or a value)
+toml.encode: a document is a table of names (not an array, a date or a value)
+exit: 0
