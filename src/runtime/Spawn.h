@@ -44,6 +44,10 @@ namespace cluau::runtime::detail {
 		bool Interrupted = false; // a Ctrl-C ended the run (the child was killed)
 	};
 
+	// Kills every child process.spawn started that is still running: a run
+	// that a Ctrl-C ends takes the programs it started with it.
+	void KillChildren();
+
 	// Runs the child to its end. False (with `why`) when it cannot be started.
 	bool Spawn(const SpawnRequest& request, SpawnResult& result, std::string& why);
 

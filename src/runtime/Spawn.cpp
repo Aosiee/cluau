@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <mutex>
 #include <thread>
 
@@ -386,6 +387,7 @@ namespace cluau::runtime::detail {
 		{
 			std::mutex Lock; // also around every kill and reap
 			std::map<Started*, int> Busy;
+			std::set<Started*> Live; // every process.spawn child not yet dropped
 #ifndef _WIN32
 			std::vector<pid_t> Abandoned;
 #endif
@@ -431,6 +433,20 @@ namespace cluau::runtime::detail {
 		private:
 			Started& m_Started;
 		};
+
+		void Track(Started& started)
+		{
+			Children& children = Registry();
+			std::lock_guard<std::mutex> lock(children.Lock);
+			children.Live.insert(&started);
+		}
+
+		void Untrack(Started& started)
+		{
+			Children& children = Registry();
+			std::lock_guard<std::mutex> lock(children.Lock);
+			children.Live.erase(&started);
+		}
 
 		void KillTree(Started& started, bool afterEnd = false)
 		{
@@ -790,7 +806,11 @@ namespace cluau::runtime::detail {
 
 	long Child::Id() const { return (long)m_Impl->Process.Process.dwProcessId; }
 
-	Child::~Child() { Release(m_Impl->Process); }
+	Child::~Child()
+	{
+		Untrack(m_Impl->Process);
+		Release(m_Impl->Process);
+	}
 
 #else
 
@@ -1204,6 +1224,7 @@ namespace cluau::runtime::detail {
 		// reaped once it ends (at a later launch).
 		Children& children = Registry();
 		std::lock_guard<std::mutex> lock(children.Lock);
+		children.Live.erase(&m_Impl->Process);
 		if (m_Impl->Process.Pid > 0 && !ReapLocked(m_Impl->Process))
 			children.Abandoned.push_back(m_Impl->Process.Pid);
 	}
@@ -1213,6 +1234,41 @@ namespace cluau::runtime::detail {
 	Child::Child(std::unique_ptr<Impl> impl)
 		: m_Impl(std::move(impl))
 	{
+		Track(m_Impl->Process);
+	}
+
+	void KillChildren()
+	{
+		Children& children = Registry();
+		std::lock_guard<std::mutex> lock(children.Lock);
+		for (Started* started : children.Live)
+			KillLocked(*started, false);
+#ifndef _WIN32
+		// Dropped while running: not yet reaped, so each pid is still the child's.
+		for (pid_t pid : children.Abandoned)
+			if (waitpid(pid, nullptr, WNOHANG) == 0)
+				kill(pid, SIGKILL);
+		// Reaped, so none is left a zombie of a host that goes on running (a
+		// killed child ends at once; a second at most is waited for).
+		const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+		bool waiting = true;
+		while (waiting && std::chrono::steady_clock::now() < until)
+		{
+			waiting = false;
+			for (Started* started : children.Live)
+				waiting = !ReapLocked(*started) || waiting;
+			auto& abandoned = children.Abandoned;
+			abandoned.erase(std::remove_if(abandoned.begin(), abandoned.end(),
+								[](pid_t pid) {
+									const pid_t done = waitpid(pid, nullptr, WNOHANG);
+									return done == pid || (done < 0 && errno == ECHILD);
+								}),
+				abandoned.end());
+			waiting = waiting || !abandoned.empty();
+			if (waiting)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+#endif
 	}
 
 	void Child::Fetch(int milliseconds, unsigned fills)

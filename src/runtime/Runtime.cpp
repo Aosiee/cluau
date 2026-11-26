@@ -5,6 +5,7 @@
 #include "Debugger.h"
 #include "Profile.h"
 #include "Resolve.h"
+#include "Spawn.h"
 #include "Std.h"
 
 #include "Luau/CodeGen.h"
@@ -677,6 +678,16 @@ __cluau_meta = {
 			return nullptr;
 		}
 
+		// The status of a run that ended in an error: 130 for a Ctrl-C, which
+		// also ends the programs the run started.
+		int Ended()
+		{
+			if (!Interrupted)
+				return 1;
+			detail::KillChildren();
+			return 130;
+		}
+
 		int RunChunk(const std::string& source, const std::string& name, bool luau = false)
 		{
 			std::string error;
@@ -688,7 +699,7 @@ __cluau_meta = {
 			lua_State* T = Execute();
 			std::fflush(stdout);
 			if (!T)
-				return Interrupted ? 130 : 1;
+				return Ended();
 			lua_pop(L, 1);
 			return RunTasks();
 		}
@@ -710,7 +721,7 @@ __cluau_meta = {
 			lua_State* T = Execute();
 			std::fflush(stdout);
 			if (!T)
-				return Interrupted ? 130 : 1;
+				return Ended();
 			lua_pop(L, 1);
 			return 0;
 		}

@@ -2239,6 +2239,24 @@ TEST("interrupt: a Ctrl-C ends a child's read, wait and write, and kills the chi
 	}
 }
 
+TEST("interrupt: a Ctrl-C ends the children the script started that nothing waits on")
+{
+	for (const char* options : { "{ input = true }", "nil" })
+	{
+		const std::string file = (TempDir() / "idle_child_pid").string();
+		std::remove(file.c_str());
+		const std::string source = std::string("const process = require('@std/process')\n"
+											   "const c = process.spawn({ 'sh', '-c', 'echo $$ > \"$0\"; exec sleep 30', '") +
+			file + "' }, " + options + ")\n" +
+			"while (process.run({ 'cat', '" + file + "' }).output == '') { process.sleep(0.01) }\n"
+			"process.sleep(30)\n";
+		auto [status, took] = RunInterrupted(source, 0.5);
+		CHECK_EQ(status, 130);
+		CHECK(took < 3);
+		CHECK(Gone(PidFrom(file)));
+	}
+}
+
 TEST("interrupt: a Ctrl-C kills the program a task runs")
 {
 	const std::string file = (TempDir() / "run_pid").string();
