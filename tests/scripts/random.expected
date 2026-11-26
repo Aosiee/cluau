@@ -1,0 +1,42 @@
+5415695640260286 6735350249106120 927921571702396
+5043065146658773 6912440677258288 4569322158181384
+5290141576651639 1280267498595976 3214378517330358
+6699628332854298 1171346042582225 8676945727531674
+true
+0.08386297105988216	0.3789802506626686	0.6800434110281394
+6 5 6 3 3 6 5 6 6 1 2 4 5 3 4 4 6 2 4 5
+767	-497565924616720	7333692504712401
+17.469997448514157	0.5691758844274046	4.820685030984828
+-1.9209325338531986	103.16410438932388	-2.7499056458231816
+gnu	gnu	eel
+eel dog hen gnu ant fox bee cat
+eel fox dog	gnu bee dog eel ant cat fox hen
+758 475 738 604 704
+common common common common rare common common common common common common common
+true	true
+true
+true
+true	true	true	true	true
+5	2	true
+true	true
+5	9007199254740992	0	4	3
+0	only	only	only
+Random
+false	random.integer: min (6) is greater than max (1)
+false	random.integer: max is a whole number from -2^53 to 2^53, not 6.5
+false	random.integer: the range from 0 to 9007199254740992 holds more than 2^53 numbers
+false	random.integer: min is a whole number from -2^53 to 2^53, not -18014398509481984
+false	random.integer: max is a whole number from -2^53 to 2^53, not inf
+false	random.uniform: b is a finite number, not nan
+false	random.normal: the deviation is 0 or more, not -1
+false	random.choice: the list is empty
+false	random.sample: the count (9) is more than the list's 8 items
+false	random.sample: the count is a whole number from 0, not -1
+false	random.weighted: the list has 8 items and the weights 2 (one weight for each item)
+false	random.weighted: weight 2 is -1 (a weight is a finite number, 0 or more)
+false	random.weighted: every weight is 0
+false	random.weighted: the weights add up to more than the largest number
+false	random.weighted: the list is empty
+false	random.seed: the seed is a whole number from -2^63 to 2^63, not 1.5
+false	random.new: the seed is a whole number from -2^63 to 2^63, not 9223372036854776000
+exit: 0

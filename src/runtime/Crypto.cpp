@@ -18,18 +18,6 @@
 #include <string>
 #include <string_view>
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <bcrypt.h>
-#elif defined(__APPLE__)
-#include <stdlib.h>
-#else
-#include <sys/random.h>
-#endif
-
 namespace cluau::runtime::detail {
 
 	namespace {
@@ -169,28 +157,7 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
-		// ---- randomness ----------------------------------------------------
-
-		bool Random(void* out, size_t size)
-		{
-#ifdef _WIN32
-			return BCryptGenRandom(nullptr, static_cast<PUCHAR>(out), (ULONG)size, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
-#elif defined(__APPLE__)
-			arc4random_buf(out, size);
-			return true;
-#else
-			unsigned char* at = static_cast<unsigned char*>(out);
-			while (size > 0)
-			{
-				const ssize_t n = getrandom(at, size, 0);
-				if (n < 0)
-					return false;
-				at += n;
-				size -= (size_t)n;
-			}
-			return true;
-#endif
-		}
+		// ---- randomness (the system's, SystemRandom in Random.cpp) --------
 
 		int CryptoRandomBytes(lua_State* L)
 		{
@@ -199,7 +166,7 @@ namespace cluau::runtime::detail {
 			if (count < 0)
 				luaL_argerror(L, 1, "a number of bytes from 0 to 64 MiB");
 			std::string bytes((size_t)count, '\0');
-			if (count > 0 && !Random(bytes.data(), bytes.size()))
+			if (count > 0 && !SystemRandom(bytes.data(), bytes.size()))
 				luaL_error(L, "crypto.randomBytes: the system gave no random bytes");
 			lua_pushlstring(L, bytes.data(), bytes.size());
 			return 1;
@@ -209,7 +176,7 @@ namespace cluau::runtime::detail {
 		int CryptoUuid(lua_State* L)
 		{
 			unsigned char b[16];
-			if (!Random(b, sizeof(b)))
+			if (!SystemRandom(b, sizeof(b)))
 				luaL_error(L, "crypto.uuid: the system gave no random bytes");
 			b[6] = (unsigned char)((b[6] & 0x0F) | 0x40);
 			b[8] = (unsigned char)((b[8] & 0x3F) | 0x80);
