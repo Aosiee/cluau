@@ -56,7 +56,10 @@ const secondHeader = number(good, second + 42, "<I4")
 const twice = patch(patch(good, second + 46, "aa"), secondHeader + 1 + 30, "aa")
 const archive = zip.fromString(twice)
 print("entries", #archive:entries(), archive:entries()[2].name, string.sub(archive:read("aa"), 1, 1))
-const dir = path.join(fs.tempDir(), `cluau-zip-edges-{math.floor(os.clock() * 1e6)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const dir = fs.tempFile("cluau-zip-edges")
+fs.remove(dir)
 print("extracted", archive:extract(dir), string.sub(fs.read(path.join(dir, "aa")), 1, 1))
 fs.remove(dir, true)
 print("name with NUL", (pcall(function() {

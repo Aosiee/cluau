@@ -87,7 +87,7 @@ db:close()
 
 // Closing a database lets go of the read lock a rows() loop left early
 // holds, so another connection can write at once.
-const file = path.join(fs.tempDir(), `cluau-sqlite-edges-{math.floor(os.clock() * 1e6)}.db`)
+const file = fs.tempFile("cluau-sqlite-edges") // a name of its own: two runs at once do not share it
 const reader = sqlite.open(file)
 reader:exec("CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (1), (2)")
 for (_ in reader:rows("SELECT n FROM t")) {

@@ -25,7 +25,7 @@ const named, namedWhy = pcall(time.fromParts, { year = "x" } :: any) // allow-an
 print("parts", named, string.find(tostring(namedWhy), "parts.year", 1, true) != nil)
 
 // A large count reads only what the file holds.
-const file = path.join(fs.tempDir(), `cluau-edges-{math.floor(time.now() * 1000)}.txt`)
+const file = fs.tempFile("cluau-edges") // a name of its own: two runs at once do not share it
 fs.write(file, "seven b")
 const handle = fs.open(file)
 print("read", handle:read(1e9))
@@ -70,7 +70,10 @@ print("same key", (pcall(json.encode, { [1] = "a", ["1"] = "b" })), json.encode(
 
 // fs.glob: a pattern ending in / is directories only; a [ without its ] is
 // an ordinary character. fs.realpath follows links and resolves `..`.
-const globbed = path.join(fs.tempDir(), `cluau-edges-glob-{math.floor(time.now() * 1000)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const globbed = fs.tempFile("cluau-edges-glob")
+fs.remove(globbed)
 fs.mkdir(path.join(globbed, "sub"))
 fs.write(path.join(globbed, "file"), "")
 fs.write(path.join(globbed, "[x"), "")

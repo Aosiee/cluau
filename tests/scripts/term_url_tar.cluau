@@ -42,7 +42,10 @@ print(url.encodeQuery({ q = "two words", page = 2, ok = true }))
 
 // tar: made, read back, gzip found by its first bytes, a long name, and an
 // entry that would escape.
-const dir = path.join(fs.tempDir(), `cluau-tar-test-{math.floor(os.clock() * 1e6)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const dir = fs.tempFile("cluau-tar-test")
+fs.remove(dir)
 fs.mkdir(dir)
 fs.write(path.join(dir, "source.txt"), "from a file")
 const long = string.rep("deep/", 30) .. "file.txt"

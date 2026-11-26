@@ -5,7 +5,10 @@ const path = require("@std/path")
 const process = require("@std/process")
 const time = require("@std/time")
 
-const dir = path.join(fs.tempDir(), `cluau-std-files-{process.platform}-{math.floor(time.now() * 1000)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const dir = fs.tempFile("cluau-std-files")
+fs.remove(dir)
 fs.mkdir(dir)
 const file = path.join(dir, "a.txt")
 fs.write(file, "abc")

@@ -43,7 +43,10 @@ if (bytes != nil) {
 }
 
 // On disk: written, opened, extracted.
-const dir = path.join(fs.tempDir(), `cluau-zip-test-{math.floor(os.clock() * 1e6)}`)
+// A name of its own (two runs at once do not share it): the file
+// fs.tempFile made gives way to the directory.
+const dir = fs.tempFile("cluau-zip-test")
+fs.remove(dir)
 fs.mkdir(dir)
 const file = path.join(dir, "out.zip")
 fs.write(path.join(dir, "source.txt"), "from a file")

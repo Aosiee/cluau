@@ -56,7 +56,10 @@ is skipped, in a file, on standard input and in `-e` alike) and cannot
 contain a NUL byte.
 
 The exit status is 0, 1 after an error, 2 when the script cannot be read,
-130 after Ctrl-C, or the code passed to `process.exit(code)`.
+130 after Ctrl-C, or the code passed to `process.exit(code)`. Output that
+could not be written (`cluau script.cluau > /dev/full`, a full disk) is
+reported when cluau exits (`cluau: cannot write standard output`), and a
+status of 0 becomes 1; every command does this.
 
 On x64 and arm64, scripts and the modules they require run as native code
 (Luau's code generator): arithmetic, calls and loops run about 1.7 times
@@ -1600,8 +1603,10 @@ for (_, page in pages) {
   script's own code, the tasks run until the call is done. So three
   downloads in three tasks take as long as the slowest, not the three
   together.
-- A task cancelled while such a call waits takes nothing from it: a line
-  a child's or standard input's read got goes back for the next read.
+- A task cancelled while such a call waits takes nothing from it: what
+  a child's, standard input's or a socket's read got goes back for the
+  next read, and a connection `server:accept` got goes to the next accept
+  (or is closed with the server).
 - A finished task keeps nothing once nothing refers to it, so a server
   that runs a task for each connection stays the same size.
 - Tasks still take turns over the script's own code: a long computation
