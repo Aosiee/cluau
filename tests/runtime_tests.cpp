@@ -639,6 +639,32 @@ TEST("json: values read back as they were written")
 	CHECK(!Json::Parse("[1, 2").has_value());
 }
 
+TEST("json: only RFC 8259's grammar is read")
+{
+	for (const char* good : { "0", "-0", "10", "-1.5", "0.25", "1e5", "1E+5", "2.5e-3", "-0.0e0" })
+	{
+		const std::optional<Json> v = Json::Parse(good);
+		CHECK(v.has_value() && v->IsNumber());
+		if (v)
+			CHECK_EQ(v->Number(), std::strtod(good, nullptr));
+	}
+	for (const char* bad :
+		{ "01", "-01", "00", "1.", "-1.e5", ".5", "+1", "-", "1e", "1e+", "--1", "0x10", "1.5.3", "Infinity", "NaN", "[01]", "{\"a\": 1.}" })
+		CHECK(!Json::Parse(bad).has_value());
+	// A control character is escaped inside a string, never written as it is.
+	CHECK(!Json::Parse("\"a\tb\"").has_value());
+	CHECK(!Json::Parse("\"a\nb\"").has_value());
+	CHECK(!Json::Parse(std::string_view("\"a\0b\"", 5)).has_value());
+	CHECK(!Json::Parse("{\"a\x1f\": 1}").has_value());
+	CHECK_EQ(Json::Parse(R"("a\tb\u0000")")->String(), std::string("a\tb\0", 4));
+	// A surrogate on its own reads as U+FFFD; a pair is one character.
+	CHECK_EQ(Json::Parse(R"("\ud800x")")->String(), std::string("\xef\xbf\xbdx"));
+	CHECK_EQ(Json::Parse(R"("\udc00😀")")->String(), std::string("\xef\xbf\xbd\xf0\x9f\x98\x80"));
+	// Whitespace is the four characters the RFC names.
+	CHECK(Json::Parse(" \t\r\n[ 1 , 2 ]\n").has_value());
+	CHECK(!Json::Parse("\f1").has_value());
+}
+
 TEST("json: an object's repeated key keeps its last value, and a large object reads in linear time")
 {
 	std::optional<Json> v = Json::Parse(R"({"a": 1, "b": 2, "a": 3})");

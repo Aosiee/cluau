@@ -85,6 +85,9 @@ namespace cluau::runtime::detail {
 					const char c = Text[At++];
 					if (c == '"')
 						return true;
+					// A control character is written as an escape, never as it is.
+					if ((unsigned char)c < 0x20)
+						return false;
 					if (c != '\\')
 					{
 						out += c;
@@ -118,6 +121,10 @@ namespace cluau::runtime::detail {
 							else
 								At = back;
 						}
+						// A surrogate on its own stands for no character: U+FFFD,
+						// the replacement character, keeps the text UTF-8.
+						if (code >= 0xD800 && code < 0xE000)
+							code = 0xFFFD;
 						Utf8(code, out);
 						break;
 					}
@@ -224,17 +231,48 @@ namespace cluau::runtime::detail {
 					return Json(false);
 				if (Literal("null"))
 					return Json();
+				return Number();
+			}
+
+			// The digits at the reading point (how many).
+			size_t Digits()
+			{
 				const size_t start = At;
-				while (At < Text.size() && std::string_view("+-0123456789.eE").find(Text[At]) != std::string_view::npos)
+				while (At < Text.size() && Text[At] >= '0' && Text[At] <= '9')
 					At++;
-				if (At == start)
+				return At - start;
+			}
+
+			// RFC 8259's number: an optional minus, then 0 or digits without a
+			// leading zero, an optional fraction and exponent, each with digits.
+			std::optional<Json> Number()
+			{
+				const size_t start = At;
+				if (At < Text.size() && Text[At] == '-')
+					At++;
+				if (At < Text.size() && Text[At] == '0')
+					At++;
+				else if (Digits() == 0)
+					return std::nullopt;
+				if (At < Text.size() && Text[At] == '.')
+				{
+					At++;
+					if (Digits() == 0)
+						return std::nullopt;
+				}
+				if (At < Text.size() && (Text[At] == 'e' || Text[At] == 'E'))
+				{
+					At++;
+					if (At < Text.size() && (Text[At] == '+' || Text[At] == '-'))
+						At++;
+					if (Digits() == 0)
+						return std::nullopt;
+				}
+				// A digit right after the number is a leading zero (01).
+				if (At < Text.size() && Text[At] >= '0' && Text[At] <= '9')
 					return std::nullopt;
 				const std::string number(Text.substr(start, At - start));
-				char* end = nullptr;
-				const double value = std::strtod(number.c_str(), &end);
-				if (end != number.c_str() + number.size())
-					return std::nullopt;
-				return Json(value);
+				return Json(std::strtod(number.c_str(), nullptr));
 			}
 		};
 
