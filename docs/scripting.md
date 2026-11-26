@@ -874,9 +874,9 @@ line break cannot be passed to one, and is an error.
 
 A program still running when the script exits while waiting on it (a
 `run` or a child's read in a task, at `process.exit` or an error) is
-killed; a child the script is not waiting on is left to run. On Linux and
-macOS the script's own open files and sockets are not passed on to the
-programs it starts.
+killed; a child the script is not waiting on is left to run. The script's
+own open files and sockets are not passed on to the programs it starts:
+they get their standard input, output and error and nothing else.
 
 `spawn` is for a command whose output the script reads while it runs (a
 build's progress, a server's log) or one it talks to. It takes `cwd`, `env`,
@@ -1114,7 +1114,9 @@ classes, quantifiers (greedy and lazy), groups (numbered and
 `\s`, `\w`, and Unicode properties (`\p{L}`). A pattern is compiled once
 and matched as UTF-8 text: `\w`, `\d` and case-insensitive matching know
 letters beyond ASCII. Text that is not valid UTF-8 is matched where it is
-valid: no pattern matches an invalid byte. Positions are 1-based byte
+valid: no pattern matches an invalid byte or a match across one, a
+lookbehind stops at one, and `^` and `$` (without `m`) do not match beside
+one. Positions are 1-based byte
 offsets, as `string.find` gives them; a `start` past the end of the text
 plus one finds nothing.
 

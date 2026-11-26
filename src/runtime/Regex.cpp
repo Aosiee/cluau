@@ -51,10 +51,18 @@ namespace cluau::runtime::detail {
 			pcre2_code* Code = nullptr;
 			// The pattern again, compiled for text known to be valid UTF-8.
 			// Code takes text that may not be, and so checks it from the start
-			// of each search to its end: searching again and again through a
-			// long text with it would take time growing with the square of
-			// its length. Null if it could not be compiled.
+			// of each search to its end (or its first invalid byte): searching
+			// again and again through a long text with it would take time
+			// growing with the square of its length. Searches through a text
+			// go piece by piece with this instead (see Pieces). Null if it
+			// could not be compiled.
 			pcre2_code* Valid = nullptr;
+			// The pattern may hold \A, \z or \Z, which a piece of a text cannot
+			// be searched for alone: the piece's ends are not the text's.
+			bool Anchors = false;
+			// The pattern may hold \G, which matches where a search starts: in
+			// the pieces after the one a search starts in, never.
+			bool SearchStart = false;
 			pcre2_match_data* Data = nullptr; // made when first needed
 			pcre2_match_context* Context = nullptr;
 			std::string* Pattern = nullptr;
@@ -99,64 +107,15 @@ namespace cluau::runtime::detail {
 			return reinterpret_cast<const char*>(buffer);
 		}
 
-		// One match at or after `from` (0-based); false when there is none.
-		// `options`: PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED, for the retry
-		// after an empty match. With a budget, the search's steps come out of
-		// it (see kFirstSteps).
-		// `valid`: the text is known to be valid UTF-8, and `from` is at the
-		// start of a character.
-		bool Find(lua_State* L, RegexBox& re, std::string_view text, size_t from, uint32_t options = 0, Budget* budget = nullptr, bool valid = false)
+		// Where the first sequence that is not valid UTF-8 starts, at or after
+		// `from` (the start of a character), as PCRE2 has it (shortest forms,
+		// no surrogates, nothing past U+10FFFF); the text's size when there is
+		// none.
+		size_t FirstInvalid(std::string_view text, size_t from)
 		{
-			const pcre2_code* code = valid && re.Valid ? re.Valid : re.Code;
-			if (code == re.Valid)
-				options |= PCRE2_NO_UTF_CHECK;
-			if (!re.Data)
-			{
-				re.Data = pcre2_match_data_create_from_pattern(re.Code, nullptr);
-				if (!re.Data)
-					luaL_error(L, "the regex failed: out of memory");
-			}
-			uint32_t limit = kMatchLimit;
-			if (budget)
-				limit = (uint32_t)std::min<uint64_t>(kFirstSteps, budget->Left);
-			uint32_t tooFew = 0; // the last limit that was not enough
-			int rc = 0;
-			for (;;)
-			{
-				pcre2_set_match_limit(re.Context, limit);
-				rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(text.data()), text.size(), from, options, re.Data, re.Context);
-				if (!budget)
-					break;
-				if (rc != PCRE2_ERROR_MATCHLIMIT)
-				{
-					budget->Left -= std::min<uint64_t>(tooFew, budget->Left);
-					break;
-				}
-				budget->Left -= std::min<uint64_t>(limit, budget->Left);
-				if (limit >= kMatchLimit || budget->Left == 0)
-					break;
-				tooFew = limit;
-				limit = (uint32_t)std::min<uint64_t>({ (uint64_t)limit * 4, kMatchLimit, budget->Left });
-			}
-			if (rc >= 0)
-				return true;
-			if (rc == PCRE2_ERROR_NOMATCH)
-				return false;
-			if (rc == PCRE2_ERROR_MATCHLIMIT || rc == PCRE2_ERROR_DEPTHLIMIT || rc == PCRE2_ERROR_HEAPLIMIT)
-				luaL_error(L, "the regex gave up: the pattern backtracks too much on this text (%s)", re.Pattern->c_str());
-			luaL_error(L, "the regex failed: %s", Message(rc).c_str());
-			return false;
-		}
-
-		size_t Start(RegexBox& re) { return pcre2_get_ovector_pointer(re.Data)[0]; }
-		size_t End(RegexBox& re) { return pcre2_get_ovector_pointer(re.Data)[1]; }
-
-		// Whether the text is valid UTF-8 (as PCRE2 has it: shortest forms,
-		// no surrogates, nothing past U+10FFFF).
-		bool ValidUtf8(std::string_view text)
-		{
-			const unsigned char* p = reinterpret_cast<const unsigned char*>(text.data());
-			const unsigned char* end = p + text.size();
+			const unsigned char* begin = reinterpret_cast<const unsigned char*>(text.data());
+			const unsigned char* p = begin + from;
+			const unsigned char* end = begin + text.size();
 			while (p < end)
 			{
 				const unsigned char c = *p;
@@ -174,21 +133,206 @@ namespace cluau::runtime::detail {
 				else if (c >= 0xF0 && c <= 0xF4)
 					n = 3, cp = c & 0x07;
 				else
-					return false;
+					return (size_t)(p - begin);
 				if ((size_t)(end - p) <= n)
-					return false;
+					return (size_t)(p - begin);
 				for (size_t i = 1; i <= n; i++)
 				{
 					if ((p[i] & 0xC0) != 0x80)
-						return false;
+						return (size_t)(p - begin);
 					cp = (cp << 6) | (p[i] & 0x3F);
 				}
 				if ((n == 2 && cp < 0x800) || (n == 3 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF))
-					return false;
+					return (size_t)(p - begin);
 				p += n + 1;
 			}
-			return true;
+			return text.size();
 		}
+
+		bool IsContinuation(std::string_view text, size_t at) { return at < text.size() && ((unsigned char)text[at] & 0xC0) == 0x80; }
+
+		// A text in pieces of valid UTF-8, each from just past an invalid
+		// sequence (or the text's start) to the next (or its end), walked
+		// forward once by the searches of one call. This is how PCRE2 itself
+		// searches text with invalid UTF-8 (no match crosses an invalid
+		// sequence, a lookbehind stops at one, ^ and $ do not match beside
+		// one), but it checks the text again at every search.
+		class Pieces
+		{
+		public:
+			Pieces(std::string_view text, size_t start, size_t end) : m_Text(text), m_Start(start), m_End(end) {}
+			explicit Pieces(std::string_view text) : Pieces(text, 0, FirstInvalid(text, 0)) {}
+
+			size_t Start() const { return m_Start; }
+			size_t End() const { return m_End; }
+			bool Whole() const { return m_Start == 0 && m_End == m_Text.size(); }
+
+			// Moves to the piece holding `at` (the start of a character, or
+			// the end of the text): from past the last invalid sequence
+			// before it to the first at or after it.
+			void MoveTo(size_t at)
+			{
+				if (at < m_Start)
+				{
+					m_Start = 0;
+					m_End = FirstInvalid(m_Text, 0);
+				}
+				while (at > m_End)
+				{
+					m_Start = Restart(m_End);
+					m_End = FirstInvalid(m_Text, m_Start);
+				}
+			}
+
+			// Moves to the next piece that is not empty; false when there is
+			// none (nothing follows the text's last invalid sequence).
+			bool MoveOn()
+			{
+				for (;;)
+				{
+					if (m_End >= m_Text.size())
+						return false;
+					const size_t start = Restart(m_End);
+					if (start >= m_Text.size())
+						return false;
+					m_Start = start;
+					m_End = FirstInvalid(m_Text, start);
+					if (m_End > m_Start)
+						return true;
+				}
+			}
+
+		private:
+			// Where a piece may start after the invalid sequence at `bad`:
+			// past its first byte and any continuation bytes after it.
+			size_t Restart(size_t bad) const
+			{
+				size_t at = bad + 1;
+				while (IsContinuation(m_Text, at))
+					at++;
+				return at;
+			}
+
+			std::string_view m_Text;
+			size_t m_Start;
+			size_t m_End;
+		};
+
+		// Whether a pattern may hold one of `escapes` (a backslash before one
+		// of those letters anywhere in it, so sometimes when it does not).
+		bool MayHold(std::string_view pattern, const char* escapes)
+		{
+			for (size_t i = 1; i < pattern.size(); i++)
+				if (pattern[i - 1] == '\\' && std::strchr(escapes, pattern[i]) && pattern[i] != '\0')
+					return true;
+			return false;
+		}
+
+		// One search with `code` through `length` bytes of `subject` from
+		// `from`: PCRE2's result. With a budget, the search's steps come out
+		// of it (see kFirstSteps).
+		int Match(lua_State* L, RegexBox& re, const pcre2_code* code, const char* subject, size_t length, size_t from, uint32_t options,
+			Budget* budget)
+		{
+			if (!re.Data)
+			{
+				re.Data = pcre2_match_data_create_from_pattern(re.Code, nullptr);
+				if (!re.Data)
+					luaL_error(L, "the regex failed: out of memory");
+			}
+			uint32_t limit = kMatchLimit;
+			if (budget)
+				limit = (uint32_t)std::min<uint64_t>(kFirstSteps, budget->Left);
+			uint32_t tooFew = 0; // the last limit that was not enough
+			int rc = 0;
+			for (;;)
+			{
+				pcre2_set_match_limit(re.Context, limit);
+				rc = pcre2_match(code, reinterpret_cast<PCRE2_SPTR>(subject), length, from, options, re.Data, re.Context);
+				if (!budget)
+					break;
+				if (rc != PCRE2_ERROR_MATCHLIMIT)
+				{
+					budget->Left -= std::min<uint64_t>(tooFew, budget->Left);
+					break;
+				}
+				budget->Left -= std::min<uint64_t>(limit, budget->Left);
+				if (limit >= kMatchLimit || budget->Left == 0)
+					break;
+				tooFew = limit;
+				limit = (uint32_t)std::min<uint64_t>({ (uint64_t)limit * 4, kMatchLimit, budget->Left });
+			}
+			return rc;
+		}
+
+		// True for a match, false for none; an error otherwise.
+		bool Matched(lua_State* L, RegexBox& re, int rc)
+		{
+			if (rc >= 0)
+				return true;
+			if (rc == PCRE2_ERROR_NOMATCH)
+				return false;
+			if (rc == PCRE2_ERROR_MATCHLIMIT || rc == PCRE2_ERROR_DEPTHLIMIT || rc == PCRE2_ERROR_HEAPLIMIT)
+				luaL_error(L, "the regex gave up: the pattern backtracks too much on this text (%s)", re.Pattern->c_str());
+			luaL_error(L, "the regex failed: %s", Message(rc).c_str());
+			return false;
+		}
+
+		// Searches the piece `pieces` is at, then (finding nothing) the ones
+		// after it, as PCRE2 does: from `from` in the first, from the start
+		// of each one after. The match's positions are the text's.
+		bool FindInPieces(lua_State* L, RegexBox& re, std::string_view text, size_t from, uint32_t options, Budget* budget, Pieces& pieces)
+		{
+			const size_t first = from;
+			const uint32_t original = options;
+			for (;;)
+			{
+				const size_t start = pieces.Start();
+				uint32_t these = options | PCRE2_NO_UTF_CHECK;
+				if (start > 0)
+					these |= PCRE2_NOTBOL;
+				if (pieces.End() < text.size())
+					these |= PCRE2_NOTEOL;
+				const int rc = Match(L, re, re.Valid, text.data() + start, pieces.End() - start, from - start, these, budget);
+				if (Matched(L, re, rc))
+				{
+					PCRE2_SIZE* ovector = pcre2_get_ovector_pointer(re.Data);
+					const uint32_t pairs = pcre2_get_ovector_count(re.Data);
+					for (uint32_t i = 0; i < 2 * pairs; i++)
+						if (ovector[i] != PCRE2_UNSET)
+							ovector[i] += start;
+					return true;
+				}
+				if (!pieces.MoveOn())
+					return false;
+				// Where the search started is in the first piece: there
+				// \G matches, and "not empty at the start" holds.
+				if (re.SearchStart)
+					return Matched(L, re, Match(L, re, re.Code, text.data(), text.size(), first, original, budget));
+				from = pieces.Start();
+				options &= ~PCRE2_NOTEMPTY_ATSTART;
+			}
+		}
+
+		// One match at or after `from` (0-based); false when there is none.
+		// `options`: PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED, for the retry
+		// after an empty match. With a budget, the search's steps come out of
+		// it (see kFirstSteps). With `pieces` (of this text), the search goes
+		// piece by piece where it can.
+		bool Find(lua_State* L, RegexBox& re, std::string_view text, size_t from, uint32_t options = 0, Budget* budget = nullptr,
+			Pieces* pieces = nullptr)
+		{
+			if (pieces && re.Valid && !IsContinuation(text, from))
+			{
+				pieces->MoveTo(from);
+				if (!re.Anchors || pieces->Whole())
+					return FindInPieces(L, re, text, from, options, budget, *pieces);
+			}
+			return Matched(L, re, Match(L, re, re.Code, text.data(), text.size(), from, options, budget));
+		}
+
+		size_t Start(RegexBox& re) { return pcre2_get_ovector_pointer(re.Data)[0]; }
+		size_t End(RegexBox& re) { return pcre2_get_ovector_pointer(re.Data)[1]; }
 
 		// One character on from `at` (a whole UTF-8 sequence).
 		size_t NextCharacter(std::string_view text, size_t at)
@@ -207,11 +351,10 @@ namespace cluau::runtime::detail {
 			size_t At = 0;           // where the next search starts
 			bool AfterEmpty = false; // the last match was empty, ending at At
 			bool Done = false;
-			bool Valid = false; // the text is valid UTF-8
 		};
 
 		// The next match of the walk (in re's match data); false at the end.
-		bool Next(lua_State* L, RegexBox& re, std::string_view text, Scan& scan, Budget& budget)
+		bool Next(lua_State* L, RegexBox& re, std::string_view text, Scan& scan, Budget& budget, Pieces& pieces)
 		{
 			while (!scan.Done)
 			{
@@ -219,14 +362,12 @@ namespace cluau::runtime::detail {
 					RaiseIfInterrupted(L);
 				if (scan.At > text.size())
 					break;
-				// A match can end inside a character (\C matches one byte).
-				const bool valid = scan.Valid && (scan.At == text.size() || ((unsigned char)text[scan.At] & 0xC0) != 0x80);
 				if (!scan.AfterEmpty)
 				{
-					if (!Find(L, re, text, scan.At, 0, &budget, valid))
+					if (!Find(L, re, text, scan.At, 0, &budget, &pieces))
 						break;
 				}
-				else if (!Find(L, re, text, scan.At, PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED, &budget, valid))
+				else if (!Find(L, re, text, scan.At, PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED, &budget, &pieces))
 				{
 					scan.AfterEmpty = false;
 					if (scan.At >= text.size())
@@ -331,7 +472,8 @@ namespace cluau::runtime::detail {
 			const std::string_view text = Text(L, 2);
 			Release release{ re };
 			size_t from = 0;
-			lua_pushboolean(L, StartArg(L, 3, text, from) && Find(L, re, text, from));
+			Pieces pieces(text);
+			lua_pushboolean(L, StartArg(L, 3, text, from) && Find(L, re, text, from, 0, nullptr, &pieces));
 			return 1;
 		}
 
@@ -341,7 +483,8 @@ namespace cluau::runtime::detail {
 			const std::string_view text = Text(L, 2);
 			Release release{ re };
 			size_t from = 0;
-			if (!StartArg(L, 3, text, from) || !Find(L, re, text, from))
+			Pieces pieces(text);
+			if (!StartArg(L, 3, text, from) || !Find(L, re, text, from, 0, nullptr, &pieces))
 				return 0;
 			PushMatch(L, re, text);
 			return 1;
@@ -349,8 +492,8 @@ namespace cluau::runtime::detail {
 
 		// The iterator `matches` returns: upvalues are the regex, the text,
 		// where the next search starts (nil once done), whether the last
-		// match was empty, the steps its searches may still take, and
-		// whether the text is valid UTF-8.
+		// match was empty, the steps its searches may still take, and the
+		// piece of valid UTF-8 the searches have reached (its start and end).
 		int MatchesNext(lua_State* L)
 		{
 			RegexBox& re = Check(L, lua_upvalueindex(1));
@@ -361,14 +504,18 @@ namespace cluau::runtime::detail {
 			Scan scan;
 			scan.At = (size_t)lua_tonumber(L, lua_upvalueindex(3));
 			scan.AfterEmpty = lua_toboolean(L, lua_upvalueindex(4));
-			scan.Valid = lua_toboolean(L, lua_upvalueindex(6));
+			Pieces pieces(text, (size_t)lua_tonumber(L, lua_upvalueindex(6)), (size_t)lua_tonumber(L, lua_upvalueindex(7)));
 			Budget budget{ (uint64_t)lua_tonumber(L, lua_upvalueindex(5)) };
 			// Spent whether or not the search raises.
 			lua_pushnumber(L, 0);
 			lua_replace(L, lua_upvalueindex(5));
-			const bool found = Next(L, re, text, scan, budget);
+			const bool found = Next(L, re, text, scan, budget, pieces);
 			lua_pushnumber(L, (double)budget.Left);
 			lua_replace(L, lua_upvalueindex(5));
+			lua_pushnumber(L, (double)pieces.Start());
+			lua_replace(L, lua_upvalueindex(6));
+			lua_pushnumber(L, (double)pieces.End());
+			lua_replace(L, lua_upvalueindex(7));
 			if (!found)
 			{
 				lua_pushnil(L);
@@ -392,8 +539,10 @@ namespace cluau::runtime::detail {
 			lua_pushnumber(L, 0);
 			lua_pushboolean(L, false);
 			lua_pushnumber(L, (double)BudgetFor(text).Left);
-			lua_pushboolean(L, ValidUtf8(text));
-			lua_pushcclosure(L, MatchesNext, "matches", 6);
+			const Pieces pieces(text);
+			lua_pushnumber(L, (double)pieces.Start());
+			lua_pushnumber(L, (double)pieces.End());
+			lua_pushcclosure(L, MatchesNext, "matches", 7);
 			return 1;
 		}
 
@@ -483,9 +632,9 @@ namespace cluau::runtime::detail {
 			size_t copied = 0;
 			int64_t count = 0;
 			Scan scan;
-			scan.Valid = ValidUtf8(text);
+			Pieces pieces(text);
 			Budget budget = BudgetFor(text);
-			while ((limit < 0 || count < limit) && Next(L, re, text, scan, budget))
+			while ((limit < 0 || count < limit) && Next(L, re, text, scan, budget, pieces))
 			{
 				const size_t start = Start(re), end = End(re);
 				out.append(text.substr(copied, start - copied));
@@ -528,9 +677,9 @@ namespace cluau::runtime::detail {
 			int64_t n = 0;
 			size_t piece = 0;
 			Scan scan;
-			scan.Valid = ValidUtf8(text);
+			Pieces pieces(text);
 			Budget budget = BudgetFor(text);
-			while ((limit < 0 || n + 1 < limit) && Next(L, re, text, scan, budget))
+			while ((limit < 0 || n + 1 < limit) && Next(L, re, text, scan, budget, pieces))
 			{
 				const size_t start = Start(re), end = End(re);
 				// An empty match at the start or the end splits nothing off.
@@ -584,7 +733,10 @@ namespace cluau::runtime::detail {
 				}
 			int error = 0;
 			PCRE2_SIZE offset = 0;
-			pcre2_code* code = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern), len, options, &error, &offset, nullptr);
+			// Without the shortcut of trying a pattern that starts with .*
+			// only at the start and after newlines: past an invalid byte that
+			// would miss matches (".*?$" in "\xffab" finds "ab" in pieces).
+			pcre2_code* code = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern), len, options | PCRE2_NO_DOTSTAR_ANCHOR, &error, &offset, nullptr);
 			if (!code)
 				luaL_error(L, "bad regex at position %d: %s", (int)offset + 1, Message(error).c_str());
 			RegexBox* box = static_cast<RegexBox*>(lua_newuserdatadtor(L, sizeof(RegexBox), [](lua_State*, void* p) {
@@ -597,6 +749,8 @@ namespace cluau::runtime::detail {
 			}));
 			box->Code = code;
 			box->Valid = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern), len, options & ~PCRE2_MATCH_INVALID_UTF, &error, &offset, nullptr);
+			box->Anchors = MayHold(std::string_view(pattern, len), "AzZ");
+			box->SearchStart = MayHold(std::string_view(pattern, len), "G");
 			box->Data = nullptr;
 			box->Context = pcre2_match_context_create(nullptr);
 			box->Pattern = new std::string(pattern, len);

@@ -130,8 +130,8 @@ Each release also has Debian and RPM packages for Linux, which install
 `/usr/bin/cluau` for every user:
 
 ```sh
-sudo apt install ./cluau_0.29.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
-sudo dnf install --nogpgcheck ./cluau-0.29.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
+sudo apt install ./cluau_0.29.1_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
+sudo dnf install --nogpgcheck ./cluau-0.29.1-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
 ```
 
 The packages are not signed yet (`--nogpgcheck` lets dnf install one); the

@@ -28,4 +28,7 @@ short repeated group	true
 one costly piece	true
 many costly pieces	false	true
 many cheap pieces	100001
+long text with an invalid byte	300002	100001	true
+after an invalid byte	[ab]@3 []@5	[a]@1 [b]@3 [c]@5
+beside an invalid byte	[a]@1 [d]@5	[b]@1 [b]@2 [c]@5
 exit: 0

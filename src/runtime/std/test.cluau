@@ -78,7 +78,7 @@ function Describe(problem: unknown): string {
 	if (type(problem) == "string") {
 		return problem :: string
 	}
-	const meta: unknown = getmetatable(problem :: any) // allow-any: Luau types getmetatable for tables only; an error can be any value
+	const meta = getmetatable(problem)
 	if (type(meta) == "table" && (meta :: { __tostring: unknown }).__tostring != nil) {
 		return tostring(problem)
 	}

@@ -69,8 +69,6 @@ const counter = { next = 0, since = 0 }
 // is reported with that task's stack when it is this one (the runtime's).
 // `count` goes up with each failure.
 const failure: { message: unknown, thread: thread?, count: number } = { message = nil, thread = nil, count = 0 }
-// What a task that cancels itself where it cannot yield raises to end.
-const cancelled: unknown = newproxy() // allow-any: Luau types newproxy() as any; this is an opaque marker
 
 // Into `waiting`, kept latest first so the next due is the last: found by
 // halving, so many tasks cost little each.
@@ -119,7 +117,7 @@ const Resume = function(state: State) {
 		results = table.pack(coroutine.resume(state.thread, table.unpack(state.args)))
 	}
 	if (state.task.done) {
-		// Cancelled while it ran (it ends with `cancelled`, or went on past a
+		// Cancelled while it ran (it ends with an error, or went on past a
 		// pcall): what it did since is dropped, and so is any job it started.
 		if (results[1] && results[2] == jobs.marker) {
 			jobs.forget(results[3] :: number)
@@ -322,7 +320,10 @@ const join = function<R...>(task: Task<R...>): R... {
 	}
 	// None for a task that was cancelled or failed.
 	const results = resultsOf[task] or { n = 0 }
-	return (table.unpack :: any)(results, 1, results.n) // allow-any: the results are kept untyped; Task<R...> gives their type
+	// The results are kept untyped (coroutine.resume gave them); the task's
+	// type says what they are.
+	const unpack = table.unpack :: unknown
+	return (unpack :: (Packed, number, number) -> R...)(results, 1, results.n)
 }
 
 // Stops the task: it does not run again, and what joins it gets nothing.
@@ -347,7 +348,10 @@ const cancel = function<R...>(task: Task<R...>) {
 		if (coroutine.isyieldable()) {
 			coroutine.yield() // never resumed
 		}
-		error(cancelled, 0) // ends the task (Resume drops it)
+		// A task that cancels itself where it cannot yield ends with an
+		// error (one a pcall of its own sees as this message); Resume drops
+		// it.
+		error("task.cancel: the task was cancelled", 0)
 	}
 }
 

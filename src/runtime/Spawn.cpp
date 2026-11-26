@@ -476,9 +476,76 @@ namespace cluau::runtime::detail {
 
 	namespace {
 
-		// One launch at a time: the pipes are inheritable while a child is
-		// made, and another child made then would hold their ends too.
+		// One launch at a time. Each child is given only its own pipe ends
+		// (see Inherited), so this keeps launches in order rather than
+		// keeping them apart.
 		std::mutex g_Launching;
+
+		// The handles a child is given: its standard three and nothing else.
+		// Every inheritable handle would otherwise go to it (sockets are
+		// inheritable from the start, and so are files the C library
+		// opens), and keep them open, and a file from being removed, for as
+		// long as it runs. The parent's own standard handles go as
+		// inheritable copies, closed once the child has its own.
+		class Inherited
+		{
+		public:
+			~Inherited()
+			{
+				for (HANDLE copy : m_Copies)
+					CloseHandle(copy);
+				if (m_Attributes)
+					DeleteProcThreadAttributeList(m_Attributes);
+			}
+
+			// An inheritable copy of one of the parent's own handles.
+			HANDLE Copy(HANDLE handle)
+			{
+				if (handle == nullptr || handle == INVALID_HANDLE_VALUE)
+					return handle;
+				HANDLE copy = nullptr;
+				if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &copy, 0, TRUE, DUPLICATE_SAME_ACCESS))
+					return handle; // as it is: a console's own handle, say
+				m_Copies.push_back(copy);
+				return copy;
+			}
+
+			// The attribute list naming `handles` (each once; none that is
+			// not a handle, nor one of the console handles of old systems,
+			// which the list refuses). False when the list cannot be made.
+			bool Name(std::initializer_list<HANDLE> handles)
+			{
+				for (HANDLE h : handles)
+				{
+					if (h == nullptr || h == INVALID_HANDLE_VALUE)
+						continue;
+					if (((uintptr_t)h & 3) == 3 && GetFileType(h) == FILE_TYPE_CHAR)
+						continue;
+					if (std::find(m_List.begin(), m_List.end(), h) == m_List.end())
+						m_List.push_back(h);
+				}
+				if (m_List.empty())
+					return true;
+				SIZE_T size = 0;
+				InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+				m_Storage.resize(size);
+				auto* list = (LPPROC_THREAD_ATTRIBUTE_LIST)m_Storage.data();
+				if (!InitializeProcThreadAttributeList(list, 1, 0, &size))
+					return false;
+				m_Attributes = list;
+				return UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, m_List.data(), m_List.size() * sizeof(HANDLE),
+					nullptr, nullptr) != 0;
+			}
+
+			// Null when there is nothing to give.
+			LPPROC_THREAD_ATTRIBUTE_LIST Attributes() const { return m_Attributes; }
+
+		private:
+			std::vector<HANDLE> m_Copies;
+			std::vector<HANDLE> m_List;
+			std::vector<char> m_Storage;
+			LPPROC_THREAD_ATTRIBUTE_LIST m_Attributes = nullptr;
+		};
 
 		bool Launch(const SpawnRequest& request, bool pipeInput, Started& started, std::string& why)
 		{
@@ -556,14 +623,20 @@ namespace cluau::runtime::detail {
 				(request.Error == Stream::Capture && !makePipe(started.Err, errWrite, false)))
 				return fail();
 
-			STARTUPINFOW startup{};
-			startup.cb = sizeof(startup);
+			Inherited inherited;
+			STARTUPINFOEXW startupEx{};
+			STARTUPINFOW& startup = startupEx.StartupInfo;
+			startup.cb = sizeof(startupEx);
 			startup.dwFlags = STARTF_USESTDHANDLES;
-			startup.hStdInput = pipeInput ? inRead : GetStdHandle(STD_INPUT_HANDLE);
-			startup.hStdOutput = capture ? outWrite : GetStdHandle(STD_OUTPUT_HANDLE);
+			startup.hStdInput = pipeInput ? inRead : inherited.Copy(GetStdHandle(STD_INPUT_HANDLE));
+			startup.hStdOutput = capture ? outWrite : inherited.Copy(GetStdHandle(STD_OUTPUT_HANDLE));
 			startup.hStdError = request.Error == Stream::Capture ? errWrite
 				: request.Error == Stream::Merge                 ? outWrite
-																  : GetStdHandle(STD_ERROR_HANDLE);
+																  : inherited.Copy(GetStdHandle(STD_ERROR_HANDLE));
+			if (!inherited.Name({ startup.hStdInput, startup.hStdOutput, startup.hStdError }))
+				return fail();
+			startupEx.lpAttributeList = inherited.Attributes();
+			const bool inherit = startupEx.lpAttributeList != nullptr;
 			std::wstring env;
 			if (!request.Env.empty())
 			{
@@ -573,8 +646,8 @@ namespace cluau::runtime::detail {
 			const std::wstring cwd = Wide(request.Cwd);
 			std::fflush(stdout);
 			std::fflush(stderr);
-			const DWORD flags = CREATE_SUSPENDED | (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT);
-			if (!CreateProcessW(application.empty() ? nullptr : application.c_str(), line.data(), nullptr, nullptr, TRUE, flags,
+			const DWORD flags = CREATE_SUSPENDED | (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT) | (inherit ? EXTENDED_STARTUPINFO_PRESENT : 0);
+			if (!CreateProcessW(application.empty() ? nullptr : application.c_str(), line.data(), nullptr, nullptr, inherit, flags,
 					env.empty() ? nullptr : env.data(), cwd.empty() ? nullptr : cwd.c_str(), &startup, &started.Process))
 				return fail();
 			// The job holds it and what it starts; where it cannot be put in

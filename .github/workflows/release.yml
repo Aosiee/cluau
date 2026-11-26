@@ -74,7 +74,7 @@ jobs:
           echo "a release is built from its tag ($TAG), not from $REF: run with publish off for a dry run of $REF"
           exit 1
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
@@ -146,7 +146,7 @@ jobs:
             tar -czf "$dir.tar.gz" "$dir"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.name }}
           path: cluau-*.*z*
@@ -164,7 +164,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
@@ -203,11 +203,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: linux-${{ matrix.arch }}
           path: dist
@@ -235,7 +235,7 @@ jobs:
             docker run --rm -v "$PWD/packages:/packages" -v "$PWD/probe:/probe" "$image" sh -c "rpm -i --nosignature /packages/cluau-*.rpm && $check && test -s /usr/share/licenses/cluau/THIRD_PARTY_NOTICES.md && rpm -e cluau && ! test -e /usr/bin/cluau"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: packages-${{ matrix.arch }}
           path: packages/*
@@ -252,15 +252,15 @@ jobs:
         shell: bash
         working-directory: editors/vscode
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: linux-x86_64
           path: dist
@@ -282,7 +282,9 @@ jobs:
       - name: In VS Code
         run: |
           tar -xzf "../../dist/cluau-$TAG-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
+          # VS Code 1.95.3, checked against the SHA-256 Microsoft publishes for it.
           curl -fsSL -o "$RUNNER_TEMP/vscode.tar.gz" https://update.code.visualstudio.com/1.95.3/linux-x64/stable
+          echo "881c6dce9f9b18bdeaa0020197501be3808c6e23c26baa0ba905b0bc84175b46  $RUNNER_TEMP/vscode.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/vscode.tar.gz" -C "$RUNNER_TEMP"
           CLUAU_EDITOR_ARGS=--no-sandbox xvfb-run -a node test/editor/run.js "$RUNNER_TEMP/VSCode-linux-x64/code" "$RUNNER_TEMP/cluau-$TAG-linux-x86_64/cluau"
 
@@ -291,7 +293,7 @@ jobs:
           cp ../../LICENSE .
           npx vsce package --out "../../cluau-vscode-$TAG.vsix"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vscode
           path: cluau-vscode-*.vsix
@@ -308,11 +310,11 @@ jobs:
       matrix:
         os: [ubuntu-26.04, ubuntu-26.04-arm, macos-latest, macos-15-intel, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -413,11 +415,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -472,15 +474,15 @@ jobs:
       HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
       HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ env.REF }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: vscode
           path: dist

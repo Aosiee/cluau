@@ -717,6 +717,15 @@ return m :: {
 			Luau::LoadDefinitionFileResult loaded =
 				frontend.loadDefinitionFile(globals, globals.globalScope, kGlobals, "@cluau", false, forAutocomplete);
 			m->GlobalsLoaded = m->GlobalsLoaded && loaded.success;
+			// getmetatable takes any value, as it does when the script runs:
+			// Luau's original solver has it for tables with a metatable only.
+			// Those still give their metatable's type; other values unknown.
+			if (Luau::Binding* binding = Luau::tryGetGlobalBindingRef(globals, "getmetatable"))
+			{
+				const Luau::TypeId unknown = frontend.builtinTypes->unknownType;
+				binding->typeId = Luau::makeIntersection(
+					globals.globalTypes, { binding->typeId, Luau::makeFunction(globals.globalTypes, std::nullopt, { unknown }, { unknown }) });
+			}
 			Luau::freeze(globals.globalTypes);
 		}
 	}

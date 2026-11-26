@@ -36,7 +36,7 @@ export type Request = {
 }
 // A file files() answers with: sent as it is read, not read whole first.
 class FileBody {
-	File: fs.File = nil :: any // allow-any: given by the constructor
+	File: fs.File
 	Size: number = 0
 	function Init(file: fs.File, size: number) {
 		self.File = file
@@ -45,7 +45,8 @@ class FileBody {
 }
 
 export type Response = { status: number?, headers: { [string]: string }?, body: (string | buffer | FileBody)? }
-export type Answer = Response | string | nil
+// An Upgrade is what upgrade() answers with.
+export type Answer = Response | string | Upgrade | nil
 export type Handler = (request: Request) -> Answer
 export type Options = {
 	host: string?,      // "127.0.0.1" (this machine only) by default
@@ -133,7 +134,7 @@ const Fail = function(status: number, message: string): never {
 // Whether `value` is an instance of the class `of` (FileBody, Failure,
 // Upgrade): whether that is its metatable.
 const IsInstance = function(value: unknown, of: unknown): boolean {
-	return getmetatable(value :: any) == of // allow-any: Luau types getmetatable for tables only; a handler may answer with any value
+	return getmetatable(value) == of
 }
 
 // A line of a request's head or of a chunked body's framing, of at most
@@ -533,11 +534,11 @@ const upgrade = function(request: Request, run: (ws: websocket.WebSocket) -> ())
 		return { status = 426, headers = { ["Sec-WebSocket-Version"] = "13" }, body = "WebSocket version 13" }
 	}
 	// An error in a build without @std/crypto: the handler's, so a 500.
-	return Upgrade(run, websocket._accept(key)) :: any // allow-any: an answer serve knows
+	return Upgrade(run, websocket._accept(key))
 }
 
 class Running {
-	Server: net.Server = nil :: any // allow-any: set by the constructor
+	Server: net.Server
 	Closed: boolean = false
 	// The connections waiting for their next request (closed by close()).
 	Idle: { [net.Socket]: boolean } = {}

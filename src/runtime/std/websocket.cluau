@@ -115,7 +115,7 @@ const Frame = function(opcode: number, payload: string, masked: boolean): string
 }
 
 class Connection {
-	Socket: net.Socket = nil :: any // allow-any: given by the constructor
+	Socket: net.Socket
 	Client: boolean = true
 	Closed: boolean = false
 	// The protocol the server chose (""), and the close's code and reason.

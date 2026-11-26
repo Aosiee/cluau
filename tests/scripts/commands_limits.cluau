@@ -57,7 +57,19 @@ task.cancel(guard)
 if (process.platform == "windows") {
 	print("generator stopped by SIGPIPE", true, "1")
 	print("no zombies", true)
-	print("files kept from children", true)
+	// A file the script has open is not the child's too: once the script
+	// closes it, it can be removed while the child runs on.
+	const kept = fs.tempFile("cluau-limits")
+	const file = fs.open(kept, "w")
+	const child = process.spawn({ cluau, "-e", "require('@std/process').sleep(3)" })
+	file:close()
+	const removed = pcall(fs.remove, kept)
+	child:kill()
+	child:wait()
+	if (!removed) {
+		pcall(fs.remove, kept)
+	}
+	print("files kept from children", removed)
 } else {
 	// A name of its own (two runs at once do not share it), with the
 	// extension a script has.

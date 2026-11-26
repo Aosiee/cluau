@@ -1,6 +1,7 @@
 // @std/regex at its edges: empty matches in matches, replace and split
 // (as Perl and Python find them), \K, positions out of range, duplicate
-// group names, escaping for the x flag, and the limits.
+// group names, escaping for the x flag, text that is not valid UTF-8, and
+// the limits.
 const regex = require("@std/regex")
 
 function spans(pattern: string, text: string): string {
@@ -66,3 +67,14 @@ const ok, why = pcall(function() {
 print("many costly pieces", ok, string.find(tostring(why), "gave up", 1, true) != nil)
 const _, cheap = regex.compile("x*"):replace(string.rep("ab", 50000), "-")
 print("many cheap pieces", cheap)
+
+// Text that is not valid UTF-8 is searched piece by piece: past an invalid
+// byte the searches go on as quickly as in valid text, and a pattern that
+// starts with .* finds its matches there too.
+const time = require("@std/time")
+const invalid = string.rep("ab ", 100000) .. "\xff"
+const began = time.monotonic()
+const _, pieces = regex.compile("x*"):replace(invalid, "-")
+print("long text with an invalid byte", pieces, #regex.compile("b"):split(invalid), time.monotonic() - began < 10)
+print("after an invalid byte", spans("(?m).*?$", "\xe2\x82ab\ncd\xff"), spans(".+", "a\xffb\xc3c"))
+print("beside an invalid byte", spans("^.|.$|(?<=b).", "ab\xffcd"), spans("\\Gb|c", "bb\xffbc"))

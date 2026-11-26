@@ -2,6 +2,30 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.29.1: what the second review left
+
+- On Windows, a program the script starts is given its standard input,
+  output and error and nothing else, as on Linux and macOS. It used to
+  inherit every inheritable handle in the script, sockets and the files
+  @std/fs had open among them, and held them for as long as it ran: a
+  file the script had closed could not be removed.
+- @std/regex: `replace`, `split` and `matches` through a long text that
+  is not valid UTF-8 take time in proportion to its length, as they do
+  for valid text (120 KB with one invalid byte took 3 to 18 seconds, now
+  milliseconds). The text is searched piece by piece between its invalid
+  sequences, as PCRE2 itself does, and a pattern that starts with `.*`
+  now finds its matches after an invalid byte too.
+- `cluau check` accepts `getmetatable` on any value, as the runtime does
+  (it took only tables with a metatable); a table's metatable keeps its
+  type.
+- `server.Answer` includes what `server.upgrade` answers with, so a
+  handler that upgrades is typed as it is. The standard modules have no
+  `any` left in them.
+- A task that cancels itself where it cannot yield ends with the error
+  "task.cancel: the task was cancelled", which a pcall of its own sees.
+- Release workflow: actions are pinned to commits, and the VS Code
+  download for the editor test is checked against its SHA-256.
+
 ## 0.29.0: a second, deeper review
 
 A second review of the whole of cluau, area by area, with each fix covered

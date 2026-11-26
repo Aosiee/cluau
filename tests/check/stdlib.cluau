@@ -18,3 +18,7 @@ parsed:flag("verbose")                                     // tryParse may give 
 const rows: { string } = csv.parse("a,b")                  // rows of fields
 print(json.decode("{}", { null = json.null }).key)          // decode gives unknown
 print(file, count, child, late, when, rows)
+
+// getmetatable takes any value; a table's metatable keeps its type.
+const anything: unknown = 3
+print(getmetatable(anything), getmetatable("text"), getmetatable(setmetatable({}, { __index = { size = 1 } })).__index.size)
