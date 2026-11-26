@@ -1,0 +1,40 @@
+// Mistakes with @std/collections that cluau check reports: its generic
+// types carry the items' type through.
+const collections = require("@std/collections")
+
+type Person = { name: string, age: number }
+const people: { Person } = { { name = "Ada", age = 36 } }
+
+const names = collections.set({ "Ada", "Bo" })
+names:add(3)                                                 // a set of strings
+const line: collections.Deque<number> = collections.deque()
+line:pushBack("first")                                       // a deque of numbers
+const front: number = line:popFront()                        // nil when it is empty
+collections.sortBy(people, function(p: Person): boolean {    // a key is a number or a string
+	return p.age > 30
+})
+const sorted: { string } = collections.sorted(people)        // a list of people
+const oldest = collections.maxBy(people, function(p: Person): number {
+	return p.age
+})
+print(oldest.name)                                           // nil for an empty list
+const counts = collections.counter({ "a", "b" })
+const total: string = counts.a                               // counts are numbers
+const groups = collections.groupBy(people, function(p: Person): number {
+	return p.age
+})
+print(groups.Ada)                                            // keyed by age
+const lengths: { string } = collections.map({ "a", "bb" }, function(s: string): number {
+	return #s
+})
+collections.reduce({ 1, 2 }, function(text: string, n: number): string {
+	return text .. n
+}, 0)                                                        // the start is the result's type
+for (i, name, age in collections.zip({ "Ada" }, { 36 })) {
+	const wrong: string = age                                // zip keeps each list's type
+	print(i, name, wrong)
+}
+const top = collections.mostCommon({ "a", "b", "a" })
+const item: number = top[1].item                             // the items' type
+collections.chunk({ 1, 2 }, "2")                             // the size is a number
+print(front, sorted, total, lengths, item)

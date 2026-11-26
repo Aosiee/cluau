@@ -1,0 +1,80 @@
+Di Bo Ed Ada Cy
+Ada Cy Bo Ed Di
+Ed Di Cy Bo Ada
+Ada Cy Bo Ed Di
+Ada Bo Cy Di Ed
+{-4, 1, 1.5, 2, 3}	{"", "Fig", "apple", "pear"}
+{0, -0, -0, 0, 1}	{}
+stable	true	p5	p97
+Di	Ada	nil
+2	3	1	1	nil
+b	3
+a	2
+c	1
+d	1
+2	0	4
+19	Di
+25	Bo Ed
+36	Ada Cy
+{3, 1, 2}	{"x", "y"}
+{{1, 2}, {3, 4}, {5}}	{{1, 2}}	{}
+1	Ada	36
+2	Bo	25
+{1, 2, 3, 4, 5}	{{1}, {2}, {3}}
+{1, 2, 3, 4, 5}	{2, 3, 4}	{10, 7, 4, 1}	{}
+{0, 0.25, 0.5, 0.75, 1}	{}
+{3, 2, 1}	{}
+{"b", "c", "d"}	{"d", "e"}	{"a", "b", "c", "d"}
+{"a", "b", "c", "d", "e"}	{"a", "b"}	{"a", "b", "c", "d", "e"}
+{}	{}	{}
+{"<4>", "<8>", "<15>", "<16>", "<23>", "<42>"}
+{15, 23}
+108	7	108	0
+>babcabd
+true	false	false	true
+false	true	true	false
+15	3
+nil	nil
+4	nil	4
+{"apple", "fig", "pear"}	{2, 3, 1}
+{-1, 2, 10}	{"z", "y", "x"}
+{1.5, 3, "a", "b", false, true}	{6, 3, 4, 2, 5, 1}
+{}
+Set {"b", "a", "c"}	3	true	false
+true	false	true	false	3
+Set {"a", "c", "d"}	{"a", "c", "d"}
+member	a	2
+member	c	1
+member	d	0
+Set {1, 2, 3, 4, 5}	Set {3, 4}	Set {1, 2}	Set {1, 2, 5}
+false	true	true	true
+Set {}	0	false	false
+Set {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 5}	11	true	false
+Deque {1, 2, 3, 4}	4	1	4
+1	4	3	2	nil	nil	0
+nil	nil	Deque {}
+24	-12	12
+-11 -10 -9 -8 -7 -6 -5 -4 -3 -2 -1 1 2 3 4 5 6 7 8 9 10 11	22
+false	collections.cluau:169: collections.chunk: the size is a whole number from 1, not 0
+false	collections.cluau:172: collections.chunk: the size is a whole number from 1, not 1.5
+false	collections.cluau:175: collections.mostCommon: n is a whole number from 0, not -1
+false	collections.cluau:178: collections.range: the step is a finite number other than 0, not 0
+false	collections.cluau:181: collections.range: the bounds are finite numbers, not 1 and inf
+false	collections.cluau:184: collections.slice: the bounds are whole numbers, not 1.5
+false	collections.cluau:187: collections.sorted: the items are all numbers or all strings, but item 2 is a string after numbers
+false	collections.cluau:190: collections.sorted: item 1 is a table, not a number or a string (other items are sorted with a less function)
+false	collections.cluau:193: collections.sorted: item 2 is NaN, which has no place in an order
+false	collections.cluau:196: collections.sortBy: the keys are all numbers or all strings, but the key of item 2 is a number after strings
+false	collections.cluau:201: collections.sortBy: the key of item 1 is nil, not a number or a string
+false	collections.cluau:206: collections.maxBy: the key of item 1 is NaN, which has no place in an order
+false	collections.cluau:211: collections.counter: item 2 is NaN, which cannot be a table key
+false	collections.cluau:214: collections.unique: item 1 is NaN, which cannot be a table key
+false	collections.cluau:217: collections.mostCommon: item 1 is NaN, which cannot be a table key
+false	collections.cluau:220: collections.groupBy: the key of item 2 is nil, which cannot be a table key
+false	collections.cluau:225: collections.map: the function returned nil for item 2, and a list cannot hold nil
+false	collections.cluau:230: collections.set: item 1 is NaN, which a set cannot hold
+false	collections.cluau:233: set:add: the item is NaN, which a set cannot hold
+false	collections.cluau:237: set:add: the item is nil, which a set cannot hold
+false	collections.cluau:241: deque:pushBack: the item is nil, which a deque cannot hold
+false	collections.cluau:245: deque:pushFront: the item is nil, which a deque cannot hold
+exit: 0

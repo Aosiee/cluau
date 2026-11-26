@@ -532,8 +532,9 @@ __cluau_meta = {
 				}
 			// Native code costs about 5 microseconds a line to generate: the
 			// bundled modules that only parse arguments, run tests or manage
-			// packages stay interpreted; @std/csv's parsing gains from it.
-			const bool tooling = StartsWith(name, "@std/") && name != "@std/csv";
+			// packages stay interpreted; @std/csv's parsing and @std/collections'
+			// sorting gain from it.
+			const bool tooling = StartsWith(name, "@std/") && name != "@std/csv" && name != "@std/collections";
 			if (!loadFailed && Native && !tooling)
 				Luau::CodeGen::compile(L, -1, 0);
 			if (loadFailed)

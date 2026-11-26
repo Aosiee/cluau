@@ -1,0 +1,246 @@
+// cluau --sandbox
+// @std/collections: every function and both containers, the orders they
+// promise (stable sorts, first-seen ties, sorted keys, insertion order), and
+// the mistakes they report at the caller's line.
+const collections = require("@std/collections")
+
+type Person = { name: string, age: number }
+
+const people: { Person } = {
+	{ name = "Ada", age = 36 },
+	{ name = "Bo", age = 25 },
+	{ name = "Cy", age = 36 },
+	{ name = "Di", age = 19 },
+	{ name = "Ed", age = 25 },
+}
+function Names(list: { Person }): string {
+	return table.concat(collections.map(list, function(p: Person): string {
+		return p.name
+	}), " ")
+}
+function ByAge(p: Person): number {
+	return p.age
+}
+
+// Sorting: stable, into a new list.
+print(Names(collections.sortBy(people, ByAge)))
+print(Names(collections.sortBy(people, ByAge, { descending = true })))
+print(Names(collections.sortBy(people, function(p: Person): string {
+	return string.lower(p.name)
+}, { descending = true })))
+print(Names(collections.sorted(people, function(a: Person, b: Person): boolean {
+	return a.age > b.age
+})))
+print(Names(people))
+print(repr(collections.sorted({ 3, 1, 2, 1.5, -4 })), repr(collections.sorted({ "pear", "apple", "Fig", "" })))
+print(repr(collections.sorted({ 0, -0, 1, -0, 0 })), repr(collections.sorted({})))
+// Longer than a run of insertion sort, with many equal keys.
+const many: { Person } = {}
+for (i = 1, 100) {
+	table.insert(many, { name = `p{i}`, age = (i * 7) % 5 })
+}
+const byAge = collections.sortBy(many, ByAge)
+let stable = true
+for (i = 2, #byAge) {
+	const a = byAge[i - 1]
+	const b = byAge[i]
+	if (a.age > b.age || (a.age == b.age && tonumber(string.sub(a.name, 2)) > tonumber(string.sub(b.name, 2)))) {
+		stable = false
+	}
+}
+print("stable", stable, byAge[1].name, byAge[#byAge].name)
+const p = collections.minBy(people, ByAge)
+const q = collections.maxBy(people, ByAge)
+print(p and p.name, q and q.name, collections.minBy({} :: { Person }, ByAge))
+
+// Counting and grouping.
+const words = { "b", "a", "b", "c", "a", "b", "d" }
+const counts = collections.counter(words)
+print(counts.a, counts.b, counts.c, counts.d, counts.e)
+for (_, entry in collections.mostCommon(words)) {
+	print(entry.item, entry.count)
+}
+print(#collections.mostCommon(words, 2), #collections.mostCommon(words, 0), #collections.mostCommon(words, 10))
+const groups = collections.groupBy(people, ByAge)
+for (_, age in collections.keys(groups)) {
+	print(age, Names(groups[age]))
+}
+print(repr(collections.unique({ 3, 1, 3, 2, 1, 3 })), repr(collections.unique({ "x", "y", "x" })))
+
+// Shaping lists.
+print(repr(collections.chunk({ 1, 2, 3, 4, 5 }, 2)), repr(collections.chunk({ 1, 2 }, 5)), repr(collections.chunk({}, 3)))
+for (i, name, age in collections.zip({ "Ada", "Bo", "Cy" }, { 36, 25 })) {
+	print(i, name, age)
+}
+print(repr(collections.flatten({ { 1, 2 }, {}, { 3 }, { 4, 5 } })), repr(collections.flatten({ { { 1 }, { 2 } }, { { 3 } } })))
+print(repr(collections.range(5)), repr(collections.range(2, 4)), repr(collections.range(10, 1, -3)), repr(collections.range(5, 1)))
+print(repr(collections.range(0, 1, 0.25)), repr(collections.range(0)))
+print(repr(collections.reverse({ 1, 2, 3 })), repr(collections.reverse({})))
+const letters = { "a", "b", "c", "d", "e" }
+print(repr(collections.slice(letters, 2, 4)), repr(collections.slice(letters, -2)), repr(collections.slice(letters, 1, -2)))
+print(repr(collections.slice(letters)), repr(collections.slice(letters, 0, 2)), repr(collections.slice(letters, -10, 10)))
+print(repr(collections.slice(letters, 4, 2)), repr(collections.slice(letters, 6)), repr(collections.slice(letters, 1, -6)))
+
+// Functions over lists.
+const numbers = { 4, 8, 15, 16, 23, 42 }
+print(repr(collections.map(numbers, function(n: number): string {
+	return `<{n}>`
+})))
+print(repr(collections.filter(numbers, function(n: number): boolean {
+	return n % 2 == 1
+})))
+print(collections.reduce(numbers, function(total: number, n: number): number {
+	return total + n
+}, 0), collections.reduce({} :: { number }, function(total: number, n: number): number {
+	return total + n
+}, 7), collections.sum(numbers), collections.sum({}))
+print(collections.reduce(words, function(text: string, word: string): string {
+	return text .. word
+}, ">"))
+function Odd(n: number): boolean {
+	return n % 2 == 1
+}
+print(collections.some(numbers, Odd), collections.every(numbers, Odd), collections.some({}, Odd), collections.every({}, Odd))
+print(collections.some({ false, false }), collections.some({ false, true }), collections.every({ true, 0, "" } :: { unknown }), collections.every({ true, false }))
+print(collections.find(numbers, Odd))
+print(collections.find(numbers, function(n: number): boolean {
+	return n > 100
+}))
+print(collections.indexOf(numbers, 16), collections.indexOf(numbers, 17), collections.indexOf(words, "c"))
+
+// Tables: keys sorted, values in the keys' order.
+print(repr(collections.keys({ pear = 1, apple = 2, fig = 3 })), repr(collections.values({ pear = 1, apple = 2, fig = 3 })))
+print(repr(collections.keys({ [10] = "x", [2] = "y", [-1] = "z" })), repr(collections.values({ [10] = "x", [2] = "y", [-1] = "z" })))
+const mixed: { [unknown]: number } = { [true] = 1, b = 2, [3] = 3, a = 4, [false] = 5, [1.5] = 6 }
+print(repr(collections.keys(mixed)), repr(collections.values(mixed)))
+print(repr(collections.keys({})))
+
+// Set: insertion order, each member once.
+const seen = collections.set({ "b", "a", "b", "c" })
+print(seen, seen:size(), seen:has("a"), seen:has("z"))
+print(seen:add("d"), seen:add("a"), seen:remove("b"), seen:remove("b"), seen:size())
+print(seen, repr(seen:toList()))
+for (member in seen:items()) {
+	seen:remove(member) // the loop goes over the members as they were
+	print("member", member, seen:size())
+}
+const left = collections.set({ 1, 2, 3, 4 })
+const right = collections.set({ 3, 4, 5 })
+print(left:union(right), left:intersection(right), left:difference(right), left:symmetricDifference(right))
+print(left:isSubset(right), collections.set({ 4, 3 }):isSubset(left), collections.set():isSubset(left), left:isSubset(left))
+const empty: collections.Set<number> = collections.set()
+print(empty, empty:size(), empty:has(1), empty:remove(1))
+// Many removals: the members stay in order.
+const big: collections.Set<number> = collections.set()
+for (i = 1, 100) {
+	big:add(i)
+}
+for (i = 1, 100) {
+	if (i % 10 != 0) {
+		big:remove(i)
+	}
+}
+big:add(5)
+print(big, big:size(), big:has(50), big:has(51))
+
+// Deque: both ends.
+const line = collections.deque({ 2, 3 })
+line:pushFront(1)
+line:pushBack(4)
+print(line, line:size(), line:peekFront(), line:peekBack())
+print(line:popFront(), line:popBack(), line:popBack(), line:popBack(), line:popBack(), line:popFront(), line:size())
+print(line:peekFront(), line:peekBack(), line)
+for (i = 1, 12) {
+	line:pushFront(-i)
+	line:pushBack(i)
+}
+print(line:size(), line:popFront(), line:popBack())
+local listed: { number } = {}
+for (item in line:items()) {
+	table.insert(listed, item)
+}
+print(table.concat(listed, " "), #line:toList())
+
+// Mistakes, each reported at the line that made it.
+function Fails(fn: () -> ()) {
+	print(pcall(fn))
+}
+Fails(function() {
+	collections.chunk({ 1 }, 0)
+})
+Fails(function() {
+	collections.chunk({ 1 }, 1.5)
+})
+Fails(function() {
+	collections.mostCommon({ 1 }, -1)
+})
+Fails(function() {
+	collections.range(1, 10, 0)
+})
+Fails(function() {
+	collections.range(1, math.huge)
+})
+Fails(function() {
+	collections.slice({ 1 }, 1.5)
+})
+Fails(function() {
+	collections.sorted({ 1, "two" } :: { unknown })
+})
+Fails(function() {
+	collections.sorted({ {}, {} } :: { {} })
+})
+Fails(function() {
+	collections.sorted({ 1, 0 / 0 })
+})
+Fails(function() {
+	collections.sortBy(people, function(p: Person): number | string {
+		return if (p.age > 30) p.name else p.age
+	})
+})
+Fails(function() {
+	collections.sortBy({ 1 } :: { number }, function(n: number): number {
+		return ({} :: { [string]: number }).missing
+	})
+})
+Fails(function() {
+	collections.maxBy({ 1, 2 }, function(n: number): number {
+		return 0 / 0
+	})
+})
+Fails(function() {
+	collections.counter({ 1, 0 / 0 })
+})
+Fails(function() {
+	collections.unique({ 0 / 0 })
+})
+Fails(function() {
+	collections.mostCommon({ 0 / 0 })
+})
+Fails(function() {
+	collections.groupBy({ 1, 2 }, function(n: number): string? {
+		return if (n == 2) nil else "one"
+	})
+})
+Fails(function() {
+	collections.map({ 1, 2 }, function(n: number): string? {
+		return if (n == 2) nil else "one"
+	})
+})
+Fails(function() {
+	collections.set({ 0 / 0 })
+})
+Fails(function() {
+	collections.set():add(0 / 0)
+})
+Fails(function() {
+	const maybe: collections.Set<string?> = collections.set()
+	maybe:add(nil)
+})
+Fails(function() {
+	const maybe: collections.Deque<string?> = collections.deque()
+	maybe:pushBack(nil)
+})
+Fails(function() {
+	const maybe: collections.Deque<string?> = collections.deque()
+	maybe:pushFront(nil)
+})

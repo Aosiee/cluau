@@ -86,7 +86,7 @@ only computes.
   `@std/path` (text only: `absolute` and `relative` take absolute paths,
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
   `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
-  `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
+  `@std/csv`, `@std/collections` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1105,6 +1105,88 @@ separator, a quote or a line break is quoted, with `""` for a quote):
 | `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order (`""` for a missing one) |
 
 `options.separator` is another one-character separator (`";"`, `"\t"`).
+
+### `@std/collections`
+
+What Python's `sorted`, `min`, `max`, `collections` and `itertools` give,
+for Luau's lists (items 1 to `#list`, no `nil` among them) and tables.
+Every function returns a new list and leaves the one it is given as it
+was. The types are generic: `collections.sortBy(people, ...)` is a list of
+people, and `collections.set({ "a" })` a `Set<string>`.
+
+| function | is |
+|---|---|
+| `sorted(items, less?): {T}` | the items sorted, stably (equal items keep their order): by `less(a, b)` (whether `a` comes first), or without it by `<` on items that are all numbers or all strings |
+| `sortBy(items, key, options?): {T}` | the items sorted stably by `key(item)`, a number or a string (all of one kind), worked out once for each item; `options.descending` puts the largest first, equal keys still in their order |
+| `minBy(items, key): T?`, `maxBy(items, key): T?` | the item with the smallest or largest key, the first of those that tie (`nil` for no items) |
+| `counter(items): {[T]: number}` | how many times each item appears |
+| `mostCommon(items, n?): {Count<T>}` | `{ item, count }` for each different item, the most frequent first, those as frequent in the order they first appear; the first `n` of them (Python's `Counter(items).most_common(n)`) |
+| `groupBy(items, key): {[K]: {T}}` | the items in lists by `key(item)`, each list in the items' order |
+| `unique(items): {T}` | each different item once, where it first appears |
+| `chunk(items, size): {{T}}` | the items in lists of `size`, the last shorter when they do not divide evenly |
+| `zip(a, b)` | an iterator over two lists side by side, as far as the shorter goes: `for (i, x, y in collections.zip(xs, ys)) { }` |
+| `flatten(lists): {T}` | the items of each list in turn, one level deep |
+| `range(from, to?, step?): {number}` | the numbers `for (i = from, to, step)` goes through (`to` included when a step lands on it); `range(n)` is 1 to `n` |
+| `reverse(items): {T}` | the items from last to first |
+| `slice(items, from?, to?): {T}` | the items from `from` to `to`, both included, counted as `string.sub` counts: `-1` is the last item; `from` is 1 and `to` -1 by default; bounds past the ends stop there, and `from` after `to` gives `{}` |
+| `map(items, fn): {U}` | `fn(item)` for each item; `fn` returning `nil` is an error |
+| `filter(items, keep): {T}` | the items `keep(item)` is true for |
+| `reduce(items, fn, initial): A` | `fn(...fn(fn(initial, items[1]), items[2])..., items[n])`; `initial` for no items |
+| `some(items, test?): boolean`, `every(items, test?): boolean` | whether `test(item)` is true for any item, for every item (`every` is true for no items); without `test`, whether any item, every item, is other than `false` |
+| `sum(numbers): number` | the numbers added in order (0 for none) |
+| `find(items, test): (T?, number?)` | the first item `test` is true for, and its index |
+| `indexOf(items, item): number?` | the index of the first item `==` to `item` |
+| `keys(t): {K}`, `values(t): {V}` | a table's keys, sorted: numbers first in order, then strings in order, then `false` and `true`, then any others in the table's own order; its values in the order of its keys |
+| `set(items?): Set<T>` | a set of the items, each once, in the order they first appear |
+| `deque(items?): Deque<T>` | a double-ended queue holding the items, the first at the front |
+
+A `Set<T>` keeps its members in the order they were added:
+
+| method | is |
+|---|---|
+| `add(item): boolean` | adds the item; whether it was new |
+| `remove(item): boolean` | removes the item; whether it was there |
+| `has(item): boolean`, `size(): number` | |
+| `items()`, `toList(): {T}` | the members in order, for a `for` loop and as a list; the loop goes over the members as they were when it began, so it may add and remove |
+| `union(other)`, `intersection(other)`, `difference(other)`, `symmetricDifference(other)`: `Set<T>` | new sets: this set's members in their order, then (for `union` and `symmetricDifference`) the other's |
+| `isSubset(other): boolean` | whether every member is in `other` |
+
+A `Deque<T>` adds and takes items at either end in constant time:
+`pushFront(item)`, `pushBack(item)`, `popFront(): T?` and `popBack(): T?`
+(`nil` when it is empty), `peekFront(): T?` and `peekBack(): T?` (the item
+without taking it), `size()`, and `items()` and `toList()` from front to
+back. `print` and `tostring` show either container with its contents
+(`Set {"a", "b"}`).
+
+```
+const collections = require("@std/collections")
+
+type Person = { name: string, age: number }
+const people: { Person } = { { name = "Ada", age = 36 }, { name = "Bo", age = 25 }, { name = "Cy", age = 36 } }
+
+for (_, p in collections.sortBy(people, function(p: Person): number { return p.age }, { descending = true })) {
+	print(p.name) // Ada, Cy, Bo
+}
+const words = { "b", "a", "b", "c", "a", "b" }
+print(collections.mostCommon(words, 1)[1].item) // b
+print(#collections.chunk(collections.range(10), 3)) // 4
+const tags: collections.Set<string> = collections.set()
+tags:add("new")
+```
+
+- Sorting is stable everywhere (Luau's `table.sort` is not): sorting by
+  one key and then by another orders by the second, ties by the first.
+  Keys that mix numbers and strings, NaN, and (for `sorted` without
+  `less`) items that are not numbers or strings are errors.
+- A generic function takes its types from its arguments, so an empty set
+  or deque gets its type from where it goes:
+  `const seen: collections.Set<string> = collections.set()`.
+- NaN cannot be a table key, so it is an error as an item of `counter`,
+  `mostCommon`, `unique` and a set, and as a `groupBy` key; `nil` is an
+  error as a set member, a deque item and a value `map` returns.
+- `chunk`'s size is a whole number from 1, `mostCommon`'s `n` one from 0,
+  `slice`'s bounds whole numbers, and `range`'s bounds finite numbers with
+  a step other than 0.
 
 ### `@std/regex`
 

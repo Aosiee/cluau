@@ -1,0 +1,27 @@
+collections.cluau:9:11: Expected this to be 'string', but got 'number'
+collections.cluau:11:15: Expected this to be 'number', but got 'string'
+collections.cluau:12:1: Expected this to be 'number', but got 'number?'
+collections.cluau:13:28: Expected this to be
+	'(Person) -> number | string'
+but got
+	'(Person) -> boolean'
+caused by:
+  Return type is not compatible.
+Expected this to be 'number | string', but got 'boolean'; none of the union options are compatible
+collections.cluau:16:1: Expected this to be exactly '{string}', but got '{Person}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'string', but got 'Person'
+collections.cluau:20:7: Value of type 'Person?' could be nil
+collections.cluau:22:1: Expected this to be 'string', but got 'number'
+collections.cluau:26:7: Key 'Ada' not found in table '{{Person}}'
+collections.cluau:27:1: Expected this to be exactly '{string}', but got '{number}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'string', but got 'number'
+collections.cluau:32:4: Expected this to be 'string', but got 'number'
+collections.cluau:34:2: Expected this to be 'string', but got 'number'
+collections.cluau:38:1: Expected this to be 'number', but got 'string'
+collections.cluau:39:29: Expected this to be 'number', but got 'string'
+cluau check: 13 error(s), 0 warning(s)
+exit: 1
