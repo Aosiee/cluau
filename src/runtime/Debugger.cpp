@@ -1,5 +1,7 @@
 #include "Debugger.h"
 
+#include "cluau/cluau.h"
+
 #include "lua.h"
 #include "lualib.h"
 
@@ -506,11 +508,18 @@ namespace cluau::runtime::detail {
 		lua_singlestep(m_Main, 1); // the script's thread inherits it
 	}
 
-	int Debugger::Resolve(lua_State* L, int index, const Breakpoint& b, std::vector<int>& stray)
+	int Debugger::Resolve(lua_State* L, int index, const Chunk& chunk, const Breakpoint& b, std::vector<int>& stray)
 	{
-		// Luau arms the line, or the next one with code, and says which.
-		const int next = lua_breakpoint(L, index, b.Line, 1);
-		if (next == b.Line || !b.Closing)
+		// Luau arms the line, or the next one with code, and says which. A
+		// try statement's `} catch (e) {` or `} finally {` runs only the
+		// lowering's code: the breakpoint goes to the block after it.
+		int next = lua_breakpoint(L, index, b.Line, 1);
+		while (!b.Closing && next > 0 && IsTryLine(&chunk, next))
+		{
+			stray.push_back(next);
+			next = lua_breakpoint(L, index, next + 1, 1);
+		}
+		if (!b.Closing || (next == b.Line && !IsTryLine(&chunk, next)))
 			return next;
 		// A line that only closes a block: the block's last line with code
 		// (where a breakpoint on a loop's `}` pauses on each pass), not the
@@ -521,8 +530,10 @@ namespace cluau::runtime::detail {
 		for (int line = b.Line - 1; line >= 1 && line >= b.Line - 1000; line--)
 		{
 			const int at = lua_breakpoint(L, index, line, 1);
-			if (at > 0 && at < b.Line)
+			if (at > 0 && at < b.Line && !IsTryLine(&chunk, at))
 				return at;
+			if (at > 0 && at < b.Line)
+				stray.push_back(at);
 		}
 		return next;
 	}
@@ -559,7 +570,7 @@ namespace cluau::runtime::detail {
 			{
 				if (b.File != file)
 					continue;
-				const int line = Resolve(S, at, b, stray);
+				const int line = Resolve(S, at, chunk, b, stray);
 				if (line > 0)
 				{
 					b.ResolvedLine = line;
@@ -635,6 +646,20 @@ namespace cluau::runtime::detail {
 		lua_pop(L, 1);
 		if (!chunk.File.empty())
 			chunk.Lines = LineCount(chunk.File).value_or(0);
+		if (IsCluauPath(chunk.File))
+		{
+			std::string source;
+			for (const std::string& line : FileLines(chunk.File))
+				source += line + "\n";
+			cluau::TranslateOptions options;
+			options.Script = true;
+			const cluau::TranslateResult translation = cluau::Translate(source, options);
+			for (int line : translation.TryLines)
+				chunk.TryLines.push_back(line + 1);
+			for (int line : translation.TryFunctionLines)
+				chunk.TryFunctions.push_back(line + 1);
+			m_TryFunctionLines.insert(chunk.TryFunctions.begin(), chunk.TryFunctions.end());
+		}
 		m_Chunks.push_back(chunk);
 		if (chunk.File.empty())
 			return;
@@ -664,6 +689,29 @@ namespace cluau::runtime::detail {
 	{
 		const Chunk* chunk = ChunkNamed(name);
 		return chunk && chunk->Lines > 0 && line > chunk->Lines;
+	}
+
+	bool Debugger::IsTryLine(const Chunk* chunk, int line)
+	{
+		return chunk && std::binary_search(chunk->TryLines.begin(), chunk->TryLines.end(), line);
+	}
+
+	int Debugger::StepDepth(lua_State* L, const lua_Debug& top) const
+	{
+		int depth = lua_stackdepth(L);
+		lua_Debug ar = top;
+		for (int level = 0; IsLuaFrame(ar) && m_TryFunctionLines.count(ar.linedefined); level += 2)
+		{
+			const Chunk* chunk = ChunkNamed(ChunkOf(ar));
+			if (!chunk || !std::binary_search(chunk->TryFunctions.begin(), chunk->TryFunctions.end(), ar.linedefined))
+				break;
+			// The block's function is pcall's, called by the function around it.
+			lua_Debug call{};
+			if (!lua_getinfo(L, level + 1, "s", &call) || IsLuaFrame(call) || !lua_getinfo(L, level + 2, "s", &ar))
+				break;
+			depth -= 2;
+		}
+		return depth;
 	}
 
 	bool Debugger::IsLuauChunk(const std::string& name) const
@@ -730,7 +778,7 @@ namespace cluau::runtime::detail {
 				return;
 			}
 		}
-		if (m_LineStep.Active && L == m_LineStep.Thread && LineStepStops(L, line))
+		if (m_LineStep.Active && L == m_LineStep.Thread && !IsTryLine(chunk, line) && LineStepStops(L, line))
 		{
 			EndLineStep();
 			Pause(L, { PauseReason::Step, {}, {} }, true, false);
@@ -797,7 +845,7 @@ namespace cluau::runtime::detail {
 		lua_Debug ar{};
 		if (!lua_getinfo(L, 0, "sl", &ar) || !IsLuaFrame(ar))
 			return;
-		const int depth = lua_stackdepth(L);
+		const int depth = StepDepth(L, ar);
 		const int line = ar.currentline;
 		bool stop = L != m_StepThread;
 		switch (m_StepKind)
@@ -808,7 +856,7 @@ namespace cluau::runtime::detail {
 		}
 		// Through the standard modules and the runtime's own code, to the
 		// script's next line (not the end of a file, its implicit return).
-		if (!stop || !IsUserChunk(ChunkOf(ar)) || PastEnd(ChunkOf(ar), line))
+		if (!stop || !IsUserChunk(ChunkOf(ar)) || PastEnd(ChunkOf(ar), line) || IsTryLine(ChunkNamed(ChunkOf(ar)), line))
 			return;
 		m_SkipBreakThread = nullptr;
 		Pause(L, { PauseReason::Step, {}, {} }, false, true);
@@ -1080,7 +1128,7 @@ namespace cluau::runtime::detail {
 		if (errored)
 			return;
 		lua_Debug ar{};
-		const int line = lua_getinfo(L, 0, "l", &ar) ? ar.currentline : 0;
+		const int line = lua_getinfo(L, 0, "sl", &ar) ? ar.currentline : 0;
 		if (resume == Resume::Step)
 		{
 			if (!stepping && !lua_isyieldable(L))
@@ -1089,7 +1137,7 @@ namespace cluau::runtime::detail {
 				return;
 			}
 			m_StepThread = L;
-			m_StepDepth = lua_stackdepth(L);
+			m_StepDepth = line ? StepDepth(L, ar) : lua_stackdepth(L);
 			m_StepLine = line;
 			lua_singlestep(L, 1);
 			if (stepping && m_StepKind == StepKind::Into && !lua_isyieldable(L))

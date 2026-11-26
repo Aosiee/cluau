@@ -214,6 +214,15 @@ namespace cluau {
 		std::vector<Exemption> Exemptions;
 		std::vector<Range> ConstNames;      // each `const` local's name (source positions)
 		std::vector<Range> Generated;       // Luau-text ranges the translator generated (type aliases, ...)
+		// The lines (in order) that hold nothing but a try statement's own
+		// syntax: `} catch (e) {`, `} finally {`, the `}` ending one of its
+		// blocks. The code on them is the lowering's (the test for an error,
+		// the catch block's call, the rethrow), so a debugger steps past them.
+		std::vector<int> TryLines;
+		// The lines (in order) of each `try` and `catch`: the lowering runs
+		// the block as a function that starts there, which a debugger counts
+		// as part of the function around it.
+		std::vector<int> TryFunctionLines;
 		std::optional<ClassInfo> Class;     // the file's class (the first, in script mode)
 		std::vector<ClassInfo> Classes;     // every class, in order (script mode may declare several)
 		// The source ends inside a block, a bracket, a comment, a long

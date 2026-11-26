@@ -1716,6 +1716,81 @@ TEST("debug: stepping over, into and out")
 	CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
 }
 
+TEST("debug: steps and breakpoints in try, catch and finally stay on the statements")
+{
+	Scripts scripts("function Divide(a: number, b: number): number {\n" // 1
+					"\ttry {\n"                                         // 2
+					"\t\tif (b == 0) {\n"                               // 3
+					"\t\t\tthrow \"zero\"\n"                            // 4
+					"\t\t}\n"                                           // 5
+					"\t\treturn a / b\n"                                // 6
+					"\t} catch (e) {\n"                                 // 7
+					"\t\tprint(\"caught\", e)\n"                        // 8
+					"\t\treturn 0\n"                                    // 9
+					"\t} finally {\n"                                   // 10
+					"\t\tprint(\"finally\")\n"                          // 11
+					"\t}\n"                                             // 12
+					"}\n"                                               // 13
+					"let r = Divide(4, 2)\n"                            // 14
+					"r += Divide(1, 0)\n"                               // 15
+					"print(r)\n");                                      // 16
+	{
+		// `} catch (e) {` pauses in the catch block, only when it catches;
+		// `} finally {` in the finally block.
+		Debug d;
+		d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(7)).Push(Line(10)) } });
+		for (int expected : { 11, 8, 11 })
+		{
+			CHECK_EQ(d.Stopped()[0]["line"].Int(), expected);
+			d.Request("continue", Json::Object().Set("threadId", 1));
+		}
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	}
+	{
+		// Stepping over goes through the blocks' statements, as the source
+		// reads, and never stops on the lines that only join them.
+		Debug d;
+		d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(2)) } });
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 2);
+		for (int expected : { 3, 6, 11, 15 })
+		{
+			d.Request("next", Json::Object().Set("threadId", 1));
+			CHECK_EQ(d.Stopped()[0]["line"].Int(), expected);
+		}
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 2);
+		for (int expected : { 3, 4, 8, 9, 11 })
+		{
+			d.Request("next", Json::Object().Set("threadId", 1));
+			CHECK_EQ(d.Stopped()[0]["line"].Int(), expected);
+		}
+		d.Request("stepOut", Json::Object().Set("threadId", 1));
+		const Json frames = d.Stopped();
+		CHECK_EQ(frames.Size(), (size_t)1);
+		CHECK_EQ(frames[0]["line"].Int(), 15); // where the sum is taken
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	}
+	{
+		// A step into from inside the try block leaves it for the catch
+		// block, and a step out of the try block leaves the function.
+		Debug d;
+		d.Start(scripts.Main, { { scripts.Main, Json::Array().Push(Line(3)) } });
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 3);
+		d.Request("stepOut", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 15);
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Stopped()[0]["line"].Int(), 3);
+		for (int expected : { 4, 8 })
+		{
+			d.Request("stepIn", Json::Object().Set("threadId", 1));
+			CHECK_EQ(d.Stopped()[0]["line"].Int(), expected);
+		}
+		d.Request("continue", Json::Object().Set("threadId", 1));
+		CHECK_EQ(d.Event("exited")["body"]["exitCode"].Int(), 0);
+	}
+}
+
 TEST("debug: a step enters a module's top level, and steps through a coroutine")
 {
 	Scripts scripts("const geo = require(\"./geo\")\n"                 // 1

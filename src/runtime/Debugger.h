@@ -37,6 +37,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -195,6 +196,8 @@ namespace cluau::runtime::detail {
 			int Ref = 0;
 			int Lines = 0; // the file's, when it was read (0: not known)
 			std::vector<int> Armed; // the lines the editor's breakpoints armed in it
+			std::vector<int> TryLines; // lines holding only a try statement's syntax (cluau::TranslateResult::TryLines, 1-based)
+			std::vector<int> TryFunctions; // the lines a try or catch block's function starts on (1-based)
 		};
 		enum class Resume { None, Continue, Step };
 
@@ -231,7 +234,7 @@ namespace cluau::runtime::detail {
 		// The breakpoint's line in the chunk's function (at `index` of L),
 		// armed; -1 when the chunk has no code there or after it. `stray`:
 		// lines armed while looking that no breakpoint may want.
-		int Resolve(lua_State* L, int index, const Breakpoint& b, std::vector<int>& stray);
+		int Resolve(lua_State* L, int index, const Chunk& chunk, const Breakpoint& b, std::vector<int>& stray);
 		// The editor's breakpoints armed again (a step's breakpoints, taken
 		// out, may have shared their lines), and the step's own.
 		void Rearm();
@@ -259,6 +262,12 @@ namespace cluau::runtime::detail {
 		bool IsUserChunk(const std::string& name) const;
 		// The line is past the end of the chunk's file (its implicit return).
 		bool PastEnd(const std::string& name, int line) const;
+		// The line holds only a try statement's syntax: steps go past it.
+		static bool IsTryLine(const Chunk* chunk, int line);
+		// The stack's depth for a step, a try or catch block's function
+		// (and the pcall running it) counting as part of the function
+		// around the block. `top`: level 0's "sl" info.
+		int StepDepth(lua_State* L, const lua_Debug& top) const;
 		bool IsLuauChunk(const std::string& name) const;
 		bool Hit(Breakpoint& b) const;
 		// `described`: the value kept for the pause (a table expandable).
@@ -304,6 +313,7 @@ namespace cluau::runtime::detail {
 
 		lua_State* m_StepThread = nullptr;
 		int m_StepDepth = 0;
+		std::set<int> m_TryFunctionLines; // every chunk's TryFunctions (StepDepth looks further only at a function starting on one)
 		int m_StepLine = 0;
 		// A thread broken out at a BREAK runs it again on resuming: that hit is skipped.
 		lua_State* m_SkipBreakThread = nullptr;

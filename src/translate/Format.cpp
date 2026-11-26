@@ -16,6 +16,9 @@ namespace cluau {
 
 		bool IsOpener(const Token& t) { return t.Is("(") || t.Is("[") || t.Is("{"); }
 		bool IsCloser(const Token& t) { return t.Is(")") || t.Is("]") || t.Is("}"); }
+		// Space around a line's code (a carriage return not ending the line
+		// is space too, as Luau reads it).
+		bool IsBlank(char c) { return c == ' ' || c == '\t' || c == '\r'; }
 
 		// Ends a line that the next line continues: an operator still waiting
 		// for its right side.
@@ -174,13 +177,13 @@ namespace cluau {
 				// follows where it ends on this line.
 				std::string_view kept = text;
 				if (!insideAtEnd[l])
-					while (!kept.empty() && (kept.back() == ' ' || kept.back() == '\t'))
+					while (!kept.empty() && IsBlank(kept.back()))
 						kept.remove_suffix(1);
 				out.emplace_back(kept);
 			}
 			else
 			{
-				const size_t first = text.find_first_not_of(" \t");
+				const size_t first = text.find_first_not_of(" \t\r");
 				if (first == std::string_view::npos)
 					out.emplace_back();
 				else
@@ -200,7 +203,7 @@ namespace cluau {
 						line += options.Indent;
 					std::string_view body = text.substr(first);
 					if (!insideAtEnd[l])
-						while (!body.empty() && (body.back() == ' ' || body.back() == '\t'))
+						while (!body.empty() && IsBlank(body.back()))
 							body.remove_suffix(1);
 					line += body;
 					out.push_back(std::move(line));

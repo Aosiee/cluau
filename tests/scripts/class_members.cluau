@@ -1,0 +1,46 @@
+// `for (name, value in Class)` goes over a class's own statics and methods.
+class Config {
+	static Name = "app"
+	static Port = 8080
+	Debug: boolean = false
+
+	function Describe(): string {
+		return `{Config.Name}:{Config.Port}`
+	}
+}
+
+class Server extends Config {
+	static Workers = 4
+}
+
+function Sorted(names: { string }): string {
+	table.sort(names)
+	return table.concat(names, ", ")
+}
+
+let names: { string } = {}
+let numbers = 0
+for (name, value in Config) {
+	table.insert(names, name)
+	if (typeof(value) == "number") {
+		numbers += value
+	}
+}
+print(Sorted(names), numbers)
+
+let own: { string } = {}
+for (name in Server) {
+	table.insert(own, name)
+}
+print(Sorted(own))
+
+// Over a value the translator cannot tell is a class, the variables
+// are annotated.
+function Count(members: typeof(Config)): number {
+	let count = 0
+	for (name: string, value: unknown in members) {
+		count += 1
+	}
+	return count
+}
+print(Count(Config), Config():Describe())
