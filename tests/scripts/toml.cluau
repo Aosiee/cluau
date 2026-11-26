@@ -1,0 +1,317 @@
+// @std/toml: every kind of key, string, number, date and time, arrays,
+// inline tables, tables and arrays of tables; the rules against defining a
+// table or a key twice; the errors malformed documents raise; and encode's
+// output, its round trips and its errors.
+const toml = require("@std/toml")
+const io = require("@std/io")
+
+type Table = { [string]: unknown }
+
+function Show(text: string) {
+	print(repr(toml.decode(text)))
+}
+
+function Fails(text: string) {
+	const ok, message = pcall(toml.decode, text)
+	print(if (ok) `decoded {repr(text)}` else message)
+}
+
+// Keys: bare, quoted (the same key as bare when the text is), dotted with
+// spaces around the dots, a number-like bare key, an empty quoted one.
+Show([==[
+bare_key-1 = 1
+"quoted key" = 2
+'literal "key"' = 3
+site . "google.com" . ok = true
+3.14 = "pi"
+"" = "empty"
+"\u0061b" = "ab"
+]==])
+
+// Strings: every escape, literal strings, multi-line strings (the line
+// break after the opening quotes left out, a backslash ending a line, quotes
+// before the closing ones).
+const strings = toml.decode([==[
+basic = "tab\t quote\" backslash\\ \b\f\r\n \u00E9 \U0001F600 \u0000"
+literal = 'C:\Users\nodejs\templates'
+tabbed = 'a	b'
+multi = """
+Roses are red
+Violets are blue"""
+joined = """\
+       The quick brown \
+       fox."""
+quotes = """Here are two quotation marks: "". Simple enough.""""
+literal_multi = '''
+The first newline is
+trimmed in raw strings.
+   All other whitespace
+   is preserved. \n'''
+apostrophes = '''Two apostrophes end this: '''''
+]==])
+for (_, name in { "basic", "literal", "tabbed", "multi", "joined", "quotes", "literal_multi", "apostrophes" }) {
+	print(name, repr(strings[name]))
+}
+
+// Integers and floats, which are both numbers.
+const numbers = toml.decode([==[
+plus = +99
+minus = -17
+zero = -0
+grouped = 1_000_000
+hex = 0xDEAD_beef
+octal = 0o755
+binary = 0b1101_0110
+top = 9007199254740992
+bottom = -9_007_199_254_740_992
+fraction = 3.1415
+exponent = 5e+22
+both = -6.626e-34
+grouped_float = 224_617.445_991_228
+small = 5e-324
+float_zero = -0.0
+infinite = -inf
+]==])
+for (_, name in { "plus", "minus", "zero", "grouped", "hex", "octal", "binary", "top", "bottom", "fraction", "exponent", "both", "grouped_float", "small" }) {
+	print(name, numbers[name])
+}
+print("zero is 0, not -0:", 1 / (numbers.zero :: number) == math.huge, "float_zero is -0:", 1 / (numbers.float_zero :: number) == -math.huge)
+print("infinite:", numbers.infinite == -math.huge, "nan:", toml.decode("x = nan").x != toml.decode("x = nan").x)
+print(repr(toml.decode("t = true\nf = false")))
+
+// Dates and times: DateTime tables of four kinds.
+const times = toml.decode([==[
+odt1 = 1979-05-27T07:32:00Z
+odt2 = 1979-05-27T00:32:00-07:00
+odt3 = 1979-05-27 00:32:00.999999+05:30
+odt4 = 1979-05-27t07:32:00z
+ldt = 1979-05-27T07:32:00.123456789123
+ld = 1979-05-27
+lt = 00:32:00.5
+]==])
+for (_, name in { "odt1", "odt2", "odt3", "odt4", "ldt", "ld", "lt" }) {
+	const value = times[name] :: toml.DateTime
+	print(name, value.kind, tostring(value), value.year, value.month, value.day, value.hour, value.minute, value.second, value.offset, value.time)
+}
+print("odt1 and odt4 are the same:", times.odt1 == times.odt4, "odt1 and odt2 are the same moment:", (times.odt1 :: toml.DateTime).time == (times.odt2 :: toml.DateTime).time)
+print("made from text:", toml.datetime("2026-11-24T21:05:09.250+01:00"), toml.datetime("2026-11-24T21:05:09.250+01:00") == toml.datetime("2026-11-24 21:05:09.25+01:00"))
+const frozen: unknown = toml.datetime("1979-05-27")
+print(pcall(function() {
+	(frozen :: { year: number }).year = 1980
+}))
+print(pcall(toml.datetime, "1979-05-27 tomorrow"))
+print(pcall(toml.datetime, "2023-02-29"))
+
+// Arrays: of any values, mixed, nested, over lines with comments and a
+// trailing comma; an empty one.
+Show([==[
+integers = [ 1, 2, 3 ]
+mixed = [ 0.1, "two", 'three', [ 4 ], { five = 5 }, 1979-05-27 ]
+nested = [ [ 1, 2 ], [ "a", [ "b" ] ] ]
+lines = [
+	1, # one
+	2,
+	# a comment of its own
+	3,
+]
+empty = []
+]==])
+
+// Inline tables, with dotted keys and inline tables in them.
+Show([==[
+name = { first = "Tom", last = "Preston-Werner" }
+point = { x = 1, y = 2 }
+animal = { type.name = "pug", type.legs = 4 }
+nested = { a = { b = { c = 1 } }, list = [ { d = 2 } ] }
+empty = {}
+]==])
+
+// Tables: headers with spaces and quoted parts, tables named only by a
+// longer header, a header after its sub-tables, dotted keys making tables,
+// and sub-tables of a table dotted keys made.
+Show([==[
+[a.b.c]
+x = 1
+[ d . "e f" . 'g' ]
+y = 2
+[a]
+z = 3
+[fruit]
+apple.color = "red"
+apple.taste.sweet = true
+[fruit.apple.texture]
+smooth = true
+]==])
+
+// Arrays of tables, with sub-tables and arrays of tables inside them.
+Show([==[
+[[products]]
+name = "Hammer"
+sku = 738594937
+[[products]]
+[[products]]
+name = "Nail"
+color = "gray"
+
+[[fruits]]
+name = "apple"
+[fruits.physical]
+color = "red"
+[[fruits.varieties]]
+name = "red delicious"
+[[fruits.varieties]]
+name = "granny smith"
+[[fruits]]
+name = "banana"
+[[fruits.varieties]]
+name = "plantain"
+]==])
+
+// Line breaks as \r\n, a byte order mark, comments everywhere.
+Show("\u{FEFF}# a comment\r\na = \"\"\"x\r\ny\"\"\" # after\r\n[t] # after a header\r\nb = 1\r\n")
+
+// Defining a key or a table twice, and adding to what is complete.
+Fails("a = 1\na = 2")
+Fails("a = 1\n\"a\" = 2")
+Fails("[a]\nb = 1\n[a]")
+Fails("[a]\nb.c = 1\n[a.b]")
+Fails("a.b = 1\n[a]")
+Fails("a = { b = 1 }\na.c = 2")
+Fails("a = { b = 1 }\n[a.c]")
+Fails("a = { b = { c = 1 }, b.d = 2 }")
+Fails("[a.b.c]\nz = 1\n[a]\nb.c.t = 2")
+Fails("a = []\n[[a]]")
+Fails("[[a]]\n[a]")
+Fails("[a]\n[[a]]")
+Fails("a = 1\n[a.b]")
+Fails("a.b = 1\na.b.c = 2")
+
+// Malformed documents.
+Fails("a = ")
+Fails("a")
+Fails("= 1")
+Fails("a = 1 b = 2")
+Fails("[a")
+Fails("[[a] ]")
+Fails("[]")
+Fails("a..b = 1")
+Fails("a = \"unclosed")
+Fails("a = \"\"\"unclosed")
+Fails("a = 'unclosed\n'")
+Fails("a = \"\\x41\"")
+Fails("a = \"\\uD800\"")
+Fails("a = \"\\u12\"")
+Fails("a = \"\"\"\\  x\"\"\"")
+Fails("a = \"bell \7\"")
+Fails("# a comment with \127 in it")
+Fails("a = 1\rb = 2")
+Fails("a = 01")
+Fails("a = 1__0")
+Fails("a = _1")
+Fails("a = 1.")
+Fails("a = .5")
+Fails("a = 1e")
+Fails("a = -0x1")
+Fails("a = 0X1")
+Fails("a = 9007199254740993")
+Fails("a = 0x20000000000001")
+Fails("a = Inf")
+Fails("a = TRUE")
+Fails("a = 1979-02-29")
+Fails("a = 1979-05-27T24:00:00")
+Fails("a = 1979-05-27T07:32")
+Fails("a = 1979-05-27T07:32:00+5:00")
+Fails("a = 07:32:00Z")
+Fails("a = [1 2]")
+Fails("a = [1,,2]")
+Fails("a = { b = 1, }")
+Fails("a = { b = 1\n}")
+// Columns count characters, not bytes.
+Fails("a = 1\nb = 2\nc = \"é\" x")
+Fails("a = \"\255\"")
+Fails("a = " .. string.rep("[", 1001) .. string.rep("]", 1001))
+
+// Encoding: keys sorted, values before sections, tables holding only
+// tables without a header of their own, arrays of tables as [[...]].
+const data: { unknown } = { { "delta", "phi" }, { 3.14 } }
+const products: { unknown } = { { name = "Hammer", sku = 738594937 }, {}, { name = "Nail", color = "gray" } }
+const mixed: { unknown } = { 1, "two", { three = 3 }, toml.array() }
+const document: Table = {
+	title = "TOML Example",
+	owner = { name = "Tom", dob = toml.datetime("1979-05-27T07:32:00-08:00") },
+	database = {
+		enabled = true,
+		ports = { 8000, 8001, 8002 },
+		data = data,
+		temp_targets = { cpu = 79.5, case = 72.0 },
+	},
+	servers = {
+		alpha = { ip = "10.0.0.1", role = "frontend" },
+		beta = { ip = "10.0.0.2", role = "backend" },
+	},
+	products = products,
+	mixed = mixed,
+	empty = {},
+	list = toml.array(),
+}
+const encoded = toml.encode(document)
+io.write(encoded)
+print("the same again:", toml.encode(toml.decode(encoded)) == encoded)
+
+// Keys quoted when they are not bare; strings escaped; numbers as they
+// read back; dates and times as written.
+io.write(toml.encode({
+	["two words"] = "a \"quote\", a \\ and a tab\t",
+	[""] = "control \0 \27 \127, line\nbreak\r\n",
+	["é"] = "é 😀",
+	["a.b"] = 1,
+	["-_09azAZ"] = 2,
+}))
+io.write(toml.encode({
+	tenth = 0.1,
+	third = 1 / 3,
+	big = 1e300,
+	tiny = 5e-324,
+	past = 2 ^ 53 + 2,
+	whole = 2 ^ 53,
+	negative = -42,
+	negative_zero = -0.0,
+	inf = math.huge,
+	minus_inf = -math.huge,
+	nan = 0 / 0,
+}))
+io.write(toml.encode({
+	odt = toml.datetime("1979-05-27T07:32:00.5z"),
+	ldt = toml.datetime("1979-05-27 07:32:00"),
+	ld = toml.datetime("1979-05-27"),
+	lt = toml.datetime("07:32:00.000001"),
+}))
+// options.multiline: a string with a line break as a """string""".
+const verse = "Roses are red\n\tViolets are blue\n\"\"\" three quotes, and one at the end\""
+const multiline = toml.encode({ verse = verse, inline = { verse } }, { multiline = true })
+io.write(multiline)
+print("reads back:", (toml.decode(multiline).verse :: string) == verse)
+print(repr(toml.encode({})))
+
+// What encode cannot write.
+function Refused(value: unknown) {
+	const ok, message = pcall(toml.encode, value :: Table)
+	print(if (ok) "encoded" else message)
+}
+const cycle: Table = {}
+cycle.inner = { back = cycle }
+Refused(cycle)
+Refused({ f = print })
+const odd: { unknown } = { 1, 2, coroutine.create(print) }
+Refused({ a = { b = odd } })
+const both: { [unknown]: unknown } = { [1] = 1, x = 2 }
+Refused({ a = both })
+const gap: { [unknown]: unknown } = { [1] = 1, [3] = 3 }
+Refused({ a = gap })
+const flag: { [unknown]: unknown } = { [true] = 1 }
+Refused({ a = flag })
+Refused({ a = toml.array({ x = 1 }) })
+Refused({ ["\255"] = 1 })
+Refused({ s = "\255" })
+Refused({ 1, 2 })
+Refused(toml.datetime("1979-05-27"))

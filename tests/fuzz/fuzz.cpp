@@ -50,6 +50,8 @@ namespace {
 			return "local j = require('@std/json') return function(s) local ok, v = pcall(j.decode, s) if ok then pcall(j.encode, v) end end";
 		if (target == "csv")
 			return "local c = require('@std/csv') return function(s) pcall(c.parse, s) pcall(c.records, s) end";
+		if (target == "toml")
+			return "local t = require('@std/toml') return function(s) local ok, v = pcall(t.decode, s) if ok then pcall(t.encode, v) end end";
 		if (target == "regex")
 			return "local r = require('@std/regex') return function(s)\n"
 				   "  local cut = string.find(s, '\\n', 1, true) or #s + 1\n"

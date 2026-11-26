@@ -85,9 +85,10 @@ only computes.
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
   `@std/path` (text only: `absolute` and `relative` take absolute paths,
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
-  `@std/random`, `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
-  `@std/csv`, `@std/collections`, `@std/log` (which has no `CLUAU_LOG` to read there) and
-  `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
+  `@std/random`, `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`,
+  `@std/args`, `@std/csv`, `@std/toml`, `@std/collections`, `@std/log`
+  (which has no `CLUAU_LOG` to read there) and `@std/test` work as usual,
+  as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -942,6 +943,63 @@ a `\u` escape of a lone surrogate (half a pair) as U+FFFD.
 - `json.object(t?)` and `json.array(t?)` mark a table (or a new one) to
   encode as an object or an array: `json.object()` is `{}`, not `[]`. An
   empty object decodes marked, so it encodes as `{}` again.
+
+### `@std/toml`
+
+TOML 1.0.0 (toml.io): configuration files read into tables and written
+back.
+
+| function | is |
+|---|---|
+| `decode(text): {[string]: unknown}` | the document's tables and values. A malformed document, or one that defines a key or a table twice (or adds to an inline table, or gives a `[header]` to a table dotted keys made), is an error saying what and where: `toml.decode: [a] is defined twice (line 3, column 1)` |
+| `encode(value, options?): string` | a table as TOML: its values as `key = value` lines, then its tables as `[name]` sections and its arrays of tables as `[[name]]` ones. Keys are sorted, so the output is the same every run, and quoted when they are not bare. `options.multiline` writes a string holding a line break as a `"""` string |
+| `datetime(text): DateTime` | a date, a time or both from TOML text: `1979-05-27T07:32:00-08:00`, `1979-05-27 07:32:00`, `1979-05-27`, `07:32:00.5` (`time.iso`'s output is one) |
+| `array(t?)` | marks a table (or a new one) to encode as an array: an empty table is otherwise a table |
+
+Strings, booleans, arrays and tables are Luau's; integers and floats are
+both numbers. Dates and times are `DateTime` tables, frozen, with
+`kind`, one of `"offsetDateTime"` (`1979-05-27T07:32:00Z`),
+`"localDateTime"`, `"localDate"` and `"localTime"`, and the fields that
+kind has: `year`, `month`, `day`, `hour`, `minute`, `second` (with its
+fraction, to the nanosecond), and for an offset date-time `offset`
+(seconds east of UTC, as `time.parts` has it) and `time` (the moment, as
+`@std/time` has times). `tostring` gives one's TOML text, and two are `==`
+when that text is the same.
+
+```
+const fs = require("@std/fs")
+const time = require("@std/time")
+const toml = require("@std/toml")
+const config = toml.decode(fs.read("config.toml"))
+const server = config.server :: { host: string, port: number }
+const started = config.started :: toml.DateTime
+print(server.host, server.port, time.iso(started.time))
+fs.write("config.toml", toml.encode(config))
+```
+
+- An integer outside -2^53 to 2^53 is an error: a number holds integers
+  exactly only that far, where TOML allows 64 bits. `encode` writes a whole
+  number in that range as an integer (so `1.0` reads back as `1`) and any
+  other number so that it reads back the same: `0.1`, `1e+300`,
+  `9007199254740994.0`, `-0.0`, `inf`, `nan`.
+- Fractions of a second past the nanosecond are cut off, as TOML says; a
+  second of 60 is not a time.
+- An empty array decodes marked as `toml.array` marks one, so it encodes as
+  `[]` again; an unmarked empty table encodes as a table (`[name]`, or `{}`
+  inside an array or an inline table).
+- A table holding only tables has no header of its own (its sections name
+  it). An array whose items are all tables is written as `[[name]]`
+  sections; any other array is written on one line, its tables inline
+  (`[1, "two", { three = 3 }]`).
+- What `encode` cannot write is an error naming where it is: a function or
+  another value with no TOML form (`toml.encode: a.b[3] is a function,
+  which TOML has no form for`), a table that holds itself, a table whose
+  keys are neither all text nor 1 to n, text that is not UTF-8.
+- The text must be UTF-8. Line breaks may be `\r\n`, read as `\n` (in
+  multi-line strings too), and a byte order mark at the start is passed
+  over. Arrays and inline tables nest up to 1000 deep.
+- It is TOML 1.0: an inline table is on one line with no comma after its
+  last value, a time has its seconds, and `\e` and `\xHH` are not escapes.
 
 ### `@std/time`
 
