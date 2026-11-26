@@ -253,7 +253,7 @@ namespace cluau::runtime::detail {
 			// Under the debugger the call runs on a job's thread while this
 			// one reads the editor's requests (a pause, breakpoints, the end).
 			lua_pop(L, 1);
-			const int id = Start(std::move(work));
+			const int id = Start(std::move(work), std::move(unclaimed));
 			Jobs& jobs = State();
 			for (;;)
 			{
@@ -269,8 +269,7 @@ namespace cluau::runtime::detail {
 				}
 				catch (...)
 				{
-					std::lock_guard<std::mutex> lock(jobs.Mutex);
-					jobs.All.erase(id); // its thread finishes on its own
+					Drop(id); // its thread finishes on its own
 					throw;
 				}
 			}
