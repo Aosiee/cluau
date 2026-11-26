@@ -15,6 +15,7 @@
 #include "lualib.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -24,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -34,7 +36,7 @@
 #include <vector>
 
 #ifndef _WIN32
-#include <cerrno>
+#include <sys/stat.h>
 #include <unistd.h>
 extern char** environ;
 #endif
@@ -43,6 +45,8 @@ extern char** environ;
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -54,7 +58,25 @@ namespace cluau::runtime::detail {
 
 	namespace {
 
-		fs::path P(lua_State* L, int arg) { return fs::u8path(luaL_checkstring(L, arg)); }
+		// A string argument that may not hold a NUL byte (a path, a name):
+		// the system would read it only up to the NUL.
+		std::string_view Text(lua_State* L, int arg, const char* what)
+		{
+			size_t len = 0;
+			const char* s = luaL_checklstring(L, arg, &len);
+			if (std::memchr(s, 0, len))
+			{
+				const std::string message = std::string("the ") + what + " holds a NUL byte";
+				luaL_argerror(L, arg, message.c_str());
+			}
+			return std::string_view(s, len);
+		}
+
+		fs::path P(lua_State* L, int arg)
+		{
+			const std::string_view text = Text(L, arg, "path");
+			return fs::u8path(text.begin(), text.end());
+		}
 
 		std::string S(const fs::path& p)
 		{
@@ -84,16 +106,86 @@ namespace cluau::runtime::detail {
 			std::abort(); // not reached
 		}
 
-		std::string Reason(const fs::path& path, const std::error_code& ec)
+		// A system message as the rest of an error message: "no such file or
+		// directory" (lowercase, no closing full stop) on every platform.
+		std::string Lowered(std::string message)
 		{
-			if (ec)
-				return ec.message();
-			std::error_code ignored;
-			if (!fs::exists(path, ignored))
-				return "no such file or directory";
-			if (fs::is_directory(path, ignored))
-				return "is a directory";
-			return "permission denied or unreadable";
+			while (!message.empty() && (message.back() == '.' || std::isspace((unsigned char)message.back())))
+				message.pop_back();
+			if (message.size() > 1 && std::isupper((unsigned char)message[0]) && !std::isupper((unsigned char)message[1]))
+				message[0] = (char)std::tolower((unsigned char)message[0]);
+			return message;
+		}
+
+		std::string Message(const std::error_code& ec) { return Lowered(ec.message()); }
+
+		std::string ErrnoMessage(int err) { return Lowered(std::generic_category().message(err ? err : EIO)); }
+
+		FILE* OpenFile(const fs::path& path, const char* mode)
+		{
+#ifdef _WIN32
+			std::wstring wmode;
+			for (const char* c = mode; *c; c++)
+				wmode += (wchar_t)*c;
+			return _wfopen(path.c_str(), wmode.c_str());
+#else
+			return std::fopen(path.c_str(), mode);
+#endif
+		}
+
+		// Opens a file to read, or raises `fn`'s error with the reason the
+		// system gives (a directory is refused: it has no contents to read).
+		FILE* OpenToRead(lua_State* L, const char* fn, const char* what, const fs::path& path)
+		{
+			std::error_code ec;
+			if (fs::is_directory(path, ec))
+				Fail(L, fn, what, path, "is a directory");
+			errno = 0;
+			FILE* f = OpenFile(path, "rb");
+			if (!f)
+				Fail(L, fn, what, path, ErrnoMessage(errno));
+			return f;
+		}
+
+		// The whole file, or `fn`'s error.
+		std::string ReadWhole(lua_State* L, const char* fn, const fs::path& path)
+		{
+			FILE* f = OpenToRead(L, fn, "cannot read", path);
+			std::string out;
+			char buffer[65536];
+			size_t got = 0;
+			while ((got = std::fread(buffer, 1, sizeof(buffer), f)) > 0)
+				out.append(buffer, got);
+			const int err = std::ferror(f) ? errno : 0;
+			std::fclose(f);
+			if (err)
+				Fail(L, fn, "cannot read", path, ErrnoMessage(err));
+			return out;
+		}
+
+		// Writes `len` bytes to the file (`mode`: "wb" or "ab"), or raises
+		// `fn`'s error. The file is closed before this returns, so a write
+		// the system refuses (a full disk) is an error here, not lost.
+		void WriteWhole(lua_State* L, const char* fn, const fs::path& path, const char* mode, const char* data, size_t len)
+		{
+			std::error_code ec;
+			if (fs::is_directory(path, ec))
+				Fail(L, fn, "cannot write", path, "is a directory");
+			errno = 0;
+			FILE* f = OpenFile(path, mode);
+			if (!f)
+			{
+				const int err = errno;
+				const fs::path dir = path.parent_path().empty() ? fs::path(".") : path.parent_path();
+				Fail(L, fn, "cannot write", path, err == ENOENT && !fs::is_directory(dir, ec) ? "its directory does not exist" : ErrnoMessage(err));
+			}
+			int err = 0;
+			if (len > 0 && std::fwrite(data, 1, len, f) != len)
+				err = errno ? errno : EIO;
+			if (std::fclose(f) != 0 && !err)
+				err = errno ? errno : EIO;
+			if (err)
+				Fail(L, fn, "cannot write", path, ErrnoMessage(err));
 		}
 
 		bool Awaits(lua_CFunction f);
@@ -115,41 +207,22 @@ namespace cluau::runtime::detail {
 
 		int FsRead(lua_State* L)
 		{
-			const fs::path path = P(L, 1);
-			std::ifstream in(path, std::ios::binary);
-			std::error_code ec;
-			if (!in || fs::is_directory(path, ec))
-				Fail(L, "fs.read", "cannot read", path, Reason(path, {}));
-			std::stringstream buffer;
-			buffer << in.rdbuf();
-			const std::string text = buffer.str();
+			const std::string text = ReadWhole(L, "fs.read", P(L, 1));
 			lua_pushlstring(L, text.data(), text.size());
 			return 1;
 		}
 
-		int WriteMode(lua_State* L, const char* fn, std::ios::openmode mode)
+		int WriteMode(lua_State* L, const char* fn, const char* mode)
 		{
 			const fs::path path = P(L, 1);
 			size_t len = 0;
 			const char* text = luaL_checklstring(L, 2, &len);
-			std::ofstream out(path, std::ios::binary | mode);
-			if (!out)
-			{
-				std::error_code ec;
-				const fs::path dir = path.parent_path().empty() ? fs::path(".") : path.parent_path();
-				Fail(L, fn, "cannot write", path,
-					fs::is_directory(path, ec) ? "is a directory"
-					: !fs::is_directory(dir, ec) ? "its directory does not exist"
-												 : "permission denied");
-			}
-			out.write(text, (std::streamsize)len);
-			if (!out)
-				Fail(L, fn, "cannot write", path, "write failed");
+			WriteWhole(L, fn, path, mode, text, len);
 			return 0;
 		}
 
-		int FsWrite(lua_State* L) { return WriteMode(L, "fs.write", std::ios::trunc); }
-		int FsAppend(lua_State* L) { return WriteMode(L, "fs.append", std::ios::app); }
+		int FsWrite(lua_State* L) { return WriteMode(L, "fs.write", "wb"); }
+		int FsAppend(lua_State* L) { return WriteMode(L, "fs.append", "ab"); }
 
 		int FsExists(lua_State* L)
 		{
@@ -180,7 +253,7 @@ namespace cluau::runtime::detail {
 			for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
 				names.push_back(S(it->path().filename()));
 			if (ec)
-				Fail(L, "fs.list", "cannot list", dir, ec.message());
+				Fail(L, "fs.list", "cannot list", dir, Message(ec));
 			std::sort(names.begin(), names.end());
 			PushStrings(L, names);
 			return 1;
@@ -195,7 +268,7 @@ namespace cluau::runtime::detail {
 			// fs.glob does); only the starting one failing is an error.
 			fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
 			if (ec)
-				Fail(L, "fs.walk", "cannot walk", dir, ec.message());
+				Fail(L, "fs.walk", "cannot walk", dir, Message(ec));
 			for (fs::recursive_directory_iterator end; it != end;)
 			{
 				std::error_code fileEc;
@@ -223,7 +296,7 @@ namespace cluau::runtime::detail {
 			std::error_code ec;
 			fs::create_directories(dir, ec);
 			if (ec)
-				Fail(L, "fs.mkdir", "cannot create", dir, ec.message());
+				Fail(L, "fs.mkdir", "cannot create", dir, Message(ec));
 			return 0;
 		}
 
@@ -239,13 +312,19 @@ namespace cluau::runtime::detail {
 				fs::remove_all(path, ec);
 				if (ec)
 				{
-					// Read-only files (Git's objects on Windows) refuse to go:
-					// made writable, then removed again.
+					// Read-only files (Git's objects on Windows) and directories
+					// refuse to go: made writable, then removed again. A
+					// symbolic link is passed over, so that what it points to,
+					// which may be outside the tree, stays as it is.
 					std::error_code walk;
+					if (fs::is_directory(fs::symlink_status(path, walk)))
+						fs::permissions(path, fs::perms::owner_write, fs::perm_options::add, walk);
+					walk.clear();
 					for (fs::recursive_directory_iterator it(path, walk), end; !walk && it != end; it.increment(walk))
 					{
 						std::error_code ignored;
-						fs::permissions(it->path(), fs::perms::owner_write, fs::perm_options::add, ignored);
+						if (!it->is_symlink(ignored))
+							fs::permissions(it->path(), fs::perms::owner_write, fs::perm_options::add, ignored);
 					}
 					ec.clear();
 					fs::remove_all(path, ec);
@@ -254,7 +333,7 @@ namespace cluau::runtime::detail {
 			else
 				fs::remove(path, ec);
 			if (ec)
-				Fail(L, "fs.remove", "cannot remove", path, ec.message() + (all ? "" : " (fs.remove(path, true) removes a directory's contents)"));
+				Fail(L, "fs.remove", "cannot remove", path, Message(ec) + (all ? "" : " (fs.remove(path, true) removes a directory's contents)"));
 			return 0;
 		}
 
@@ -263,18 +342,62 @@ namespace cluau::runtime::detail {
 			const fs::path from = P(L, 1), to = P(L, 2);
 			std::error_code ec;
 			fs::rename(from, to, ec);
+			if (ec == std::errc::cross_device_link)
+			{
+				// Another file system: copied there, then removed here (a
+				// directory only to a path that is free, as rename would).
+				std::error_code other;
+				const fs::file_status status = fs::symlink_status(from, other);
+				if (fs::is_regular_file(status))
+				{
+					fs::copy_file(from, to, fs::copy_options::overwrite_existing, other);
+					if (!other)
+						fs::remove(from, other);
+					ec = other;
+				}
+				else if (fs::is_directory(status) && !fs::exists(fs::symlink_status(to, other)))
+				{
+					fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::copy_symlinks, other);
+					if (other)
+					{
+						std::error_code ignored;
+						fs::remove_all(to, ignored);
+					}
+					else
+						fs::remove_all(from, other);
+					ec = other;
+				}
+			}
 			if (ec)
-				Fail(L, "fs.rename", "cannot rename", from, ec.message());
+				Fail(L, "fs.rename", "cannot rename", from, Message(ec));
 			return 0;
+		}
+
+		// Whether `inner` is `outer` or a path under it, links resolved.
+		bool Within(const fs::path& inner, const fs::path& outer)
+		{
+			std::error_code ec;
+			const fs::path a = fs::weakly_canonical(inner, ec);
+			if (ec)
+				return false;
+			const fs::path b = fs::weakly_canonical(outer, ec);
+			if (ec)
+				return false;
+			const fs::path rel = a.lexically_relative(b);
+			return !rel.empty() && *rel.begin() != "..";
 		}
 
 		int FsCopy(lua_State* L)
 		{
 			const fs::path from = P(L, 1), to = P(L, 2);
 			std::error_code ec;
+			// A directory copied into itself would copy its copy again, until
+			// the path grows too long.
+			if (fs::is_directory(from, ec) && Within(to, from))
+				Fail(L, "fs.copy", "cannot copy", from, "the target is inside the directory copied");
 			fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
 			if (ec)
-				Fail(L, "fs.copy", "cannot copy", from, ec.message());
+				Fail(L, "fs.copy", "cannot copy", from, Message(ec));
 			return 0;
 		}
 
@@ -284,7 +407,7 @@ namespace cluau::runtime::detail {
 			std::error_code ec;
 			const auto size = fs::file_size(path, ec);
 			if (ec)
-				Fail(L, "fs.size", "cannot stat", path, ec.message());
+				Fail(L, "fs.size", "cannot stat", path, Message(ec));
 			lua_pushnumber(L, (double)size);
 			return 1;
 		}
@@ -297,7 +420,7 @@ namespace cluau::runtime::detail {
 			std::error_code ec;
 			const fs::path real = fs::canonical(path, ec);
 			if (ec)
-				Fail(L, "fs.realpath", "cannot resolve", path, Reason(path, ec));
+				Fail(L, "fs.realpath", "cannot resolve", path, Message(ec));
 			PushPath(L, real);
 			return 1;
 		}
@@ -305,32 +428,99 @@ namespace cluau::runtime::detail {
 		int FsModified(lua_State* L)
 		{
 			const fs::path path = P(L, 1);
+#ifdef _WIN32
 			std::error_code ec;
 			const auto ft = fs::last_write_time(path, ec);
 			if (ec)
-				Fail(L, "fs.modified", "cannot stat", path, ec.message());
+				Fail(L, "fs.modified", "cannot stat", path, Message(ec));
 			const auto now = std::chrono::system_clock::now() +
 				std::chrono::duration_cast<std::chrono::system_clock::duration>(ft - fs::file_time_type::clock::now());
 			lua_pushnumber(L, std::chrono::duration<double>(now.time_since_epoch()).count());
+#else
+			// stat's own seconds and nanoseconds: the library's file clock
+			// counts nanoseconds in 64 bits, which ends in 2262.
+			struct stat info{};
+			if (stat(path.c_str(), &info) != 0)
+				Fail(L, "fs.modified", "cannot stat", path, ErrnoMessage(errno));
+#ifdef __APPLE__
+			lua_pushnumber(L, (double)info.st_mtimespec.tv_sec + info.st_mtimespec.tv_nsec / 1e9);
+#else
+			lua_pushnumber(L, (double)info.st_mtim.tv_sec + info.st_mtim.tv_nsec / 1e9);
+#endif
+#endif
 			return 1;
+		}
+
+		// The temporary directory: the system's (TMPDIR, TEMP), or /tmp when
+		// that names no directory; an error when there is none.
+		fs::path TempDir(lua_State* L, const char* fn)
+		{
+			std::error_code ec;
+			fs::path dir = fs::temp_directory_path(ec);
+			if (!ec && fs::is_directory(dir, ec))
+				return dir;
+#ifndef _WIN32
+			if (fs::is_directory("/tmp", ec))
+				return "/tmp";
+#endif
+			luaL_error(L, "%s: there is no temporary directory (TMPDIR, TEMP and TMP name none)", fn);
+			return {};
 		}
 
 		int FsTempDir(lua_State* L)
 		{
-			std::error_code ec;
-			PushPath(L, fs::temp_directory_path(ec));
+			PushPath(L, TempDir(L, "fs.tempDir"));
 			return 1;
 		}
 
 		// ---- @std/fs: glob -----------------------------------------------
 
+		// The text's characters (code points). A byte that is not part of a
+		// UTF-8 sequence stands for itself, above every code point. Windows
+		// compares names without case, so its characters are lowercased.
+		std::vector<uint32_t> Characters(const std::string& text)
+		{
+			std::vector<uint32_t> out;
+			out.reserve(text.size());
+			for (size_t i = 0; i < text.size();)
+			{
+				const unsigned char c = (unsigned char)text[i];
+				const size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+				uint32_t cp = len == 1 ? c : len == 2 ? c & 0x1F : len == 3 ? c & 0x0F : c & 0x07;
+				bool ok = len > 0 && i + len <= text.size();
+				for (size_t k = 1; ok && k < len; k++)
+				{
+					const unsigned char d = (unsigned char)text[i + k];
+					ok = (d & 0xC0) == 0x80;
+					cp = (cp << 6) | (d & 0x3F);
+				}
+				static const uint32_t kLeast[] = { 0, 0, 0x80, 0x800, 0x10000 };
+				if (ok && len > 1 && (cp < kLeast[len] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)))
+					ok = false;
+				if (!ok)
+				{
+					out.push_back(0x110000 + c);
+					i++;
+					continue;
+				}
+#ifdef _WIN32
+				if (cp < 0x10000)
+					cp = (uint32_t)std::towlower((wint_t)cp);
+#endif
+				out.push_back(cp);
+				i += len;
+			}
+			return out;
+		}
+
 		// One path component against one pattern component: `*` (any run of
 		// characters), `?` (one), `[abc]`, `[a-z]`, `[!abc]`. A name starting
 		// with `.` matches only a pattern starting with `.`.
-		bool MatchName(const std::string& pattern, const std::string& name)
+		bool MatchName(const std::string& patternText, const std::string& nameText)
 		{
-			if (!name.empty() && name[0] == '.' && (pattern.empty() || pattern[0] != '.'))
+			if (!nameText.empty() && nameText[0] == '.' && (patternText.empty() || patternText[0] != '.'))
 				return false;
+			const std::vector<uint32_t> pattern = Characters(patternText), name = Characters(nameText);
 			size_t p = 0, n = 0, starP = std::string::npos, starN = 0;
 			while (n < name.size())
 			{
@@ -436,17 +626,40 @@ namespace cluau::runtime::detail {
 			}
 		}
 
+		// On Windows, the length of a network path's root (//server/share)
+		// at the pattern's start; 0 when there is none, and elsewhere.
+		size_t NetworkRoot(const std::string& pattern)
+		{
+#ifdef _WIN32
+			if (pattern.size() < 3 || pattern[0] != '/' || pattern[1] != '/' || pattern[2] == '/')
+				return 0;
+			const size_t server = pattern.find('/', 2);
+			if (server == std::string::npos || server + 1 >= pattern.size() || pattern[server + 1] == '/')
+				return 0;
+			return std::min(pattern.find('/', server + 1), pattern.size());
+#else
+			(void)pattern;
+			return 0;
+#endif
+		}
+
 		// fs.glob(pattern): the paths that match, sorted. `**` is any number
 		// of directories; `*`, `?` and `[...]` match within a name.
 		int FsGlob(lua_State* L)
 		{
-			std::string pattern = luaL_checkstring(L, 1);
+			std::string pattern(Text(L, 1, "pattern"));
 			std::replace(pattern.begin(), pattern.end(), '\\', '/');
 			std::vector<std::string> parts;
 			std::string shown;
 			fs::path dir;
 			size_t start = 0;
-			if (!pattern.empty() && pattern[0] == '/')
+			if (const size_t share = NetworkRoot(pattern); share > 0)
+			{
+				shown = pattern.substr(0, share);
+				dir = fs::u8path(shown + "/");
+				start = share + 1;
+			}
+			else if (!pattern.empty() && pattern[0] == '/')
 			{
 				dir = "/";
 				shown = "/";
@@ -496,18 +709,6 @@ namespace cluau::runtime::detail {
 			FILE* File = nullptr;
 		};
 
-		FILE* OpenFile(const fs::path& path, const char* mode)
-		{
-#ifdef _WIN32
-			std::wstring wmode;
-			for (const char* c = mode; *c; c++)
-				wmode += (wchar_t)*c;
-			return _wfopen(path.c_str(), wmode.c_str());
-#else
-			return std::fopen(path.c_str(), mode);
-#endif
-		}
-
 		FILE* CheckFile(lua_State* L, int arg = 1)
 		{
 			FileBox* box = static_cast<FileBox*>(luaL_checkudata(L, arg, kFileMeta));
@@ -550,6 +751,19 @@ namespace cluau::runtime::detail {
 			const double n = luaL_checknumber(L, 2);
 			if (!(n >= 0) || n != std::floor(n))
 				luaL_argerror(L, 2, "a whole number of bytes");
+			if (n == 0)
+			{
+				// Nothing to read: "" before the end of the file, nil at it.
+				const int c = std::fgetc(f);
+				if (c == EOF)
+					lua_pushnil(L);
+				else
+				{
+					std::ungetc(c, f);
+					lua_pushliteral(L, "");
+				}
+				return 1;
+			}
 			// Read in pieces: a large count costs only what the file holds.
 			char buffer[8192];
 			const size_t want = n > 9e15 ? (size_t)9e15 : (size_t)n;
@@ -618,9 +832,18 @@ namespace cluau::runtime::detail {
 				size_t len = 0;
 				const char* text = luaL_checklstring(L, i, &len);
 				if (std::fwrite(text, 1, len, f) != len)
-					luaL_error(L, "file:write: the write failed");
+					luaL_error(L, "file:write: %s", ErrnoMessage(errno).c_str());
 			}
 			return 0;
+		}
+
+		int64_t Tell(FILE* f)
+		{
+#ifdef _WIN32
+			return _ftelli64(f);
+#else
+			return (int64_t)ftello(f);
+#endif
 		}
 
 		int FileSeek(lua_State* L)
@@ -631,25 +854,43 @@ namespace cluau::runtime::detail {
 				: std::strcmp(from, "end") == 0 ? SEEK_END : -1;
 			if (whence < 0)
 				luaL_error(L, "file:seek: from is \"set\", \"current\" or \"end\"");
-			if (!lua_isnoneornil(L, 2) && std::fseek(f, (long)luaL_checknumber(L, 2), whence) != 0)
-				luaL_error(L, "file:seek: cannot seek there");
-			lua_pushnumber(L, (double)std::ftell(f));
+			if (!lua_isnoneornil(L, 2))
+			{
+				// 64-bit offsets (a long is 32 bits on Windows).
+				const double offset = luaL_checknumber(L, 2);
+				if (offset != std::floor(offset) || std::fabs(offset) > 9e15)
+					luaL_argerror(L, 2, "a whole number of bytes");
+#ifdef _WIN32
+				const int failed = _fseeki64(f, (int64_t)offset, whence);
+#else
+				const int failed = fseeko(f, (off_t)offset, whence);
+#endif
+				if (failed != 0)
+					luaL_error(L, "file:seek: cannot seek there");
+			}
+			lua_pushnumber(L, (double)Tell(f));
 			return 1;
 		}
 
 		int FileFlush(lua_State* L)
 		{
-			std::fflush(CheckFile(L));
+			if (std::fflush(CheckFile(L)) != 0)
+				luaL_error(L, "file:flush: %s", ErrnoMessage(errno).c_str());
 			return 0;
 		}
 
+		// Closing writes what is buffered: a write the system refuses then
+		// is this call's error.
 		int FileClose(lua_State* L)
 		{
 			FileBox* box = static_cast<FileBox*>(luaL_checkudata(L, 1, kFileMeta));
 			if (box->File)
 			{
-				std::fclose(box->File);
+				const int failed = std::fclose(box->File);
+				const int err = errno;
 				box->File = nullptr;
+				if (failed != 0)
+					luaL_error(L, "file:close: %s", ErrnoMessage(err).c_str());
 			}
 			return 0;
 		}
@@ -700,9 +941,13 @@ namespace cluau::runtime::detail {
 			const char* cmode = mode == "r" ? "rb" : mode == "w" ? "wb" : mode == "a" ? "ab" : nullptr;
 			if (!cmode)
 				luaL_error(L, "fs.open: the mode is \"r\", \"w\" or \"a\"");
+			std::error_code ec;
+			if (fs::is_directory(path, ec))
+				Fail(L, "fs.open", "cannot open", path, "is a directory");
+			errno = 0;
 			FILE* f = OpenFile(path, cmode);
 			if (!f)
-				Fail(L, "fs.open", "cannot open", path, mode == "r" ? Reason(path, {}) : "cannot create or write it");
+				Fail(L, "fs.open", "cannot open", path, ErrnoMessage(errno));
 			PushFile(L, f);
 			return 1;
 		}
@@ -711,9 +956,7 @@ namespace cluau::runtime::detail {
 		int FsLines(lua_State* L)
 		{
 			const fs::path path = P(L, 1);
-			FILE* f = OpenFile(path, "rb");
-			if (!f)
-				Fail(L, "fs.lines", "cannot read", path, Reason(path, {}));
+			FILE* f = OpenToRead(L, "fs.lines", "cannot read", path);
 			PushFile(L, f);
 			lua_pushboolean(L, 1);
 			lua_pushcclosure(L, FileLinesNext, "lines", 2);
@@ -722,14 +965,7 @@ namespace cluau::runtime::detail {
 
 		int FsReadBuffer(lua_State* L)
 		{
-			const fs::path path = P(L, 1);
-			std::ifstream in(path, std::ios::binary);
-			std::error_code ec;
-			if (!in || fs::is_directory(path, ec))
-				Fail(L, "fs.readBuffer", "cannot read", path, Reason(path, {}));
-			std::stringstream buffer;
-			buffer << in.rdbuf();
-			const std::string bytes = buffer.str();
+			const std::string bytes = ReadWhole(L, "fs.readBuffer", P(L, 1));
 			void* data = lua_newbuffer(L, bytes.size());
 			if (!bytes.empty())
 				std::memcpy(data, bytes.data(), bytes.size());
@@ -743,10 +979,7 @@ namespace cluau::runtime::detail {
 			void* data = lua_tobuffer(L, 2, &len);
 			if (!data && len == 0 && lua_type(L, 2) != LUA_TBUFFER)
 				luaL_typeerror(L, 2, "buffer");
-			std::ofstream out(path, std::ios::binary | std::ios::trunc);
-			if (!out)
-				Fail(L, "fs.writeBuffer", "cannot write", path, "cannot create or write it");
-			out.write(static_cast<const char*>(data), (std::streamsize)len);
+			WriteWhole(L, "fs.writeBuffer", path, "wb", static_cast<const char*>(data), len);
 			return 0;
 		}
 
@@ -754,9 +987,10 @@ namespace cluau::runtime::detail {
 		// temporary directory (its path).
 		int FsTempFile(lua_State* L)
 		{
-			const std::string prefix = luaL_optstring(L, 1, "cluau");
-			std::error_code ec;
-			const fs::path dir = fs::temp_directory_path(ec);
+			const std::string prefix(lua_isnoneornil(L, 1) ? std::string_view("cluau") : Text(L, 1, "prefix"));
+			if (prefix.find_first_of("/\\") != std::string::npos)
+				luaL_argerror(L, 1, "a name without '/' or '\\' (the file goes in the temporary directory)");
+			const fs::path dir = TempDir(L, "fs.tempFile");
 #ifdef _WIN32
 			for (int attempt = 0; attempt < 100; attempt++)
 			{
@@ -814,37 +1048,93 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// A name's stem and extension: the extension from its last dot, but
+		// for the dots it starts with (".bashrc" and "..x" have none).
+		std::pair<std::string, std::string> SplitName(const std::string& name)
+		{
+			const size_t first = name.find_first_not_of('.');
+			const size_t dot = name.rfind('.');
+			if (first == std::string::npos || dot == std::string::npos || dot < first)
+				return { name, "" };
+			return { name.substr(0, dot), name.substr(dot) };
+		}
+
 		int PathStem(lua_State* L)
 		{
-			PushPath(L, P(L, 1).stem());
+			const std::string stem = SplitName(S(P(L, 1).filename())).first;
+			lua_pushlstring(L, stem.data(), stem.size());
 			return 1;
 		}
 
 		int PathExtension(lua_State* L)
 		{
-			PushPath(L, P(L, 1).extension());
+			const std::string extension = SplitName(S(P(L, 1).filename())).second;
+			lua_pushlstring(L, extension.data(), extension.size());
 			return 1;
+		}
+
+		// `.` and `..` resolved as text, without a separator at the end
+		// (but for a root's): "a/b/../" is "a", and nothing left is ".".
+		fs::path Normal(const fs::path& path)
+		{
+			fs::path out = path.lexically_normal();
+			if (!out.has_filename() && out.has_relative_path())
+				out = out.parent_path();
+			return out.empty() ? fs::path(".") : out;
+		}
+
+		// The path read against the working directory ("" is the directory).
+		fs::path Absolute(const fs::path& path)
+		{
+			std::error_code ec;
+			return fs::absolute(path.empty() ? fs::path(".") : path, ec);
 		}
 
 		int PathAbsolute(lua_State* L)
 		{
-			std::error_code ec;
-			PushPath(L, fs::absolute(P(L, 1), ec).lexically_normal());
+			PushPath(L, Normal(Absolute(P(L, 1))));
 			return 1;
 		}
 
 		int PathNormalize(lua_State* L)
 		{
-			PushPath(L, P(L, 1).lexically_normal());
+			PushPath(L, Normal(P(L, 1)));
 			return 1;
+		}
+
+		// `path` from `base`; "" when there is no way from one to the other
+		// (two drives on Windows).
+		fs::path Relative(const fs::path& path, const fs::path& base)
+		{
+			const fs::path relative = Normal(path).lexically_relative(Normal(base));
+			return relative.empty() ? relative : Normal(relative);
 		}
 
 		int PathRelative(lua_State* L)
 		{
-			std::error_code ec;
-			const fs::path path = fs::absolute(P(L, 1), ec);
-			const fs::path base = lua_isnoneornil(L, 2) ? fs::current_path(ec) : fs::absolute(P(L, 2), ec);
-			PushPath(L, path.lexically_normal().lexically_relative(base.lexically_normal()));
+			const fs::path path = Absolute(P(L, 1));
+			const fs::path base = Absolute(lua_isnoneornil(L, 2) ? fs::path() : P(L, 2));
+			PushPath(L, Relative(path, base));
+			return 1;
+		}
+
+		// In the sandbox, which has no working directory: a relative path
+		// has nothing to be read against.
+		int PathAbsoluteSandboxed(lua_State* L)
+		{
+			const fs::path path = P(L, 1);
+			if (!path.is_absolute())
+				luaL_error(L, "path.absolute: the sandbox has no working directory to read '%s' against", S(path).c_str());
+			PushPath(L, Normal(path));
+			return 1;
+		}
+
+		int PathRelativeSandboxed(lua_State* L)
+		{
+			const fs::path path = P(L, 1);
+			if (lua_isnoneornil(L, 2) || !path.is_absolute() || !P(L, 2).is_absolute())
+				luaL_error(L, "path.relative: the sandbox has no working directory, so both paths are absolute");
+			PushPath(L, Relative(path, P(L, 2)));
 			return 1;
 		}
 
@@ -874,13 +1164,55 @@ namespace cluau::runtime::detail {
 			std::exit(code);
 		}
 
+#ifdef _WIN32
+		// UTF-8 to the UTF-16 Windows takes, and back (as they are: a value's
+		// backslashes stay, as a path's would not).
+		std::wstring Wide(std::string_view text) { return fs::u8path(text.begin(), text.end()).wstring(); }
+
+		std::string Narrow(const std::wstring& text)
+		{
+			const auto u = fs::path(text).u8string();
+			return std::string(u.begin(), u.end());
+		}
+#endif
+
+		// An environment variable's name: not empty, no `=` (it ends the
+		// name) and no NUL byte.
+		std::string EnvName(lua_State* L, const char* fn)
+		{
+			const std::string name(Text(L, 1, "name"));
+			if (name.empty() || name.find('=') != std::string::npos)
+				luaL_error(L, "%s: '%s' is not a variable name (a name is not empty and has no '=')", fn, name.c_str());
+			return name;
+		}
+
 		int ProcessEnv(lua_State* L)
 		{
-			const char* value = std::getenv(luaL_checkstring(L, 1));
+			const std::string name = EnvName(L, "process.env");
+#ifdef _WIN32
+			// The wide form: the value in UTF-8, as every other string is,
+			// not in the system's code page.
+			const std::wstring wname = Wide(name);
+			SetLastError(0);
+			std::wstring value(GetEnvironmentVariableW(wname.c_str(), nullptr, 0), L'\0');
+			if (value.empty())
+			{
+				if (GetLastError() == ERROR_ENVVAR_NOT_FOUND)
+					lua_pushnil(L);
+				else
+					lua_pushliteral(L, "");
+				return 1;
+			}
+			value.resize(GetEnvironmentVariableW(wname.c_str(), value.data(), (DWORD)value.size()));
+			const std::string text = Narrow(value);
+			lua_pushlstring(L, text.data(), text.size());
+#else
+			const char* value = std::getenv(name.c_str());
 			if (value)
 				lua_pushstring(L, value);
 			else
 				lua_pushnil(L);
+#endif
 			return 1;
 		}
 
@@ -897,7 +1229,7 @@ namespace cluau::runtime::detail {
 					const size_t eq = entry.find(L'=', 1);
 					if (eq == std::wstring::npos)
 						continue;
-					const std::string name = S(fs::path(entry.substr(0, eq))), value = S(fs::path(entry.substr(eq + 1)));
+					const std::string name = Narrow(entry.substr(0, eq)), value = Narrow(entry.substr(eq + 1));
 					lua_pushlstring(L, value.data(), value.size());
 					lua_setfield(L, -2, name.c_str());
 				}
@@ -919,15 +1251,20 @@ namespace cluau::runtime::detail {
 
 		int ProcessSetEnv(lua_State* L)
 		{
-			const char* name = luaL_checkstring(L, 1);
-			const char* value = luaL_optstring(L, 2, nullptr);
+			const std::string name = EnvName(L, "process.setEnv");
+			const bool set = !lua_isnoneornil(L, 2);
+			const std::string value(set ? Text(L, 2, "value") : std::string_view());
 #ifdef _WIN32
-			_putenv_s(name, value ? value : "");
+			// The C runtime's copy (getenv) and the system's (what programs
+			// started from here get), which also keeps an empty value.
+			const std::wstring wname = Wide(name), wvalue = Wide(value);
+			const bool ok = _wputenv_s(wname.c_str(), wvalue.c_str()) == 0 &&
+				SetEnvironmentVariableW(wname.c_str(), set ? wvalue.c_str() : nullptr) != 0;
+			if (!ok && set)
+				luaL_error(L, "process.setEnv: cannot set '%s'", name.c_str());
 #else
-			if (value)
-				setenv(name, value, 1);
-			else
-				unsetenv(name);
+			if ((set ? setenv(name.c_str(), value.c_str(), 1) : unsetenv(name.c_str())) != 0)
+				luaL_error(L, "process.setEnv: cannot set '%s': %s", name.c_str(), ErrnoMessage(errno).c_str());
 #endif
 			return 0;
 		}
@@ -945,7 +1282,7 @@ namespace cluau::runtime::detail {
 			std::error_code ec;
 			fs::current_path(dir, ec);
 			if (ec)
-				Fail(L, "process.chdir", "cannot enter", dir, ec.message());
+				Fail(L, "process.chdir", "cannot enter", dir, Message(ec));
 			return 0;
 		}
 
@@ -1311,25 +1648,59 @@ namespace cluau::runtime::detail {
 
 		// ---- @std/io and input ----------------------------------------------
 
-		int WriteTo(lua_State* L, FILE* to)
+		// On Windows a redirected standard input or output is put in binary
+		// mode once a script reads or writes it through @std/io: the bytes go
+		// through as they are (no CR added before LF, no end at a Ctrl-Z),
+		// as on every other platform. A console is left as it is.
+		void Binary(int fd)
+		{
+#ifdef _WIN32
+			static std::once_flag once[2];
+			std::call_once(once[fd == 0 ? 0 : 1], [fd] {
+				if (!_isatty(fd))
+				{
+					if (fd == 1)
+						std::fflush(stdout);
+					_setmode(fd, _O_BINARY);
+				}
+			});
+#else
+			(void)fd;
+#endif
+		}
+
+		// A write the system refuses (a full disk, a closed pipe) is an error.
+		[[noreturn]] void StreamFailed(lua_State* L, const char* fn, FILE* stream, int err)
+		{
+			std::clearerr(stream);
+			luaL_error(L, "%s: %s", fn, ErrnoMessage(err).c_str());
+			std::abort(); // not reached
+		}
+
+		int WriteTo(lua_State* L, const char* fn, FILE* to)
 		{
 			const int n = lua_gettop(L);
 			for (int i = 1; i <= n; i++)
 			{
 				size_t len = 0;
 				const char* s = luaL_tolstring(L, i, &len);
-				std::fwrite(s, 1, len, to);
+				if (std::fwrite(s, 1, len, to) != len)
+					StreamFailed(L, fn, to, errno);
 				lua_pop(L, 1);
 			}
 			return 0;
 		}
 
-		int IoWrite(lua_State* L) { return WriteTo(L, stdout); }
+		int IoWrite(lua_State* L)
+		{
+			Binary(1);
+			return WriteTo(L, "io.write", stdout);
+		}
 
 		int IoWriteError(lua_State* L)
 		{
 			std::fflush(stdout);
-			return WriteTo(L, stderr);
+			return WriteTo(L, "io.writeError", stderr);
 		}
 
 		// Standard input is read on a job's thread, one read at a time.
@@ -1338,6 +1709,7 @@ namespace cluau::runtime::detail {
 		int IoReadLine(lua_State* L)
 		{
 			std::fflush(stdout);
+			Binary(0);
 			return Await(L, []() -> JobResult {
 				std::lock_guard<std::mutex> reading(g_Reading);
 				auto line = std::make_shared<std::string>();
@@ -1360,6 +1732,7 @@ namespace cluau::runtime::detail {
 		int IoReadAll(lua_State* L)
 		{
 			std::fflush(stdout);
+			Binary(0);
 			return Await(L, []() -> JobResult {
 				std::lock_guard<std::mutex> reading(g_Reading);
 				std::stringstream buffer;
@@ -1373,9 +1746,11 @@ namespace cluau::runtime::detail {
 			});
 		}
 
-		int IoFlush(lua_State*)
+		int IoFlush(lua_State* L)
 		{
-			std::fflush(stdout);
+			errno = 0;
+			if (std::fflush(stdout) != 0 || std::ferror(stdout))
+				StreamFailed(L, "io.flush", stdout, errno);
 			std::fflush(stderr);
 			return 0;
 		}
@@ -1420,35 +1795,157 @@ namespace cluau::runtime::detail {
 			return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 		}
 
-		std::tm Breakdown(double t, bool utc)
+		int64_t FloorDiv(int64_t a, int64_t b)
 		{
-			const std::time_t whole = (std::time_t)std::floor(t);
+			const int64_t q = a / b;
+			return q * b > a ? q - 1 : q;
+		}
+
+		// Days since 1970-01-01 of a date in the Gregorian calendar, and back
+		// (Howard Hinnant's days_from_civil and civil_from_days). UTC is
+		// worked out with these on every platform: the C library's gmtime
+		// and timegm on Windows stop at 1970 and 3000.
+		int64_t DaysFromCivil(int64_t y, int64_t m, int64_t d)
+		{
+			y -= m <= 2;
+			const int64_t era = (y >= 0 ? y : y - 399) / 400;
+			const int64_t yoe = y - era * 400;
+			const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+			const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+			return era * 146097 + doe - 719468;
+		}
+
+		void CivilFromDays(int64_t z, int64_t& y, int& m, int& d)
+		{
+			z += 719468;
+			const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+			const int64_t doe = z - era * 146097;
+			const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+			const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+			const int64_t mp = (5 * doy + 2) / 153;
+			d = (int)(doy - (153 * mp + 2) / 5 + 1);
+			m = (int)(mp < 10 ? mp + 3 : mp - 9);
+			y = yoe + era * 400 + (m <= 2);
+		}
+
+		// The times @std/time handles: the years 0 to 9999, which ISO 8601's
+		// four digits write.
+		constexpr int64_t kFirstSecond = -62167219200; // 0000-01-01T00:00:00Z
+		constexpr int64_t kEndSecond = 253402300800; // 10000-01-01T00:00:00Z
+
+		// A number for an error message, the same on every platform (printf
+		// writes NaN as "nan", "-nan" or "nan(ind)").
+		std::string NumberText(double d)
+		{
+			if (d != d)
+				return "nan";
+			if (std::isinf(d))
+				return d < 0 ? "-inf" : "inf";
+			char buf[32];
+			std::snprintf(buf, sizeof(buf), "%.14g", d);
+			return buf;
+		}
+
+		[[noreturn]] void OutOfRange(lua_State* L, const char* fn, double t)
+		{
+			luaL_error(L, "%s: the time %s is out of range (the years 0 to 9999)", fn, NumberText(t).c_str());
+			std::abort(); // not reached
+		}
+
+		// Seconds since 1970 of UTC calendar fields (`month0` from 0); a
+		// field past its range carries over.
+		int64_t ComposeUtc(int64_t year, int64_t month0, int64_t day, int64_t hour, int64_t minute, int64_t second)
+		{
+			const int64_t years = FloorDiv(month0, 12);
+			return (DaysFromCivil(year + years, month0 - years * 12 + 1, 1) + day - 1) * 86400 + hour * 3600 + minute * 60 + second;
+		}
+
+		int64_t ComposeUtc(const std::tm& f) { return ComposeUtc(f.tm_year + 1900LL, f.tm_mon, f.tm_mday, f.tm_hour, f.tm_min, f.tm_sec); }
+
+		std::tm UtcFields(int64_t seconds)
+		{
+			const int64_t days = FloorDiv(seconds, 86400), rest = seconds - days * 86400;
+			int64_t year = 0;
+			int month = 0, day = 0;
+			CivilFromDays(days, year, month, day);
 			std::tm out{};
-#ifdef _WIN32
-			utc ? gmtime_s(&out, &whole) : localtime_s(&out, &whole);
-#else
-			utc ? gmtime_r(&whole, &out) : localtime_r(&whole, &out);
-#endif
+			out.tm_year = (int)(year - 1900);
+			out.tm_mon = month - 1;
+			out.tm_mday = day;
+			out.tm_hour = (int)(rest / 3600);
+			out.tm_min = (int)(rest / 60 % 60);
+			out.tm_sec = (int)(rest % 60);
+			out.tm_wday = (int)(days + 4 - FloorDiv(days + 4, 7) * 7); // 1970-01-01 was a Thursday
+			out.tm_yday = (int)(days - DaysFromCivil(year, 1, 1));
 			return out;
 		}
 
-		// Seconds since 1970 for calendar fields, read as UTC or local time.
-		double Compose(std::tm fields, bool utc)
+		// A time as calendar fields, rounded to the millisecond: a time read
+		// from ".001" is stored a hair below it, and ".9996" is the next second.
+		struct Moment
 		{
-			fields.tm_isdst = -1;
+			std::tm Fields{};
+			int64_t Seconds = 0;
+			int Millis = 0;
+		};
+
+		Moment Breakdown(lua_State* L, const char* fn, double t, bool utc)
+		{
+			// Two days to spare: a local time near the ends may be in range.
+			if (!(t > (double)(kFirstSecond - 2 * 86400) && t < (double)(kEndSecond + 2 * 86400)))
+				OutOfRange(L, fn, t);
+			Moment m;
+			const int64_t ms = std::llround(t * 1000.0);
+			m.Seconds = FloorDiv(ms, 1000);
+			m.Millis = (int)(ms - m.Seconds * 1000);
+			if (utc)
+				m.Fields = UtcFields(m.Seconds);
+			else
+			{
+				const std::time_t whole = (std::time_t)m.Seconds;
 #ifdef _WIN32
-			return (double)(utc ? _mkgmtime(&fields) : std::mktime(&fields));
+				const bool ok = localtime_s(&m.Fields, &whole) == 0;
 #else
-			return (double)(utc ? timegm(&fields) : std::mktime(&fields));
+				const bool ok = localtime_r(&whole, &m.Fields) != nullptr;
 #endif
+				if (!ok)
+					luaL_error(L, "%s: the system has no local time for %s (utc = true works)", fn, NumberText(t).c_str());
+			}
+			if (m.Fields.tm_year < -1900 || m.Fields.tm_year > 9999 - 1900)
+				OutOfRange(L, fn, t);
+			return m;
 		}
 
-		// The local time zone's offset from UTC at `t`, in seconds east.
-		int LocalOffset(double t)
+		// Local calendar fields as seconds since 1970; false when the system
+		// cannot place them.
+		bool ComposeLocal(std::tm fields, int64_t& out)
 		{
-			std::tm local = Breakdown(t, false);
-			return (int)(Compose(local, true) - std::floor(t));
+			fields.tm_isdst = -1;
+			const std::tm asked = fields;
+			const std::time_t t = std::mktime(&fields);
+			if (t == (std::time_t)-1)
+			{
+				// Also the last second of 1969 in UTC: the answer when the
+				// fields name that second.
+				const std::time_t minus = -1;
+				std::tm check{};
+#ifdef _WIN32
+				if (localtime_s(&check, &minus) != 0)
+					return false;
+#else
+				if (!localtime_r(&minus, &check))
+					return false;
+#endif
+				if (ComposeUtc(check) != ComposeUtc(asked))
+					return false;
+			}
+			out = (int64_t)t;
+			return true;
 		}
+
+		// The local time zone's offset from UTC (seconds east) at a moment
+		// broken down in local time.
+		int64_t LocalOffset(const Moment& m) { return ComposeUtc(m.Fields) - m.Seconds; }
 
 		int TimeNow(lua_State* L)
 		{
@@ -1467,20 +1964,24 @@ namespace cluau::runtime::detail {
 		{
 			const double t = luaL_optnumber(L, 1, Now());
 			const bool utc = UtcOption(L, 2);
-			const std::tm tm = Breakdown(t, utc);
+			const Moment m = Breakdown(L, "time.iso", t, utc);
+			const std::tm& tm = m.Fields;
 			char buf[64];
 			int n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
 				tm.tm_min, tm.tm_sec);
-			const int ms = (int)std::floor((t - std::floor(t)) * 1000.0 + 1e-6);
-			if (ms > 0)
-				n += std::snprintf(buf + n, sizeof(buf) - n, ".%03d", ms);
+			if (m.Millis > 0)
+				n += std::snprintf(buf + n, sizeof(buf) - n, ".%03d", m.Millis);
 			if (utc)
 				std::snprintf(buf + n, sizeof(buf) - n, "Z");
 			else
 			{
-				const int offset = LocalOffset(t);
-				const int a = std::abs(offset) / 60;
-				std::snprintf(buf + n, sizeof(buf) - n, "%c%02d:%02d", offset < 0 ? '-' : '+', a / 60, a % 60);
+				// An offset with seconds (local mean time, before about 1900)
+				// keeps them: +00:19:32.
+				const int64_t offset = LocalOffset(m);
+				const int a = (int)(offset < 0 ? -offset : offset);
+				n += std::snprintf(buf + n, sizeof(buf) - n, "%c%02d:%02d", offset < 0 ? '-' : '+', a / 3600, a / 60 % 60);
+				if (a % 60)
+					std::snprintf(buf + n, sizeof(buf) - n, ":%02d", a % 60);
 			}
 			lua_pushstring(L, buf);
 			return 1;
@@ -1490,14 +1991,15 @@ namespace cluau::runtime::detail {
 		// UTC midnight; a time without `Z` or an offset is local time.
 		int TimeParse(lua_State* L)
 		{
-			const std::string text = luaL_checkstring(L, 1);
+			const std::string text(Text(L, 1, "text"));
 			size_t at = 0;
 			auto fail = [&](const char* what) { luaL_error(L, "time.parse: %s in '%s'", what, text.c_str()); };
+			auto digit = [&]() { return at < text.size() && std::isdigit((unsigned char)text[at]); };
 			auto digits = [&](int count) {
 				int value = 0;
 				for (int i = 0; i < count; i++, at++)
 				{
-					if (at >= text.size() || !std::isdigit((unsigned char)text[at]))
+					if (!digit())
 						fail("expected a digit");
 					value = value * 10 + (text[at] - '0');
 				}
@@ -1545,16 +2047,17 @@ namespace cluau::runtime::detail {
 					{
 						at++;
 						double scale = 0.1;
-						if (at >= text.size() || !std::isdigit((unsigned char)text[at]))
+						if (!digit())
 							fail("expected the fraction's digits");
-						while (at < text.size() && std::isdigit((unsigned char)text[at]))
+						while (digit())
 						{
 							fraction += (text[at++] - '0') * scale;
 							scale /= 10;
 						}
 					}
 				}
-				if (tm.tm_hour > 23 || tm.tm_min > 59 || tm.tm_sec > 60)
+				// Second 60 is a leap second, which ends a day (23:59:60).
+				if (tm.tm_hour > 23 || tm.tm_min > 59 || tm.tm_sec > 60 || (tm.tm_sec == 60 && (tm.tm_hour != 23 || tm.tm_min != 59)))
 					fail("the time is out of range");
 				if (at < text.size() && (text[at] == 'Z' || text[at] == 'z'))
 				{
@@ -1563,21 +2066,38 @@ namespace cluau::runtime::detail {
 				}
 				else if (at < text.size() && (text[at] == '+' || text[at] == '-'))
 				{
+					// +hh, +hh:mm or +hhmm, and seconds after them as time.iso
+					// writes them (+hh:mm:ss).
 					const int sign = text[at++] == '-' ? -1 : 1;
 					const int hours = digits(2);
-					int minutes = 0;
-					if (at < text.size() && text[at] == ':')
-						at++;
-					if (at < text.size() && std::isdigit((unsigned char)text[at]))
+					int minutes = 0, seconds = 0;
+					const bool colon = at < text.size() && text[at] == ':';
+					if (colon || digit())
+					{
+						at += colon;
 						minutes = digits(2);
-					offset = sign * (hours * 3600 + minutes * 60);
+						if (colon ? at < text.size() && text[at] == ':' : digit())
+						{
+							at += colon;
+							seconds = digits(2);
+						}
+					}
+					if (hours > 23 || minutes > 59 || seconds > 59)
+						fail("the offset is out of range");
+					offset = sign * (hours * 3600 + minutes * 60 + seconds);
 					hasOffset = true;
 				}
 			}
 			if (at != text.size())
 				fail("unexpected text after the time");
-			const bool utc = !hasTime || hasOffset;
-			lua_pushnumber(L, Compose(tm, utc) - offset + fraction);
+			int64_t seconds = 0;
+			if (!hasTime || hasOffset)
+				seconds = ComposeUtc(tm) - offset;
+			else if (!ComposeLocal(tm, seconds))
+				fail("the system has no local time for the date");
+			if (seconds < kFirstSecond || seconds >= kEndSecond)
+				fail("the time is out of range (the years 0 to 9999)");
+			lua_pushnumber(L, (double)seconds + fraction);
 			return 1;
 		}
 
@@ -1585,13 +2105,45 @@ namespace cluau::runtime::detail {
 		int TimeFormat(lua_State* L)
 		{
 			const double t = luaL_checknumber(L, 1);
-			const char* pattern = luaL_checkstring(L, 2);
-			const std::tm tm = Breakdown(t, UtcOption(L, 3));
+			size_t len = 0;
+			const char* pattern = luaL_checklstring(L, 2, &len);
+			const bool utc = UtcOption(L, 3);
+			// The conversions C and C++ define, which every platform has. Others
+			// differ: Linux passes an unknown one through, and Windows ends
+			// the program. In UTC, %z and %Z are written here, as Windows'
+			// strftime would give the local zone's.
+			std::string checked;
+			for (size_t i = 0; i < len; i++)
+			{
+				if (pattern[i] == '\0')
+					luaL_argerror(L, 2, "the pattern holds a NUL byte");
+				if (pattern[i] != '%')
+				{
+					checked += pattern[i];
+					continue;
+				}
+				if (++i >= len)
+					luaL_error(L, "time.format: the pattern ends with a lone '%%' ('%%%%' writes one)");
+				const char c = pattern[i];
+				if (c == '\0' || !std::strchr("aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%", c))
+				{
+					if (std::isprint((unsigned char)c))
+						luaL_error(L, "time.format: '%%%c' is not one of the conversions strftime has everywhere ('%%%%' writes a '%%')", c);
+					luaL_error(L, "time.format: a '%%' followed by the byte 0x%02X is not a conversion", (unsigned char)c);
+				}
+				if (utc && c == 'z')
+					checked += "+0000";
+				else if (utc && c == 'Z')
+					checked += "UTC";
+				else
+					checked.append(1, '%').append(1, c);
+			}
+			const Moment m = Breakdown(L, "time.format", t, utc);
 			std::vector<char> buf(256);
 			for (;;)
 			{
-				const size_t n = std::strftime(buf.data(), buf.size(), pattern, &tm);
-				if (n > 0 || *pattern == '\0' || buf.size() > 65536)
+				const size_t n = std::strftime(buf.data(), buf.size(), checked.c_str(), &m.Fields);
+				if (n > 0 || checked.empty() || buf.size() > 65536)
 				{
 					lua_pushlstring(L, buf.data(), n);
 					return 1;
@@ -1612,7 +2164,8 @@ namespace cluau::runtime::detail {
 		{
 			const double t = luaL_optnumber(L, 1, Now());
 			const bool utc = UtcOption(L, 2);
-			const std::tm tm = Breakdown(t, utc);
+			const Moment m = Breakdown(L, "time.parts", t, utc);
+			const std::tm& tm = m.Fields;
 			lua_createtable(L, 0, 10);
 			SetNumber(L, "year", tm.tm_year + 1900);
 			SetNumber(L, "month", tm.tm_mon + 1);
@@ -1620,21 +2173,35 @@ namespace cluau::runtime::detail {
 			SetNumber(L, "hour", tm.tm_hour);
 			SetNumber(L, "minute", tm.tm_min);
 			SetNumber(L, "second", tm.tm_sec);
-			SetNumber(L, "millisecond", std::floor((t - std::floor(t)) * 1000.0 + 1e-6));
+			SetNumber(L, "millisecond", m.Millis);
 			SetNumber(L, "weekday", tm.tm_wday == 0 ? 7 : tm.tm_wday);
 			SetNumber(L, "yearday", tm.tm_yday + 1);
-			SetNumber(L, "offset", utc ? 0 : LocalOffset(t));
+			SetNumber(L, "offset", utc ? 0 : (double)LocalOffset(m));
 			return 1;
 		}
 
-		int Field(lua_State* L, int table, const char* name, int fallback)
+		// A calendar field: a whole number, or with `fraction` any number
+		// (its fraction kept there).
+		int64_t Field(lua_State* L, int table, const char* name, int64_t fallback, double* fraction = nullptr)
 		{
 			lua_getfield(L, table, name);
-			if (!lua_isnil(L, -1) && lua_type(L, -1) != LUA_TNUMBER)
+			if (lua_isnil(L, -1))
+			{
+				lua_pop(L, 1);
+				return fallback;
+			}
+			if (lua_type(L, -1) != LUA_TNUMBER)
 				luaL_error(L, "time.fromParts: parts.%s is a number (got %s)", name, luaL_typename(L, -1));
-			const int value = lua_isnil(L, -1) ? fallback : (int)lua_tonumber(L, -1);
+			const double value = lua_tonumber(L, -1);
 			lua_pop(L, 1);
-			return value;
+			if (!(std::fabs(value) <= 1e9))
+				luaL_error(L, "time.fromParts: parts.%s is out of range (got %s)", name, NumberText(value).c_str());
+			const double whole = std::floor(value);
+			if (fraction)
+				*fraction = value - whole;
+			else if (value != whole)
+				luaL_error(L, "time.fromParts: parts.%s is a whole number (got %s)", name, NumberText(value).c_str());
+			return (int64_t)whole;
 		}
 
 		// time.fromParts(parts, options?): the time those calendar fields name
@@ -1643,19 +2210,33 @@ namespace cluau::runtime::detail {
 		int TimeFromParts(lua_State* L)
 		{
 			luaL_checktype(L, 1, LUA_TTABLE);
-			std::tm tm{};
 			lua_getfield(L, 1, "year");
 			if (lua_isnil(L, -1))
 				luaL_error(L, "time.fromParts: the parts need a year");
 			lua_pop(L, 1);
-			tm.tm_year = Field(L, 1, "year", 1970) - 1900;
-			tm.tm_mon = Field(L, 1, "month", 1) - 1;
-			tm.tm_mday = Field(L, 1, "day", 1);
-			tm.tm_hour = Field(L, 1, "hour", 0);
-			tm.tm_min = Field(L, 1, "minute", 0);
-			tm.tm_sec = Field(L, 1, "second", 0);
-			const int ms = Field(L, 1, "millisecond", 0);
-			lua_pushnumber(L, Compose(tm, UtcOption(L, 2)) + ms / 1000.0);
+			double secondFraction = 0, msFraction = 0;
+			const int64_t year = Field(L, 1, "year", 1970), month = Field(L, 1, "month", 1), day = Field(L, 1, "day", 1);
+			const int64_t hour = Field(L, 1, "hour", 0), minute = Field(L, 1, "minute", 0);
+			const int64_t second = Field(L, 1, "second", 0, &secondFraction), ms = Field(L, 1, "millisecond", 0, &msFraction);
+			int64_t seconds = 0;
+			if (UtcOption(L, 2))
+				seconds = ComposeUtc(year, month - 1, day, hour, minute, second);
+			else
+			{
+				std::tm tm{};
+				tm.tm_year = (int)(year - 1900);
+				tm.tm_mon = (int)(month - 1);
+				tm.tm_mday = (int)day;
+				tm.tm_hour = (int)hour;
+				tm.tm_min = (int)minute;
+				tm.tm_sec = (int)second;
+				if (!ComposeLocal(tm, seconds))
+					luaL_error(L, "time.fromParts: the system has no local time for those parts (utc = true works)");
+			}
+			const double t = (double)seconds + secondFraction + (ms + msFraction) / 1000.0;
+			if (!(t >= (double)kFirstSecond && t < (double)kEndSecond))
+				OutOfRange(L, "time.fromParts", t);
+			lua_pushnumber(L, t);
 			return 1;
 		}
 
@@ -1705,8 +2286,44 @@ namespace cluau::runtime::detail {
 			return buf;
 		}
 
-		void JsonString(const char* s, size_t len, std::string& out)
+		// Where the text stops being UTF-8 (`len` when it is all UTF-8):
+		// overlong forms, surrogates and code points past U+10FFFF are not.
+		size_t Utf8End(const char* s, size_t len)
 		{
+			for (size_t i = 0; i < len;)
+			{
+				const unsigned char c = (unsigned char)s[i];
+				if (c < 0x80)
+				{
+					i++;
+					continue;
+				}
+				const size_t n = (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+				if (n == 0 || i + n > len)
+					return i;
+				uint32_t cp = c & (0x7F >> n);
+				for (size_t k = 1; k < n; k++)
+				{
+					const unsigned char d = (unsigned char)s[i + k];
+					if ((d & 0xC0) != 0x80)
+						return i;
+					cp = (cp << 6) | (d & 0x3F);
+				}
+				static const uint32_t kLeast[] = { 0, 0, 0x80, 0x800, 0x10000 };
+				if (cp < kLeast[n] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+					return i;
+				i += n;
+			}
+			return len;
+		}
+
+		// JSON text is UTF-8 (RFC 8259): a string that is not, bytes from a
+		// file or a hash, is an error rather than output no reader takes.
+		void JsonString(lua_State* L, const char* s, size_t len, std::string& out)
+		{
+			if (const size_t bad = Utf8End(s, len); bad < len)
+				luaL_error(L, "json.encode: a string is not UTF-8 (byte %d is 0x%02X); encode bytes first (encoding.toBase64)", (int)bad + 1,
+					(unsigned char)s[bad]);
 			out += '"';
 			for (size_t i = 0; i < len; i++)
 			{
@@ -1763,7 +2380,7 @@ namespace cluau::runtime::detail {
 			{
 				size_t len = 0;
 				const char* s = lua_tolstring(L, index, &len);
-				JsonString(s, len, out);
+				JsonString(L, s, len, out);
 				return;
 			}
 			case LUA_TTABLE: break;
@@ -1780,21 +2397,28 @@ namespace cluau::runtime::detail {
 			if (std::find(seen.begin(), seen.end(), self) != seen.end())
 				luaL_error(L, "json.encode: a table contains itself");
 			seen.push_back(self);
+			// An array: every key a whole number from 1 to the length, and as
+			// many keys as that. (The length alone is a border, which a table
+			// with holes and other keys can match.)
 			const int n = lua_objlen(L, index);
 			int count = 0;
+			bool sequence = true;
 			lua_pushnil(L);
 			while (lua_next(L, index))
 			{
 				count++;
 				lua_pop(L, 1);
+				const double key = lua_type(L, -1) == LUA_TNUMBER ? lua_tonumber(L, -1) : 0;
+				sequence = sequence && key >= 1 && key <= n && key == std::floor(key);
 			}
+			sequence = sequence && count == n;
 			const std::string colon = indent.empty() ? ":" : ": ";
 			// An array: a table whose keys are 1..n (an empty one is `[]`),
 			// unless json.object marks it; json.array marks one as an array.
 			const char mark = JsonMark(L, index);
-			if (mark == 'a' && count != n)
+			if (mark == 'a' && !sequence)
 				luaL_error(L, "json.encode: a table json.array marks has keys other than 1..n");
-			if (mark != 'o' && count == n)
+			if (mark != 'o' && sequence)
 			{
 				out += '[';
 				for (int i = 1; i <= n; i++)
@@ -1840,7 +2464,7 @@ namespace cluau::runtime::detail {
 					if (k > 0)
 						out += ',';
 					Newline(out, indent, depth + 1);
-					JsonString(keys[k].first.data(), keys[k].first.size(), out);
+					JsonString(L, keys[k].first.data(), keys[k].first.size(), out);
 					out += colon;
 					if (keys[k].second == LUA_TSTRING)
 						lua_pushlstring(L, keys[k].first.data(), keys[k].first.size());
@@ -1903,6 +2527,9 @@ namespace cluau::runtime::detail {
 			{
 			}
 
+			// Arrays and objects inside one another, at most.
+			static constexpr int kMaxDepth = 1000;
+
 			void Parse()
 			{
 				Value(0);
@@ -1946,15 +2573,15 @@ namespace cluau::runtime::detail {
 				return false;
 			}
 
+			// `depth`: the arrays and objects the value is in.
 			void Value(int depth)
 			{
-				if (depth > 200)
-					Error("nesting too deep");
-				lua_checkstack(m_L, 4);
 				Space();
 				if (m_Pos >= m_Len)
 					Error("unexpected end of input");
 				const char c = m_Text[m_Pos];
+				if ((c == '{' || c == '[') && (depth >= kMaxDepth || !lua_checkstack(m_L, 4)))
+					Error("nesting too deep (more than 1000 arrays and objects)");
 				if (c == '{')
 					Object(depth);
 				else if (c == '[')
@@ -2096,6 +2723,10 @@ namespace cluau::runtime::detail {
 							else
 								m_Pos = at; // not its pair: the next escape is read on its own
 						}
+						// A surrogate on its own stands for no character: U+FFFD,
+						// the replacement character, keeps the text UTF-8.
+						if (cp >= 0xD800 && cp <= 0xDFFF)
+							cp = 0xFFFD;
 						Utf8(cp, out);
 						break;
 					}
@@ -2253,6 +2884,13 @@ namespace cluau::runtime::detail {
 
 		lua_newtable(L);
 		SetFunctions(L, kPath);
+		if (sandbox)
+		{
+			lua_pushcfunction(L, PathAbsoluteSandboxed, "absolute");
+			lua_setfield(L, -2, "absolute");
+			lua_pushcfunction(L, PathRelativeSandboxed, "relative");
+			lua_setfield(L, -2, "relative");
+		}
 		lua_setfield(L, -2, "path");
 
 		lua_newtable(L);

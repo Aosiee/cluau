@@ -1,0 +1,90 @@
+// @std/path, @std/json, @std/encoding, @std/term and environment variables
+// at their edges.
+const path = require("@std/path")
+const json = require("@std/json")
+const encoding = require("@std/encoding")
+const term = require("@std/term")
+const process = require("@std/process")
+
+// path: no separator left at the end, and leading dots belong to the name.
+print(path.basename(path.absolute(".")) == path.basename(process.cwd()), path.absolute("") == process.cwd())
+print(path.normalize("a/"), path.normalize("a/."), path.normalize("a/b/c/.."), path.normalize("a/.."), path.normalize(""), path.normalize("/"))
+print(path.normalize("../"), path.relative(process.cwd()), path.relative("a/b/", "a"), path.relative("a", "a/b/"))
+print(path.dirname(path.absolute("..")) == path.dirname(path.dirname(process.cwd())))
+for (_, name in { "..x", "...", "a/..rc", ".bashrc", "a.tar.gz", "a.", "a/b.c/", "..", "." }) {
+	print(repr(name), repr(path.stem(name)), repr(path.extension(name)))
+}
+print(pcall(path.normalize, "a\0b"))
+
+// json: a table is an array only when its keys are exactly 1..n.
+const holes = { 1, 2, 3, 4 }
+holes[2] = nil
+holes.name = "n"
+print(json.encode(holes))
+const sparse: { [string | number]: number } = { x = 1, y = 2 }
+sparse[3] = 3
+print(json.encode(sparse), json.encode({ [1.5] = 1 }), json.encode({ 1, 2, 3 }))
+const marked = json.array({ 1, 2, 3 })
+marked[2] = nil
+marked.x = 1
+print(pcall(json.encode, marked))
+
+// json text is UTF-8: a string that is not is an error; a lone surrogate
+// decodes to U+FFFD.
+print(pcall(json.encode, "\xff\xfe"))
+print(pcall(json.encode, { ["\xc0\xaf"] = 1 }))
+print(pcall(json.encode, "\xed\xa0\x80"))
+print(json.encode("é中😀"), encoding.toHex(json.decode([["\ud800"]]) :: string), encoding.toHex(json.decode([["\udc00\ud83d\ude00"]]) :: string))
+print(json.encode("\b\f\n\r\t\"\\\x01\x1f/"))
+
+// Nesting: 1000 arrays and objects deep at most.
+print(#json.encode(json.decode(string.rep("[", 1000) .. string.rep("]", 1000))))
+print(pcall(json.decode, string.rep("[", 1001) .. string.rep("]", 1001)))
+print(#json.encode(json.decode(string.rep([[{"a":]], 1000) .. "1" .. string.rep("}", 1000))))
+print(pcall(json.decode, string.rep([[{"a":]], 1001) .. "1" .. string.rep("}", 1001)))
+
+// decode's errors.
+for (_, text in { [["\x"]], [["\u12"]], [["\u12g4"]], "\"a\nb\"", [["abc]], [[{"a" 1}]], "[1 2]", [[{"a":1 "b":2}]], "{1:2}", "[1,]", "01", "1.", "-", "[] x", "" }) {
+	const ok, message = pcall(json.decode, text)
+	print(repr(text), ok, message)
+}
+print(json.decode("null", { null = false }), (json.decode("[1,null,3]", { null = json.null }) :: { unknown })[2] == json.null)
+
+// encoding: a byte that is not printable shows as 0xNN.
+print(pcall(encoding.fromBase64, "ab\0c"))
+print(pcall(encoding.fromBase64, "ab\xffc"))
+print(pcall(encoding.fromBase64, "ab*c"))
+print(pcall(encoding.fromHex, "\0a"))
+print(pcall(encoding.fromHex, "zz"))
+
+// term.strip: every kind of escape sequence goes.
+const esc = "\x1b"
+for (_, text in {
+	`{esc}[1;31mred{esc}[0m`,
+	`{esc}(B{esc}[mreset`,
+	`{esc}7save{esc}8`,
+	`{esc}Pdcs{esc}\\x`,
+	`{esc}_apc{esc}\\y`,
+	`{esc}^pm{esc}\\z`,
+	`{esc}]8;;http://a{esc}\\link{esc}]8;;\a`,
+	`{esc}creset`,
+	`{esc}`,
+	`a{esc}`,
+}) {
+	print(repr(term.strip(text)))
+}
+// term.size() is one value: a table, or nil when there is no terminal.
+print(select("#", term.size()))
+
+// Environment variables: a name is not empty and has no '='; a NUL byte
+// is refused; an empty value is kept.
+print(pcall(process.setEnv, "A=B", "x"))
+print(pcall(process.setEnv, "", "x"))
+print(pcall(process.setEnv, "CLUAU_TEST_NUL", "a\0b"))
+print(pcall(process.env, "A\0B"))
+process.setEnv("CLUAU_TEST_EMPTY", "")
+print(repr(process.env("CLUAU_TEST_EMPTY")), repr(process.environment().CLUAU_TEST_EMPTY))
+process.setEnv("CLUAU_TEST_EMPTY", nil)
+print(repr(process.env("CLUAU_TEST_EMPTY")))
+process.setEnv("CLUAU_TEST_UTF8", "é中")
+print(process.env("CLUAU_TEST_UTF8"), process.environment().CLUAU_TEST_UTF8)

@@ -1,0 +1,82 @@
+// @std/time at its edges: milliseconds, the years 0 to 9999, strict
+// parsing, the conversions strftime has everywhere, and a local zone.
+const time = require("@std/time")
+const process = require("@std/process")
+
+// Every millisecond survives a round trip (a time read from ".001" is
+// stored a hair below it).
+let lost = 0
+for (ms = 0, 999) {
+	const text = string.format("2026-11-24T21:05:09.%03dZ", ms)
+	const expected = if (ms == 0) "2026-11-24T21:05:09Z" else text
+	if (time.iso(time.parse(text), { utc = true }) != expected) {
+		lost += 1
+	}
+}
+print("lost:", lost)
+print(time.iso(1700000000.001, { utc = true }), time.parts(1700000000.001, { utc = true }).millisecond)
+print(time.iso(1700000000.9996, { utc = true }), time.iso(-0.0004, { utc = true }), time.iso(-0.5, { utc = true }))
+
+// UTC from the calendar itself, the same on every platform: before 1970,
+// the year 1 and the year 9999.
+print(time.parse("1969-07-20T20:17:40Z"), time.iso(-14182940, { utc = true }), time.iso(-1, { utc = true }))
+print(time.parse("0001-01-01"), time.iso(-62135596800, { utc = true }), time.iso(253402300799.999, { utc = true }))
+print(time.parse("0000-01-01"), time.format(-14182940, "%A %Y-%m-%d %j %U %W %u %w", { utc = true }), time.format(-62135596800, "%A %m-%d %j", { utc = true }))
+const p = time.parts(-1, { utc = true })
+print(p.year, p.month, p.day, p.hour, p.minute, p.second, p.weekday, p.yearday)
+print(time.fromParts({ year = 1969, month = 12, day = 31, hour = 23, minute = 59, second = 59 }, { utc = true }))
+print(time.fromParts({ year = 2024, month = 14, day = 0 }, { utc = true }) == time.parse("2025-01-31"))
+
+// Out of range: an error, not a garbage date.
+print(pcall(time.iso, 1e18, { utc = true }))
+print(pcall(time.iso, 0 / 0, { utc = true }))
+print(pcall(time.parts, math.huge, { utc = true }))
+print(pcall(time.format, -math.huge, "%Y", { utc = true }))
+print(pcall(time.iso, 253402300800, { utc = true }))
+print(pcall(time.fromParts, { year = 0 / 0 }, { utc = true }))
+print(pcall(time.fromParts, { year = 1e12 }, { utc = true }))
+print(pcall(time.fromParts, { year = 10000 }, { utc = true }))
+
+// fromParts: a fraction of a second is kept; other fields are whole.
+print(time.fromParts({ year = 2020, second = 30.5 }, { utc = true }) - time.fromParts({ year = 2020 }, { utc = true }))
+print(time.fromParts({ year = 2020, millisecond = 1500 }, { utc = true }) - time.fromParts({ year = 2020 }, { utc = true }))
+print(pcall(time.fromParts, { year = 2020, day = 1.9 }, { utc = true }))
+print(pcall(time.fromParts, { year = 2020, month = "1" } :: any, { utc = true })) // allow-any: a wrong type on purpose
+
+// parse is strict about what follows the time.
+for (_, text in {
+	"2020-01-01T00:00+05:",
+	"2020-01-01T00:00+99:99",
+	"2020-01-01T00:00+05:60",
+	"2020-01-01T00:00+0530",
+	"2020-01-01T00:00-05",
+	"2020-01-01T00:00+00:19:32",
+	"2020-01-01T12:34:60Z",
+	"2016-12-31T23:59:60Z",
+	"2020-01-01T00:00:00.Z",
+	"2020-01-01T00:00:00,5Z",
+	"2020-01-01\0garbage",
+}) {
+	const ok, value = pcall(time.parse, text)
+	print(repr(text), ok, value)
+}
+
+// format takes the conversions C defines, on every platform alike.
+print(time.format(0, "%Y-%m-%d %H:%M:%S %a %b %j %%", { utc = true }), time.format(0, "%z %Z", { utc = true }), time.format(0, "", { utc = true }) == "")
+for (_, pattern in { "%-d", "%k", "%s", "%E", "%Ec", "%#d", "%", "50%" }) {
+	print(pcall(time.format, 0, pattern, { utc = true }))
+}
+print(pcall(time.format, 0, "a\0b", { utc = true }))
+
+// A local zone, in a script of its own (TZ is read when it starts). The
+// form POSIX and Windows both read: a name, then hours west of UTC.
+const zoned = [[
+const time = require("@std/time")
+const t = time.parse("2026-11-24T12:00:00Z")
+print(time.iso(t), time.parts(t).offset, time.parse("2026-11-24T17:30:00") == t)
+print(time.fromParts({ year = 2026, month = 11, day = 24, hour = 17, minute = 30 }) == t, time.format(t, "%H:%M"))
+]]
+for (_, zone in { "IST-05:30", "NST03:30", "LMT-00:19:32" }) {
+	print(zone)
+	print((string.gsub(process.run({ process.executable, "-e", zoned }, { env = { TZ = zone } }).output, "\n$", "")))
+}

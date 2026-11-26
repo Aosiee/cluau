@@ -1,0 +1,30 @@
+read dir:	is a directory
+open dir:	is a directory
+lines dir:	is a directory
+readBuffer dir:	is a directory
+write dir:	is a directory
+missing:	no such file or directory
+no directory:	its directory does not exist
+false	invalid argument #1 to 'read' (the path holds a NUL byte)
+false	invalid argument #1 to 'exists' (the path holds a NUL byte)
+false	invalid argument #2 to 'join' (the path holds a NUL byte)
+full:	no space left on device	no space left on device
+full flush:	false	true
+io.flush full:	true
+""	abc	nil	3000000000	3
+false	invalid argument #2 to 'seek' (a whole number of bytes)
+true
+the target is inside the directory copied
+false
+x
+false	-r--r--r--
+false
+false	moved
+true
+false	invalid argument #1 to 'tempFile' (a name without '/' or '\' (the file goes in the temporary directory))
+/tmp
+
+B.txt a.txt 中.txt	|	B.txt 中.txt	|	日x	|	中.txt 日x
+true
+false
+exit: 0

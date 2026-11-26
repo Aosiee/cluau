@@ -82,6 +82,9 @@ namespace cluau::runtime::detail {
 
 		// An object's member set (replaced when present); returns *this.
 		Json& Set(std::string key, Json value);
+		// An object's member added at the end without a search for one of
+		// the same name (the caller knows there is none); returns *this.
+		Json& Append(std::string key, Json value);
 		// An array's item appended; returns *this.
 		Json& Push(Json value);
 
