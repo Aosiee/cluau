@@ -13,6 +13,7 @@
 #include "Luau/Config.h"
 #include "Luau/Frontend.h"
 #include "Luau/Linter.h"
+#include "Luau/Parser.h"
 #include "Luau/Error.h"
 #include "Luau/ToString.h"
 
@@ -439,6 +440,39 @@ return m :: {
 
 		bool IsCluau(const std::string& name) { return !StartsWith(name, "@") && !detail::IsLuauFile(fs::u8path(name)); }
 
+		// A chunk with no `return` of its own (outside its functions):
+		// `require` gives `true` for it at run time.
+		bool ReturnsNothing(const std::string& luau)
+		{
+			Luau::Allocator allocator;
+			Luau::AstNameTable names(allocator);
+			const Luau::ParseResult parsed = Luau::Parser::parse(luau.data(), luau.size(), names, allocator);
+			if (!parsed.root || !parsed.errors.empty())
+				return false;
+			struct Returns : Luau::AstVisitor
+			{
+				bool Found = false;
+				bool visit(Luau::AstExprFunction*) override { return false; }
+				bool visit(Luau::AstStatReturn*) override
+				{
+					Found = true;
+					return false;
+				}
+			} returns;
+			parsed.root->visit(&returns);
+			return !returns.Found;
+		}
+
+		// A file's chunk as the checker reads it: one that returns nothing
+		// returns `true`, as `require` gives it (the line added after the
+		// last keeps every position).
+		Luau::SourceCode ModuleSource(std::string luau)
+		{
+			if (ReturnsNothing(luau))
+				luau += "\nreturn true\n";
+			return Luau::SourceCode{ std::move(luau), Luau::SourceCode::Module };
+		}
+
 		struct Files : Luau::FileResolver
 		{
 			fs::path StartDir;
@@ -489,7 +523,7 @@ return m :: {
 					options.Script = true;
 					options.Profile = &ScriptProfile();
 					const TranslateResult& t = Translations[name] = Translate(it->second, options);
-					return Luau::SourceCode{ t.Luau, Luau::SourceCode::Module };
+					return ModuleSource(t.Luau);
 				}
 				if (auto it = HostTypes->find(name); it != HostTypes->end())
 				{
@@ -505,13 +539,24 @@ return m :: {
 					it = it->first.first == name ? NotFound.erase(it) : std::next(it);
 				if (std::find(UserModules.begin(), UserModules.end(), name) == UserModules.end())
 					UserModules.push_back(name);
+				// A NUL byte ends the text for Luau's lexer; the runtime
+				// refuses such a file, and so does the check.
+				if (const size_t nul = text->find('\0'); nul != std::string::npos)
+				{
+					TranslateResult& t = Translations[name] = TranslateResult{};
+					const int line = (int)std::count(text->begin(), text->begin() + (std::ptrdiff_t)nul, '\n');
+					const size_t lineStart = text->rfind('\n', nul);
+					const int col = (int)(nul - (lineStart == std::string::npos ? 0 : lineStart + 1));
+					t.Diagnostics.push_back({ { { line, col }, { line, col + 1 } }, "the source contains a NUL byte", false });
+					return Luau::SourceCode{ "return true", Luau::SourceCode::Module };
+				}
 				if (!IsCluau(name))
-					return Luau::SourceCode{ *text, Luau::SourceCode::Module };
+					return ModuleSource(*text);
 				TranslateOptions options;
 				options.Script = true;
 				options.Profile = &ScriptProfile();
 				TranslateResult& t = Translations[name] = Translate(*text, options);
-				return Luau::SourceCode{ t.Luau, Luau::SourceCode::Module };
+				return ModuleSource(t.Luau);
 			}
 
 			std::optional<Luau::ModuleInfo> resolveModule(const Luau::ModuleInfo* context, Luau::AstExpr* node, const Luau::TypeCheckLimits&) override

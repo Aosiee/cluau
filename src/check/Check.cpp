@@ -61,14 +61,15 @@ namespace cluau::check {
 
 			void Finish()
 			{
-				// Any-typed values the script uses, one finding per line (the
-				// first on it: the map's order is the memory's).
+				// Any-typed values the script uses, one finding per line: the
+				// first on it, and of those starting there the shortest (`m`
+				// of `m.f(x)`), whatever order the map holds them in.
 				std::vector<Luau::Location> anys;
 				for (const auto& [expr, type] : m_Module.astTypes)
 					if (expr && IsAny(type))
 						anys.push_back(expr->location);
 				std::sort(anys.begin(), anys.end(), [](const Luau::Location& a, const Luau::Location& b) {
-					return a.begin.line != b.begin.line ? a.begin.line < b.begin.line : a.begin.column < b.begin.column;
+					return a.begin != b.begin ? a.begin < b.begin : a.end < b.end;
 				});
 				for (const Luau::Location& location : anys)
 					NoteAny(location, "a value of type any");
@@ -82,7 +83,7 @@ namespace cluau::check {
 						f.Warning = true;
 						Findings.push_back(std::move(f));
 					}
-				std::sort(Findings.begin(), Findings.end(), [](const Finding& a, const Finding& b) { return a.At.Begin < b.At.Begin; });
+				std::stable_sort(Findings.begin(), Findings.end(), [](const Finding& a, const Finding& b) { return a.At.Begin < b.At.Begin; });
 			}
 
 			bool visit(Luau::AstType*) override { return true; }
@@ -104,6 +105,13 @@ namespace cluau::check {
 			{
 				for (Luau::AstLocal* local : stat->vars)
 					NoteLocal(local);
+				// `const f = function(...) { ... }` is a declared function.
+				for (size_t i = 0; i < stat->values.size && i < stat->vars.size; i++)
+					if (Luau::AstExprFunction* fn = stat->values.data[i]->as<Luau::AstExprFunction>())
+					{
+						m_Declared.insert(fn);
+						CheckReturn(fn, stat->vars.data[i]->location);
+					}
 				return true;
 			}
 
@@ -140,17 +148,31 @@ namespace cluau::check {
 				}
 				if (fn->vararg && !fn->varargAnnotation)
 					Note(fn->varargLocation, "AnnotateParameter", "annotate the variadic parameter: ...: Type (strict typing)");
+				// A function expression whose type no context gives (a
+				// callback's comes from the parameter it is passed to): its
+				// return type is annotated, as a declared function's is.
+				if (!m_Declared.count(fn))
+				{
+					const Luau::TypeId* expected = m_Module.astExpectedTypes.find(fn);
+					if (!expected || IsLoose(*expected))
+					{
+						const Luau::Position begin = fn->location.begin;
+						CheckReturn(fn, Luau::Location(begin, Luau::Position(begin.line, begin.column + 8))); // `function`
+					}
+				}
 				return true;
 			}
 
 			bool visit(Luau::AstStatFunction* stat) override
 			{
+				m_Declared.insert(stat->func);
 				CheckReturn(stat->func, stat->name->location);
 				return true;
 			}
 
 			bool visit(Luau::AstStatLocalFunction* stat) override
 			{
+				m_Declared.insert(stat->func);
 				CheckReturn(stat->func, stat->name->location);
 				return true;
 			}
@@ -221,6 +243,7 @@ namespace cluau::check {
 			std::set<std::pair<int, int>> m_ConstPositions;
 			std::set<Luau::AstLocal*> m_Consts;
 			std::set<int> m_AnyLines;
+			std::set<const Luau::AstExprFunction*> m_Declared; // the functions of function statements
 		};
 
 	} // namespace

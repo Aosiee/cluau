@@ -1,5 +1,6 @@
 #include "Jobs.h"
 #include "Debugger.h"
+#include "Profile.h"
 #include "Std.h"
 
 #include "lua.h"
@@ -184,7 +185,9 @@ namespace cluau::runtime::detail {
 		if (!tasks || (IsTask(L) && !lua_isyieldable(L)))
 		{
 			lua_pop(L, 1);
-			return work()(L);
+			JobResult finish = work();
+			SampleBlocking(L); // the profiler's sample, with the calling line
+			return finish(L);
 		}
 		const int id = Start(std::move(work));
 		if (IsTask(L))

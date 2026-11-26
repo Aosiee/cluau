@@ -224,7 +224,10 @@ Hosts may enforce cluau's strict rules (`cluau_check`):
    flows into a value the script uses, unless that line carries an
    exemption comment: `// allow-any: <reason>` (the reason is required).
 3. Function parameters are annotated unless their type comes from
-   context. A function that returns a value annotates its return type.
+   context. A function that returns a value annotates its return type: a
+   declared one, one assigned to a `const` or `let`, and a function
+   expression with no type from context (a callback's comes from the
+   parameter it is passed to).
 4. `self` has only the declared fields.
 5. A `const` local is never assigned again.
 

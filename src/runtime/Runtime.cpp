@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <cctype>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -133,29 +135,43 @@ __cluau_meta = {
 	__tostring = function(class)
 		return "class " .. tostring(rawget(class, "__name"))
 	end,
+	-- `for (k, v in Class)`: the class's own members (its statics and
+	-- methods), without the runtime's bookkeeping. Without this Luau
+	-- would iterate a callable table by calling it, constructing
+	-- instances without end.
+	__iter = function(class)
+		local function step(t, key)
+			local value
+			repeat
+				key, value = next(t, key)
+			until key == nil or not kClassKeys[key]
+			return key, value
+		end
+		return step, class
+	end,
 }
 )LUAU";
 
-		volatile std::sig_atomic_t g_Interrupt = 0;
-		bool g_Interrupted = false; // the last run ended in an interrupt
-		detail::Profiler* g_Profiler = nullptr; // the profiling runtime's (one at a time)
+		// A Ctrl-C waiting for the running script's next safepoint. The
+		// signal is the process's, so this is too: whichever runtime that
+		// catches interrupts reaches a safepoint first stops.
+		std::atomic<int> g_Interrupt{ 0 };
 
-		// Luau's interrupt callback: a sample for the profiler when one is
-		// due; a pending Ctrl-C becomes an error in the running script
-		// (once: the callback is off until the next run).
-		void Interrupt(lua_State* L, int gc)
+		// The message of the error a Ctrl-C raises: a run that ends in it
+		// (however it was caught and raised again) exits with status 130.
+		constexpr const char* kInterrupted = "interrupted";
+
+		void Interrupt(lua_State* L, int gc);
+		void InterruptQuick(lua_State* L, int gc);
+		void StopIfCatching(lua_State* L);
+
+		// The error is the bare message (no position), so the run's end can
+		// tell it, wherever it was raised.
+		[[noreturn]] void RaiseInterrupted(lua_State* L)
 		{
-			if (gc >= 0)
-				return;
-			if (g_Profiler && g_Profiler->Due())
-				g_Profiler->Sample(L);
-			if (!g_Interrupt)
-				return;
-			g_Interrupt = 0;
-			g_Interrupted = true;
-			lua_callbacks(L)->interrupt = nullptr;
 			lua_rawcheckstack(L, 1);
-			luaL_error(L, "interrupted");
+			lua_pushstring(L, kInterrupted);
+			lua_error(L);
 		}
 
 		void OnSigint(int)
@@ -204,6 +220,11 @@ __cluau_meta = {
 
 		enum class LoadStatus { Ok, Incomplete, Error };
 
+		// The runtime running a script on this thread (the innermost, when
+		// one runs another), which Luau's interrupt callback serves.
+		thread_local Runtime::Impl* t_Running = nullptr;
+		thread_local lua_State* t_RunningThread = nullptr; // the thread its innermost Execute resumed
+
 	} // namespace
 
 	struct Runtime::Impl
@@ -214,6 +235,10 @@ __cluau_meta = {
 		fs::path MainDir;  // the main script's directory (bare requires search it first)
 		std::set<std::string> Loading; // modules whose chunk is running (a require cycle)
 		std::map<std::string, std::string> Sources; // each chunk's source, by the name errors give it
+		// A file's chunk name -> the directory its relative requires start
+		// from: the real file's (through any symbolic link), as the
+		// checker's.
+		std::map<std::string, fs::path> ChunkDirs;
 		bool Native = false; // chunks compile to native code (where Luau's code generator supports the machine)
 		// The host's modules (AddModule), by the name `require` gives them.
 		struct HostModule
@@ -229,6 +254,48 @@ __cluau_meta = {
 		std::vector<std::pair<std::string, int>> CoverageChunks;
 		std::unique_ptr<detail::Profiler> Profile;
 		bool Reported = false; // the profile's report is written
+		// The interrupt callback the host had set on the state before a
+		// run: the runtime's own calls it first.
+		void (*HostInterrupt)(lua_State* L, int gc) = nullptr;
+		std::vector<lua_State*> Threads; // the threads Execute is running (innermost last)
+		bool Interrupted = false;        // the last run ended in a Ctrl-C's `interrupted`
+		std::string Script;              // process.script
+		// While a run is in progress, another (a host's callback running a
+		// file) keeps the main directory and the script's name for it.
+		struct NestedRun
+		{
+			Impl& Rt;
+			bool Nested;
+			fs::path MainDir;
+			std::string Script;
+			explicit NestedRun(Impl& rt)
+				: Rt(rt)
+				, Nested(!rt.Threads.empty())
+				, MainDir(rt.MainDir)
+				, Script(rt.Script)
+			{
+			}
+			~NestedRun()
+			{
+				if (!Nested)
+					return;
+				Rt.MainDir = MainDir;
+				Rt.SetScript(Script);
+			}
+		};
+
+		void SetScript(const std::string& script)
+		{
+			Script = script;
+			detail::SetScript(L, script);
+		}
+
+		// A sample for the profiler, when one is due.
+		void Sample(lua_State* T)
+		{
+			if (Profile && Profile->Due())
+				Profile->Sample(T, std::find(Threads.begin(), Threads.end(), T) != Threads.end());
+		}
 
 		void ReportProfile()
 		{
@@ -337,7 +404,8 @@ __cluau_meta = {
 					end = trace.size();
 				const std::string frame = trace.substr(at, end - at);
 				at = end + 1;
-				if (frame.empty())
+				// The runtime's own code (a class's constructor) is not the script's.
+				if (frame.empty() || StartsWith(frame, "prelude:"))
 					continue;
 				out += frame + "\n";
 				const size_t fn = frame.find(" function ");
@@ -381,6 +449,14 @@ __cluau_meta = {
 			// What errors quote: the source as written (the prompt's input
 			// without the `return ` it tries first).
 			Sources[name] = shown ? *shown : source;
+			// Luau's lexer reads a NUL byte as the end of the text: the
+			// code after it would silently not run.
+			if (const size_t nul = source.find('\0'); nul != std::string::npos)
+			{
+				const long line = 1 + std::count(source.begin(), source.begin() + (std::ptrdiff_t)nul, '\n');
+				error = name + ":" + std::to_string(line) + ": the source contains a NUL byte";
+				return LoadStatus::Error;
+			}
 			TranslateOptions options;
 			options.Script = true;
 			options.Repl = repl;
@@ -484,7 +560,7 @@ __cluau_meta = {
 		// with no file: a standard or host module, `-e`, the prompt).
 		std::string FileOf(const std::string& name) const
 		{
-			if (name.empty() || name[0] == '@' || name[0] == '=' || name == "-e" || name == "stdin")
+			if (name.empty() || name[0] == '@' || name[0] == '=' || name == "-e" || name == "stdin" || StartsWith(name, "stdin["))
 				return {};
 			std::error_code ec;
 			const fs::path path = (StartDir / fs::u8path(name)).lexically_normal();
@@ -501,12 +577,36 @@ __cluau_meta = {
 			lua_pushvalue(L, -2);
 			lua_remove(L, -3);
 			lua_xmove(L, T, 1);
-			g_Interrupt = 0;
-			g_Interrupted = false;
+			// A Ctrl-C from before the run is not for it.
+			if (Opts.CatchInterrupt && Threads.empty())
+				g_Interrupt = 0;
+			Interrupted = false;
 			// A debugger keeps the interrupt callback, and a thread it breaks
 			// out of the VM (to step) is resumed where it stopped.
 			if (!Debug)
-				lua_callbacks(L)->interrupt = Interrupt;
+			{
+				lua_Callbacks* callbacks = lua_callbacks(L);
+				if (callbacks->interrupt != Interrupt && callbacks->interrupt != InterruptQuick)
+					HostInterrupt = callbacks->interrupt;
+				// With no profile and no callback of the host's, a run
+				// only looks for a Ctrl-C (at every call and loop: cheaply).
+				callbacks->interrupt = Profile || HostInterrupt ? Interrupt : InterruptQuick;
+			}
+			struct Running
+			{
+				Impl& Rt;
+				Impl* Outer;
+				lua_State* OuterThread;
+				~Running()
+				{
+					Rt.Threads.pop_back();
+					t_Running = Outer;
+					t_RunningThread = OuterThread;
+				}
+			} running{ *this, t_Running, t_RunningThread };
+			Threads.push_back(T);
+			t_Running = this;
+			t_RunningThread = T;
 			int status = lua_resume(T, nullptr, 0);
 			while (Debug && status == LUA_BREAK)
 				status = Debug->ResumeBroken(T);
@@ -539,6 +639,7 @@ __cluau_meta = {
 					lua_pop(L, 1);
 				}
 			}
+			Interrupted = status != LUA_YIELD && message == kInterrupted;
 			if (Debug)
 				Debug->OnUncaught(T, message);
 			std::fflush(stdout);
@@ -565,7 +666,7 @@ __cluau_meta = {
 			lua_State* T = Execute();
 			std::fflush(stdout);
 			if (!T)
-				return g_Interrupted ? 130 : 1;
+				return Interrupted ? 130 : 1;
 			lua_pop(L, 1);
 			return RunTasks();
 		}
@@ -587,7 +688,7 @@ __cluau_meta = {
 			lua_State* T = Execute();
 			std::fflush(stdout);
 			if (!T)
-				return g_Interrupted ? 130 : 1;
+				return Interrupted ? 130 : 1;
 			lua_pop(L, 1);
 			return 0;
 		}
@@ -595,7 +696,64 @@ __cluau_meta = {
 
 	namespace {
 
-		Runtime::Impl* g_ProfiledRuntime = nullptr; // the runtime g_Profiler samples for
+		// Every runtime, by its state's main thread: Luau's interrupt
+		// callback finds its runtime here when a host calls into a state
+		// outside a run (t_Running is the quick way).
+		std::mutex g_RuntimesMutex;
+		std::map<lua_State*, Runtime::Impl*> g_Runtimes;
+		int g_Profiling = 0; // the runtimes profiling (the exit hook reports theirs)
+
+		Runtime::Impl* RuntimeOf(lua_State* L)
+		{
+			// The thread a run resumed is found without a call.
+			if (L == t_RunningThread)
+				return t_Running;
+			lua_State* main = lua_mainthread(L);
+			if (t_Running && t_Running->L == main)
+				return t_Running;
+			std::lock_guard<std::mutex> lock(g_RuntimesMutex);
+			auto it = g_Runtimes.find(main);
+			return it == g_Runtimes.end() ? nullptr : it->second;
+		}
+
+		// Luau's interrupt callback: the host's own first (one it had set),
+		// then a sample for the profiler when one is due; a pending Ctrl-C
+		// becomes an error in the running script.
+		void Interrupt(lua_State* L, int gc)
+		{
+			Runtime::Impl* rt = RuntimeOf(L);
+			if (!rt)
+				return;
+			if (rt->HostInterrupt)
+				rt->HostInterrupt(L, gc);
+			if (gc >= 0)
+				return;
+			rt->Sample(L);
+			if (g_Interrupt.load(std::memory_order_relaxed))
+				StopIfCatching(L);
+		}
+
+		// A Ctrl-C is pending: the running script stops, if its runtime
+		// catches them. Kept out of line, so the callback's usual path (no
+		// Ctrl-C) is a test and a return.
+#ifdef _MSC_VER
+		__declspec(noinline)
+#else
+		__attribute__((noinline))
+#endif
+		void StopIfCatching(lua_State* L)
+		{
+			Runtime::Impl* rt = RuntimeOf(L);
+			if (rt && rt->Opts.CatchInterrupt && g_Interrupt.exchange(0))
+				RaiseInterrupted(L);
+		}
+
+		// The callback when only a Ctrl-C is looked for.
+		void InterruptQuick(lua_State* L, int gc)
+		{
+			if (gc < 0 && g_Interrupt.load(std::memory_order_relaxed))
+				StopIfCatching(L);
+		}
 
 		// Runs the module chunk on top of L's stack and keeps its value (true
 		// for none) under `key`, the module's identity; returns the value.
@@ -722,7 +880,10 @@ __cluau_meta = {
 				if (!ar.source || std::strcmp(ar.source, "=[C]") == 0 || std::strcmp(ar.source, "=require") == 0)
 					continue;
 				if (ar.source[0] == '@')
-					from = (rt.StartDir / fs::u8path(ar.source + 1)).parent_path();
+				{
+					auto dir = rt.ChunkDirs.find(ar.source + 1);
+					from = dir != rt.ChunkDirs.end() ? dir->second : (rt.StartDir / fs::u8path(ar.source + 1)).parent_path();
+				}
 				break;
 			}
 
@@ -757,7 +918,9 @@ __cluau_meta = {
 			if (!ReadFile(found, text))
 				luaL_error(L, "cannot read module '%s'", rt.Display(found).c_str());
 			std::string error;
-			if (rt.Load(L, text, rt.Display(found), false, false, error, detail::IsLuauFile(found)) != LoadStatus::Ok)
+			const std::string chunk = rt.Display(found);
+			rt.ChunkDirs[chunk] = fs::u8path(key).parent_path();
+			if (rt.Load(L, text, chunk, false, false, error, detail::IsLuauFile(found)) != LoadStatus::Ok)
 			{
 				lua_pushlstring(L, error.data(), error.size());
 				lua_error(L);
@@ -831,8 +994,9 @@ end
 				default:
 					if (c < 0x20 || c == 0x7f)
 					{
+						// Three digits always: `\1` before a digit would read as another byte.
 						char buf[8];
-						std::snprintf(buf, sizeof(buf), "\\%d", c);
+						std::snprintf(buf, sizeof(buf), "\\%03d", c);
 						out += buf;
 					}
 					else
@@ -909,7 +1073,22 @@ end
 				lua_pop(L, 1);
 				items.push_back(std::move(item));
 			}
-			std::vector<std::pair<std::string, std::string>> fields;
+			// The other keys: numbers first, in numeric order, then the rest by their text.
+			struct Field
+			{
+				bool Number;
+				double Value;
+				std::string Key, Text;
+				bool operator<(const Field& other) const
+				{
+					if (Number != other.Number)
+						return Number;
+					if (Number && Value != other.Value)
+						return Value < other.Value;
+					return Key != other.Key ? Key < other.Key : Text < other.Text;
+				}
+			};
+			std::vector<Field> fields;
 			lua_pushnil(L);
 			while (lua_next(L, index))
 			{
@@ -938,17 +1117,29 @@ end
 				}
 				std::string value;
 				ReprAt(L, -1, depth + 1, seen, value);
-				fields.emplace_back(std::move(key), std::move(value));
+				const bool number = lua_type(L, -2) == LUA_TNUMBER;
+				fields.push_back({ number, number ? lua_tonumber(L, -2) : 0.0, std::move(key), std::move(value) });
 				lua_pop(L, 1);
 			}
 			seen.pop_back();
 			std::sort(fields.begin(), fields.end());
-			for (auto& [key, value] : fields)
-				items.push_back(key + " = " + value);
+			for (const Field& field : fields)
+				items.push_back(field.Key + " = " + field.Text);
 			out += prefix + "{";
 			for (size_t i = 0; i < items.size(); i++)
 				out += (i ? ", " : "") + items[i];
 			out += "}";
+		}
+
+		// The prompt's line for an expression's values: each one's repr,
+		// tab-separated.
+		int ReprValues(lua_State* L)
+		{
+			std::string out;
+			for (int i = 1, n = lua_gettop(L); i <= n; i++)
+				out += (i > 1 ? "\t" : "") + Repr(L, i);
+			lua_pushlstring(L, out.data(), out.size());
+			return 1;
 		}
 
 		int ReprGlobal(lua_State* L)
@@ -1047,25 +1238,37 @@ end
 				const std::string key = text.substr(start, sep - start);
 				lua_pushlstring(L, key.data(), key.size());
 				lua_rawget(L, -2);
-				if (!lua_istable(L, -1))
+				// A key the table does not have itself: an instance's class's
+				// (an __index table), or a script class's base's (__base). An
+				// __index function would be code to run, and is not called.
+				for (int depth = 0; depth < 8 && !lua_istable(L, -1); depth++)
 				{
-					// An instance's key may be its class's (through __index).
 					lua_pop(L, 1);
-					if (!lua_getmetatable(L, -1))
+					if (lua_getmetatable(L, -1))
 					{
-						lua_settop(L, top);
-						return;
+						lua_rawgetfield(L, -1, "__index");
+						lua_remove(L, -2);
 					}
-					lua_rawgetfield(L, -1, "__index");
-					lua_pushlstring(L, key.data(), key.size());
-					lua_rawget(L, -2);
+					else
+						lua_pushnil(L);
+					if (!lua_istable(L, -1))
+					{
+						lua_pop(L, 1);
+						lua_rawgetfield(L, -1, "__base");
+					}
 					if (!lua_istable(L, -1))
 					{
 						lua_settop(L, top);
 						return;
 					}
 					lua_remove(L, -2);
-					lua_remove(L, -2);
+					lua_pushlstring(L, key.data(), key.size());
+					lua_rawget(L, -2);
+				}
+				if (!lua_istable(L, -1))
+				{
+					lua_settop(L, top);
+					return;
 				}
 				lua_remove(L, -2);
 				methodsOnly = text[sep] == ':';
@@ -1115,16 +1318,20 @@ end
 
 	} // namespace
 
-	bool detail::InterruptPending() { return g_Interrupt != 0; }
+	bool detail::InterruptPending() { return g_Interrupt.load() != 0; }
 
 	void detail::RaiseIfInterrupted(lua_State* L)
 	{
-		if (!g_Interrupt)
+		if (!g_Interrupt.exchange(0))
 			return;
-		g_Interrupt = 0;
-		g_Interrupted = true;
 		std::cin.clear();
-		luaL_error(L, "interrupted");
+		RaiseInterrupted(L);
+	}
+
+	void detail::SampleBlocking(lua_State* L)
+	{
+		if (Runtime::Impl* rt = RuntimeOf(L))
+			rt->Sample(L);
 	}
 
 	std::string Repr(lua_State* L, int index)
@@ -1151,6 +1358,10 @@ end
 
 		lua_pushlightuserdata(L, &rt);
 		lua_setfield(L, LUA_REGISTRYINDEX, kRuntimeRegistry);
+		{
+			std::lock_guard<std::mutex> lock(g_RuntimesMutex);
+			g_Runtimes[L] = &rt;
+		}
 		lua_newtable(L);
 		lua_setfield(L, LUA_REGISTRYINDEX, kModulesRegistry);
 
@@ -1174,25 +1385,27 @@ end
 		if (rt.Opts.Profile)
 		{
 			rt.Profile = std::make_unique<detail::Profiler>();
-			g_Profiler = rt.Profile.get();
-			// process.exit ends the process: the report goes first.
-			detail::SetExitHook([](int) {
-				if (g_ProfiledRuntime)
-					g_ProfiledRuntime->ReportProfile();
-			});
-			g_ProfiledRuntime = &rt;
+			// process.exit ends the process: the report of the runtime
+			// that calls it goes first.
+			std::lock_guard<std::mutex> lock(g_RuntimesMutex);
+			if (g_Profiling++ == 0)
+				detail::SetExitHook([](int) {
+					if (t_Running)
+						t_Running->ReportProfile();
+				});
 		}
 	}
 
 	Runtime::~Runtime()
 	{
-		if (m_Impl->Profile)
 		{
-			m_Impl->ReportProfile();
-			g_Profiler = nullptr;
-			g_ProfiledRuntime = nullptr;
-			detail::SetExitHook(nullptr);
+			std::lock_guard<std::mutex> lock(g_RuntimesMutex);
+			g_Runtimes.erase(m_Impl->L);
+			if (m_Impl->Profile && --g_Profiling == 0)
+				detail::SetExitHook(nullptr);
 		}
+		if (m_Impl->Profile)
+			m_Impl->ReportProfile();
 		if (m_Impl->L)
 			lua_close(m_Impl->L);
 	}
@@ -1260,8 +1473,13 @@ end
 			std::fprintf(stderr, "cluau: cannot open '%s'\n", path.c_str());
 			return 2;
 		}
-		rt.MainDir = (rt.StartDir / file).lexically_normal().parent_path();
-		detail::SetScript(rt.L, path);
+		Impl::NestedRun nested(rt);
+		// The real file's directory (a script linked into a bin directory
+		// finds the modules beside it, as the checker does).
+		const fs::path real = fs::weakly_canonical(rt.StartDir / file, ec);
+		rt.MainDir = (ec ? (rt.StartDir / file).lexically_normal() : real).parent_path();
+		rt.ChunkDirs[path] = rt.MainDir;
+		rt.SetScript(path);
 		return rt.RunChunk(text, path, detail::IsLuauFile(file));
 	}
 
@@ -1298,8 +1516,12 @@ end
 	int Runtime::RunSource(const std::string& source, const std::string& name)
 	{
 		Impl& rt = *m_Impl;
+		Impl::NestedRun nested(rt);
 		rt.MainDir = rt.StartDir;
-		detail::SetScript(rt.L, name);
+		rt.SetScript(name);
+		// A byte order mark is not code (as in a file).
+		if (source.rfind("\xEF\xBB\xBF", 0) == 0)
+			return rt.RunChunk(source.substr(3), name);
 		return rt.RunChunk(source, name);
 	}
 
@@ -1309,7 +1531,7 @@ end
 		lua_State* L = rt.L;
 		const bool interactive = CLUAU_ISATTY(0) && CLUAU_ISATTY(1);
 		rt.MainDir = rt.StartDir;
-		detail::SetScript(L, "");
+		rt.SetScript("");
 #ifdef CLUAU_HAS_ISOCLINE
 		if (interactive)
 		{
@@ -1317,14 +1539,15 @@ end
 			ic_enable_brace_insertion(false);
 			ic_set_default_highlighter(TrackEdits, nullptr);
 			ic_set_default_completer(Complete, L);
-			if (const char* home = std::getenv(
 #ifdef _WIN32
-					"USERPROFILE"
+			// The variable and the history file's name in the ANSI code page,
+			// as isocline opens it.
+			if (const char* home = std::getenv("USERPROFILE"))
+				ic_set_history((std::string(home) + "\\.cluau_history").c_str(), -1);
 #else
-					"HOME"
-#endif
-					))
+			if (const char* home = std::getenv("HOME"))
 				ic_set_history(ToUtf8(fs::u8path(home) / ".cluau_history").c_str(), -1);
+#endif
 		}
 #endif
 		if (interactive)
@@ -1332,6 +1555,10 @@ end
 
 		std::string buffer;
 		std::string line;
+		// Each input is a chunk of its own, `stdin[n]`: a function defined
+		// in an earlier one quotes its own lines in a backtrace.
+		int inputs = 0;
+		std::string name;
 		for (;;)
 		{
 			const Read read = ReadLine(interactive, buffer.empty() ? "> " : ">> ", line);
@@ -1346,14 +1573,16 @@ end
 			if (buffer.empty() && line.find_first_not_of(" \t") == std::string::npos)
 				continue;
 			const bool force = !buffer.empty() && line.empty(); // an empty line ends an input
+			if (buffer.empty())
+				name = "stdin[" + std::to_string(++inputs) + "]";
 			buffer += buffer.empty() ? line : "\n" + line;
 
 			std::string error;
 			// An expression prints its value; anything else runs as statements.
-			bool expression = rt.Load(L, "return " + buffer, "stdin", true, true, error, false, &buffer) == LoadStatus::Ok;
+			bool expression = rt.Load(L, "return " + buffer, name, true, true, error, false, &buffer) == LoadStatus::Ok;
 			if (!expression)
 			{
-				const LoadStatus status = rt.Load(L, buffer, "stdin", true, false, error);
+				const LoadStatus status = rt.Load(L, buffer, name, true, false, error);
 				if (status == LoadStatus::Incomplete && !force)
 					continue;
 				if (status != LoadStatus::Ok)
@@ -1373,10 +1602,17 @@ end
 				any = any || !lua_isnil(T, i);
 			if (expression && any)
 			{
-				std::string out;
+				// The values' text, in a protected call: a __tostring
+				// can fail (or yield), which is reported as any error is.
+				lua_checkstack(L, n + 2);
+				lua_pushcfunction(L, ReprValues, "repr");
 				for (int i = 1; i <= n; i++)
-					out += (i > 1 ? "\t" : "") + Repr(T, i);
-				std::printf("%s\n", out.c_str());
+					lua_xpush(T, L, i);
+				if (lua_pcall(L, n, 1, 0) == LUA_OK)
+					std::printf("%s\n", lua_tostring(L, -1));
+				else
+					std::fprintf(stderr, "%s\n", lua_isstring(L, -1) ? lua_tostring(L, -1) : "(the value's __tostring failed)");
+				lua_pop(L, 1);
 				lua_pushvalue(T, 1);
 				lua_setglobal(T, "_");
 			}
@@ -1387,7 +1623,7 @@ end
 		{
 			// The input ended inside a statement.
 			std::string error;
-			if (rt.Load(L, buffer, "stdin", true, false, error) != LoadStatus::Ok)
+			if (rt.Load(L, buffer, name, true, false, error) != LoadStatus::Ok)
 			{
 				std::fprintf(stderr, "%s\n", error.c_str());
 				return 1;

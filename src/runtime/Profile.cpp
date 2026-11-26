@@ -7,17 +7,36 @@
 #include <cstring>
 #include <set>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <mmsystem.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "winmm.lib")
+#endif
+#endif
+
 namespace cluau::runtime::detail {
 
 	Profiler::Profiler()
 		: m_Start(std::chrono::steady_clock::now())
+		, m_Last(m_Start)
 	{
 		m_Timer = std::thread([this] {
+#ifdef _WIN32
+			// Windows sleeps a timer period (15.6 ms unless asked for less).
+			timeBeginPeriod(1);
+#endif
 			while (m_Running.load(std::memory_order_relaxed))
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				m_Ticks.fetch_add(1, std::memory_order_relaxed);
+				m_Due.store(true, std::memory_order_relaxed);
 			}
+#ifdef _WIN32
+			timeEndPeriod(1);
+#endif
 		});
 	}
 
@@ -31,10 +50,15 @@ namespace cluau::runtime::detail {
 		m_Seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_Start).count();
 	}
 
-	void Profiler::Sample(lua_State* L)
+	void Profiler::Sample(lua_State* L, bool chunk)
 	{
-		const int ticks = m_Ticks.exchange(0, std::memory_order_relaxed);
-		if (ticks <= 0)
+		if (!m_Due.exchange(false, std::memory_order_relaxed) || !m_Running.load(std::memory_order_relaxed))
+			return;
+		// The sample stands for the time since the last one.
+		const auto now = std::chrono::steady_clock::now();
+		const long long weight = std::chrono::duration_cast<std::chrono::microseconds>(now - m_Last).count();
+		m_Last = now;
+		if (weight <= 0)
 			return;
 		struct Frame
 		{
@@ -74,12 +98,13 @@ namespace cluau::runtime::detail {
 			const Raw& f = raw[i];
 			std::string name = !f.Name.empty() ? f.Name : f.C ? "(C function)" : "(anonymous)";
 			std::string where = f.C ? "[C]" : f.Chunk + ":" + std::to_string(f.Defined);
-			// A file's top level: the outermost Lua frame with no name, or
-			// a module's, which `require` runs.
+			// A file's top level: a module's, which `require` runs, or the
+			// outermost Lua frame of a thread that runs a chunk (a
+			// coroutine's or a task's outermost frame is its function).
 			if (!f.C && f.Name.empty())
 			{
 				const bool required = i + 1 < raw.size() && raw[i + 1].C && raw[i + 1].Name == "require";
-				bool outermost = true;
+				bool outermost = chunk;
 				for (size_t outer = i + 1; outer < raw.size(); outer++)
 					outermost = outermost && raw[outer].C;
 				if (required || outermost)
@@ -100,16 +125,16 @@ namespace cluau::runtime::detail {
 		if (frames.empty())
 			return;
 
-		m_Samples += ticks;
-		m_Functions[frames.front().Function].Self += ticks;
+		m_Sampled += weight;
+		m_Functions[frames.front().Function].Self += weight;
 		std::set<size_t> seen;
 		for (const Frame& f : frames)
 			if (seen.insert(f.Function).second)
-				m_Functions[f.Function].Total += ticks;
+				m_Functions[f.Function].Total += weight;
 		for (const Frame& f : frames)
 			if (!f.Line.empty())
 			{
-				m_Lines[f.Line] += ticks;
+				m_Lines[f.Line] += weight;
 				break;
 			}
 		std::string stack;
@@ -118,17 +143,17 @@ namespace cluau::runtime::detail {
 			const Function& fn = m_Functions[it->Function];
 			stack += (stack.empty() ? "" : ";") + fn.Name + " (" + fn.Where + ")";
 		}
-		m_Stacks[stack] += ticks;
+		m_Stacks[stack] += weight;
 	}
 
 	std::string Profiler::Report(size_t top) const
 	{
 		char buffer[512];
 		std::string out;
-		const double total = (double)std::max(1L, m_Samples);
-		std::snprintf(buffer, sizeof(buffer), "profile: %.3f s, %ld ms sampled\n", m_Seconds, m_Samples);
+		const double total = (double)std::max(1LL, m_Sampled);
+		std::snprintf(buffer, sizeof(buffer), "profile: %.3f s, %lld ms sampled\n", m_Seconds, m_Sampled / 1000);
 		out += buffer;
-		if (m_Samples == 0)
+		if (m_Sampled == 0)
 			return out + "  (the script ran too briefly to sample)\n";
 
 		std::vector<const Function*> functions;
@@ -148,7 +173,7 @@ namespace cluau::runtime::detail {
 			out += buffer;
 		}
 
-		std::vector<std::pair<std::string, long>> lines(m_Lines.begin(), m_Lines.end());
+		std::vector<std::pair<std::string, long long>> lines(m_Lines.begin(), m_Lines.end());
 		std::sort(lines.begin(), lines.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 		out += "\n   self  line\n";
 		for (size_t i = 0; i < lines.size() && i < std::max<size_t>(1, top / 2); i++)

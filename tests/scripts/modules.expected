@@ -3,4 +3,6 @@ hello, cluau	true	1
 42
 false	true
 true	the sibling
+the module ran
+true	true
 exit: 0

@@ -866,7 +866,12 @@ namespace cluau::runtime::detail {
 
 		int ProcessExit(lua_State* L)
 		{
-			const int code = (int)luaL_optinteger(L, 1, 0);
+			// A whole number 0..255 (what every platform keeps of a status):
+			// anything else would end up as 0, a success, or another number.
+			const double status = luaL_optnumber(L, 1, 0);
+			if (!(status >= 0 && status <= 255 && status == std::floor(status)))
+				luaL_argerror(L, 1, "an exit status is a whole number from 0 to 255");
+			const int code = (int)status;
 			std::fflush(stdout);
 			std::fflush(stderr);
 			if (g_ExitHook)
@@ -2253,6 +2258,14 @@ namespace cluau::runtime::detail {
 
 		lua_newtable(L);
 		SetFunctions(L, kPath);
+		if (sandbox)
+		{
+			// Both read the working directory, which the sandbox keeps from scripts.
+			lua_pushnil(L);
+			lua_setfield(L, -2, "absolute");
+			lua_pushnil(L);
+			lua_setfield(L, -2, "relative");
+		}
 		lua_setfield(L, -2, "path");
 
 		lua_newtable(L);
