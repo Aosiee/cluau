@@ -11,6 +11,7 @@
 
 #include <miniz.h>
 
+#include <algorithm>
 #include <ctime>
 #include <cmath>
 #include <cstring>
@@ -20,6 +21,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -52,10 +55,11 @@ namespace cluau::runtime::detail {
 			lua_getfield(L, index, "level");
 			const double given = lua_isnil(L, -1) ? 6 : (lua_type(L, -1) == LUA_TNUMBER ? lua_tonumber(L, -1) : -1);
 			lua_pop(L, 1);
-			const int level = given == std::floor(given) ? (int)given : -1;
-			if (level < 0 || level > 9)
+			// The range checked before converting (a number out of int's
+			// range does not convert).
+			if (!(given >= 0 && given <= 9) || given != std::floor(given))
 				luaL_error(L, "%s: options.level is from 0 (stored) to 9 (smallest)", fn);
-			return level;
+			return (int)given;
 		}
 
 		bool RawOption(lua_State* L, int index)
@@ -75,15 +79,10 @@ namespace cluau::runtime::detail {
 			mz_uint flags = tdefl_create_comp_flags_from_zip_params(level, zlib ? MZ_DEFAULT_WINDOW_BITS : -MZ_DEFAULT_WINDOW_BITS, MZ_DEFAULT_STRATEGY);
 			size_t size = 0;
 			void* compressed = tdefl_compress_mem_to_heap(data.data(), data.size(), &size, (int)flags);
-			if (!compressed && !data.empty())
+			if (!compressed)
 				return false;
 			out.assign(static_cast<const char*>(compressed), size);
 			mz_free(compressed);
-			if (data.empty() && out.empty())
-			{
-				// miniz gives nothing for nothing: the empty stream, by hand.
-				out = zlib ? std::string("\x78\x9c\x03\x00\x00\x00\x00\x01", 8) : std::string("\x03\x00", 2);
-			}
 			return true;
 		}
 
@@ -188,6 +187,10 @@ namespace cluau::runtime::detail {
 				if (data.size() - at < 18 || (unsigned char)data[at] != 0x1f || (unsigned char)data[at + 1] != 0x8b || data[at + 2] != 8)
 					luaL_error(L, "compress.gunzip: the data is not gzip");
 				const unsigned char flags = (unsigned char)data[at + 3];
+				// The reserved flags must be clear (RFC 1952: an encrypted
+				// file's, among others).
+				if (flags & 0xE0)
+					luaL_error(L, "compress.gunzip: the gzip header has flags this reader does not know");
 				size_t p = at + 10;
 				auto skipZero = [&] {
 					while (p < data.size() && data[p] != 0)
@@ -204,8 +207,15 @@ namespace cluau::runtime::detail {
 					skipZero();
 				if (flags & 16) // FCOMMENT
 					skipZero();
-				if (flags & 2) // FHCRC
+				if (flags & 2) // FHCRC: the low half of the header's CRC-32
+				{
+					if (p + 2 > data.size())
+						luaL_error(L, "compress.gunzip: the gzip header is cut short");
+					const mz_uint32 crc = (mz_uint32)mz_crc32(MZ_CRC32_INIT, reinterpret_cast<const unsigned char*>(data.data()) + at, p - at);
+					if ((crc & 0xFFFF) != ((unsigned char)data[p] | ((unsigned)(unsigned char)data[p + 1] << 8)))
+						luaL_error(L, "compress.gunzip: the gzip header's checksum does not match: the data is damaged");
 					p += 2;
+				}
 				if (p >= data.size())
 					luaL_error(L, "compress.gunzip: the gzip header is cut short");
 				std::string member;
@@ -232,15 +242,29 @@ namespace cluau::runtime::detail {
 
 		// ---- @std/zip: reading -------------------------------------------
 
+		// A path argument (a NUL byte in it would cut it short).
+		std::string PathArg(lua_State* L, int index, const char* fn)
+		{
+			size_t len = 0;
+			const char* s = luaL_checklstring(L, index, &len);
+			std::string path(s, len);
+			if (path.find('\0') != std::string::npos)
+				luaL_error(L, "%s: the path holds a NUL byte", fn);
+			return path;
+		}
+
 		bool ReadFile(const std::string& path, std::string& out)
 		{
+			std::error_code ec;
+			if (fs::is_directory(fs::u8path(path), ec))
+				return false;
 			std::ifstream in(fs::u8path(path), std::ios::binary);
 			if (!in)
 				return false;
 			std::stringstream buffer;
 			buffer << in.rdbuf();
 			out = buffer.str();
-			return true;
+			return !in.bad();
 		}
 
 		bool WriteFile(const fs::path& path, std::string_view data)
@@ -250,11 +274,23 @@ namespace cluau::runtime::detail {
 			return (bool)out;
 		}
 
+		// Deflate expands at most about 1032 to 1: an archive's entries may
+		// claim this much from each byte, with a little over for small ones.
+		constexpr double kMostExpansion = 1040;
+		constexpr double kExpansionSlack = 65536;
+
 		struct Archive
 		{
-			std::string Data; // the whole archive (miniz reads from it)
+			// The whole archive, which miniz reads from: in the archive's own
+			// userdata (so the collector counts it), or in Owned when it is
+			// too large for one.
+			const char* Bytes = nullptr;
+			size_t Size = 0;
+			std::string Owned;
 			mz_zip_archive Zip;
 			bool Open = false;
+			std::vector<std::string> Names;                     // each entry's whole name
+			std::unordered_map<std::string_view, mz_uint> Find; // a name's entry (the last of that name)
 			~Archive()
 			{
 				if (Open)
@@ -262,10 +298,15 @@ namespace cluau::runtime::detail {
 			}
 		};
 
+		// The archive's userdata: the box, then (most often) the bytes.
 		struct ArchiveBox
 		{
 			Archive* Of = nullptr;
 		};
+
+		// The largest archive kept in its userdata (Luau's limit is just
+		// under 2 GB).
+		constexpr size_t kMostInline = (size_t)1 << 30;
 
 		Archive& CheckArchive(lua_State* L, const char* fn)
 		{
@@ -275,18 +316,87 @@ namespace cluau::runtime::detail {
 			return *box->Of;
 		}
 
-		int PushArchive(lua_State* L, std::string data, const char* fn, const std::string& what)
+		// miniz reads the archive through this (its own reader of memory
+		// forms pointers past the end of a damaged archive's bytes).
+		size_t ReadArchive(void* opaque, mz_uint64 offset, void* to, size_t n)
 		{
-			auto archive = std::make_unique<Archive>();
-			archive->Data = std::move(data);
-			std::memset(&archive->Zip, 0, sizeof(archive->Zip));
-			if (!mz_zip_reader_init_mem(&archive->Zip, archive->Data.data(), archive->Data.size(), 0))
-				luaL_error(L, "%s: %s is not a zip archive (%s)", fn, what.c_str(), mz_zip_get_error_string(mz_zip_get_last_error(&archive->Zip)));
-			archive->Open = true;
-			ArchiveBox* box = static_cast<ArchiveBox*>(lua_newuserdatadtor(L, sizeof(ArchiveBox), [](lua_State*, void* p) {
+			const Archive* a = static_cast<const Archive*>(opaque);
+			if (offset >= a->Size)
+				return 0;
+			const size_t count = (size_t)std::min<mz_uint64>(n, a->Size - offset);
+			std::memcpy(to, a->Bytes + offset, count);
+			return count;
+		}
+
+		mz_uint32 GetLE16(const char* p) { return (mz_uint32)(unsigned char)p[0] | ((mz_uint32)(unsigned char)p[1] << 8); }
+
+		// Pushes a new, empty archive userdata, with room for `size` bytes
+		// of the archive in it when they fit; the bytes go to `Bytes`.
+		Archive& NewArchive(lua_State* L, size_t size)
+		{
+			const bool inline_ = size <= kMostInline;
+			ArchiveBox* box = static_cast<ArchiveBox*>(lua_newuserdatadtor(L, sizeof(ArchiveBox) + (inline_ ? size : 0), [](lua_State*, void* p) {
 				delete static_cast<ArchiveBox*>(p)->Of;
 			}));
-			box->Of = archive.release();
+			box->Of = new Archive();
+			std::memset(&box->Of->Zip, 0, sizeof(box->Of->Zip));
+			box->Of->Size = size;
+			if (inline_)
+				box->Of->Bytes = reinterpret_cast<const char*>(box + 1);
+			else
+			{
+				box->Of->Owned.resize(size);
+				box->Of->Bytes = box->Of->Owned.data();
+			}
+			return *box->Of;
+		}
+
+		// Opens the archive at the top of the stack (its bytes in place) and
+		// checks how its entries lie. miniz trusts the central directory: an
+		// entry there whose local header names another file, or several that
+		// share one file's data, could make a small archive give out far
+		// more than it holds, so either is refused; and what the entries
+		// claim to hold together must fit the archive's size.
+		int OpenArchive(lua_State* L, Archive& a, const char* fn, const std::string& what)
+		{
+			a.Zip.m_pRead = ReadArchive;
+			a.Zip.m_pIO_opaque = &a;
+			if (!mz_zip_reader_init(&a.Zip, a.Size, MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY))
+				luaL_error(L, "%s: %s is not a zip archive (%s)", fn, what.c_str(), mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
+			a.Open = true;
+			const mz_uint n = mz_zip_reader_get_num_files(&a.Zip);
+			a.Names.resize(n);
+			std::vector<std::pair<mz_uint64, mz_uint64>> spans; // [local header, end of data)
+			spans.reserve(n);
+			double claimed = 0;
+			for (mz_uint i = 0; i < n; i++)
+			{
+				mz_zip_archive_file_stat stat;
+				if (!mz_zip_reader_file_stat(&a.Zip, i, &stat))
+					luaL_error(L, "%s: %s is damaged: entry %d cannot be read (%s)", fn, what.c_str(), (int)i + 1,
+						mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
+				std::string& name = a.Names[i];
+				name.resize(mz_zip_reader_get_filename(&a.Zip, i, nullptr, 0) - 1);
+				mz_zip_reader_get_filename(&a.Zip, i, name.data(), (mz_uint)name.size() + 1);
+				const mz_uint64 header = stat.m_local_header_ofs;
+				if (header > a.Size || a.Size - header < 30 || std::memcmp(a.Bytes + header, "PK\x03\x04", 4) != 0)
+					luaL_error(L, "%s: %s is damaged: '%s' has no local header", fn, what.c_str(), name.c_str());
+				const mz_uint32 nameLength = GetLE16(a.Bytes + header + 26), extraLength = GetLE16(a.Bytes + header + 28);
+				const mz_uint64 data = header + 30 + nameLength + extraLength;
+				if (data > a.Size || stat.m_comp_size > a.Size - data)
+					luaL_error(L, "%s: %s is damaged: '%s' ends past the archive's end", fn, what.c_str(), name.c_str());
+				if (nameLength != name.size() || std::memcmp(a.Bytes + header + 30, name.data(), name.size()) != 0)
+					luaL_error(L, "%s: %s is damaged: '%s' is another name in its local header", fn, what.c_str(), name.c_str());
+				spans.emplace_back(header, data + stat.m_comp_size);
+				claimed += (double)stat.m_uncomp_size;
+				a.Find[std::string_view(name)] = i;
+			}
+			std::sort(spans.begin(), spans.end());
+			for (size_t i = 1; i < spans.size(); i++)
+				if (spans[i].first < spans[i - 1].second)
+					luaL_error(L, "%s: %s is damaged: its entries overlap", fn, what.c_str());
+			if (claimed > (double)a.Size * kMostExpansion + kExpansionSlack)
+				luaL_error(L, "%s: %s is damaged: its entries claim %.0f bytes from %.0f", fn, what.c_str(), claimed, (double)a.Size);
 			luaL_getmetatable(L, kArchiveMeta);
 			lua_setmetatable(L, -2);
 			return 1;
@@ -294,17 +404,34 @@ namespace cluau::runtime::detail {
 
 		int ZipOpen(lua_State* L)
 		{
-			const std::string path = luaL_checkstring(L, 1);
+			const std::string path = PathArg(L, 1, "zip.open");
+			const fs::path file = fs::u8path(path);
+			std::error_code ec;
+			const bool regular = fs::is_regular_file(file, ec);
+			const uintmax_t size = regular ? fs::file_size(file, ec) : 0;
+			if (regular && !ec)
+			{
+				// Read straight into the archive's userdata.
+				std::ifstream in(file, std::ios::binary);
+				Archive& a = NewArchive(L, (size_t)size);
+				if (!in || !in.read(const_cast<char*>(a.Bytes), (std::streamsize)a.Size) || in.gcount() != (std::streamsize)a.Size)
+					luaL_error(L, "zip.open: cannot read '%s'", path.c_str());
+				return OpenArchive(L, a, "zip.open", "'" + path + "'");
+			}
 			std::string data;
 			if (!ReadFile(path, data))
 				luaL_error(L, "zip.open: cannot read '%s'", path.c_str());
-			return PushArchive(L, std::move(data), "zip.open", "'" + path + "'");
+			Archive& a = NewArchive(L, data.size());
+			std::memcpy(const_cast<char*>(a.Bytes), data.data(), data.size());
+			return OpenArchive(L, a, "zip.open", "'" + path + "'");
 		}
 
 		int ZipFromString(lua_State* L)
 		{
 			const std::string_view data = Bytes(L, 1);
-			return PushArchive(L, std::string(data), "zip.fromString", "the data");
+			Archive& a = NewArchive(L, data.size());
+			std::memcpy(const_cast<char*>(a.Bytes), data.data(), data.size());
+			return OpenArchive(L, a, "zip.fromString", "the data");
 		}
 
 		int ArchiveEntries(lua_State* L)
@@ -318,7 +445,7 @@ namespace cluau::runtime::detail {
 				if (!mz_zip_reader_file_stat(&a.Zip, i, &stat))
 					continue;
 				lua_createtable(L, 0, 5);
-				lua_pushstring(L, stat.m_filename);
+				lua_pushlstring(L, a.Names[i].data(), a.Names[i].size());
 				lua_setfield(L, -2, "name");
 				lua_pushnumber(L, (double)stat.m_uncomp_size);
 				lua_setfield(L, -2, "size");
@@ -336,28 +463,29 @@ namespace cluau::runtime::detail {
 		// An entry's sizes must fit together before it is read: what it claims
 		// to hold is allocated whole, and deflate expands at most about 1032
 		// to 1 (a stored entry, not at all).
-		// The compressed size cannot be more than the archive holds.
-		void CheckSizes(lua_State* L, const Archive& a, const mz_zip_archive_file_stat& stat, const char* fn)
+		void CheckSizes(lua_State* L, const std::string& name, const mz_zip_archive_file_stat& stat, const char* fn)
 		{
 			const bool stored = stat.m_method == 0;
-			const bool fits = stat.m_comp_size <= a.Data.size() &&
-				(stored ? stat.m_uncomp_size == stat.m_comp_size : stat.m_uncomp_size <= stat.m_comp_size * 1040 + 65536);
+			const double most = (double)stat.m_comp_size * kMostExpansion + kExpansionSlack;
+			const bool fits = stored ? stat.m_uncomp_size == stat.m_comp_size : (double)stat.m_uncomp_size <= most;
 			if (!fits)
-				luaL_error(L, "%s: '%s' claims %.0f bytes from %.0f: the archive is damaged", fn, stat.m_filename, (double)stat.m_uncomp_size,
+				luaL_error(L, "%s: '%s' claims %.0f bytes from %.0f: the archive is damaged", fn, name.c_str(), (double)stat.m_uncomp_size,
 					(double)stat.m_comp_size);
 		}
 
 		int ArchiveRead(lua_State* L)
 		{
 			Archive& a = CheckArchive(L, "archive:read");
-			const char* name = luaL_checkstring(L, 2);
-			const int index = mz_zip_reader_locate_file(&a.Zip, name, nullptr, MZ_ZIP_FLAG_CASE_SENSITIVE);
-			if (index < 0)
+			size_t length = 0;
+			const char* name = luaL_checklstring(L, 2, &length);
+			const auto found = a.Find.find(std::string_view(name, length));
+			if (found == a.Find.end())
 				luaL_error(L, "archive:read: no '%s' in the archive", name);
+			const mz_uint index = found->second;
 			mz_zip_archive_file_stat stat;
 			if (!mz_zip_reader_file_stat(&a.Zip, (mz_uint)index, &stat))
 				luaL_error(L, "archive:read: cannot read '%s': %s", name, mz_zip_get_error_string(mz_zip_get_last_error(&a.Zip)));
-			CheckSizes(L, a, stat, "archive:read");
+			CheckSizes(L, a.Names[index], stat, "archive:read");
 			size_t size = 0;
 			// Freed however this ends (pushing it can raise, out of memory).
 			std::unique_ptr<void, void (*)(void*)> data(mz_zip_reader_extract_to_heap(&a.Zip, (mz_uint)index, &size, 0), mz_free);
@@ -367,13 +495,27 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// Whether an entry's name stays in the directory it is extracted to:
+		// not absolute (nor a drive's), not through "..", no backslash (a
+		// separator on Windows) and no NUL byte.
+		bool StaysInside(const std::string& name)
+		{
+			if (name.empty() || name.find('\\') != std::string::npos || name.find('\0') != std::string::npos)
+				return false;
+			if (name.size() >= 2 && name[1] == ':')
+				return false;
+			const fs::path relative = fs::u8path(name).lexically_normal();
+			return !(relative.is_absolute() || relative.has_root_name() || relative.has_root_directory() ||
+				(!relative.empty() && *relative.begin() == ".."));
+		}
+
 		// archive:extract(dir): every entry under dir (made when missing);
 		// an entry whose name would leave dir (absolute, or through "..") is
 		// refused. Returns the number of files written.
 		int ArchiveExtract(lua_State* L)
 		{
 			Archive& a = CheckArchive(L, "archive:extract");
-			const fs::path root = fs::u8path(luaL_checkstring(L, 2));
+			const fs::path root = fs::u8path(PathArg(L, 2, "archive:extract"));
 			std::error_code ec;
 			fs::create_directories(root, ec);
 			const mz_uint n = mz_zip_reader_get_num_files(&a.Zip);
@@ -383,11 +525,9 @@ namespace cluau::runtime::detail {
 				mz_zip_archive_file_stat stat;
 				if (!mz_zip_reader_file_stat(&a.Zip, i, &stat))
 					continue;
-				const std::string name = stat.m_filename;
+				const std::string& name = a.Names[i];
 				const fs::path relative = fs::u8path(name).lexically_normal();
-				const bool escapes = relative.is_absolute() || relative.has_root_name() || relative.has_root_directory() ||
-									 (!relative.empty() && *relative.begin() == "..") || name.find('\\') != std::string::npos;
-				if (escapes)
+				if (!StaysInside(name))
 					luaL_error(L, "archive:extract: '%s' would be written outside the directory: nothing more extracted", name.c_str());
 				const fs::path target = root / relative;
 				if (stat.m_is_directory)
@@ -396,7 +536,7 @@ namespace cluau::runtime::detail {
 					continue;
 				}
 				fs::create_directories(target.parent_path(), ec);
-				CheckSizes(L, a, stat, "archive:extract");
+				CheckSizes(L, name, stat, "archive:extract");
 				size_t size = 0;
 				std::unique_ptr<void, void (*)(void*)> data(mz_zip_reader_extract_to_heap(&a.Zip, i, &size, 0), mz_free);
 				if (!data)
@@ -426,6 +566,7 @@ namespace cluau::runtime::detail {
 			mz_zip_archive Zip;
 			std::string Path; // "" for an archive given back as a string
 			bool Open = false;
+			std::unordered_set<std::string> Names; // the entries' so far
 			~Writer()
 			{
 				if (Open)
@@ -451,7 +592,7 @@ namespace cluau::runtime::detail {
 		int ZipCreate(lua_State* L)
 		{
 			auto writer = std::make_unique<Writer>();
-			writer->Path = luaL_optstring(L, 1, "");
+			writer->Path = lua_isnoneornil(L, 1) ? std::string() : PathArg(L, 1, "zip.create");
 			std::memset(&writer->Zip, 0, sizeof(writer->Zip));
 			if (!mz_zip_writer_init_heap(&writer->Zip, 0, 0))
 				luaL_error(L, "zip.create: cannot start the archive");
@@ -465,19 +606,37 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
-		void Add(lua_State* L, Writer& w, const char* name, std::string_view data, int level, const char* fn)
+		// An entry's name, from the argument at `index`.
+		std::string NameArg(lua_State* L, int index)
 		{
-			if (!*name)
+			size_t len = 0;
+			const char* s = luaL_checklstring(L, index, &len);
+			return std::string(s, len);
+		}
+
+		// Adds an entry. Its name must be one extract writes inside its
+		// directory, and only one entry has it.
+		void Add(lua_State* L, Writer& w, const std::string& name, std::string_view data, int level, const char* fn)
+		{
+			if (name.empty())
 				luaL_error(L, "%s: an entry has a name", fn);
+			if (!StaysInside(name))
+				luaL_error(L, "%s: '%s' is not a name for an entry (absolute, through '..', or with '\\' or a NUL byte)", fn, name.c_str());
+			// Names that extract would write to one file are one name.
+			const auto normal = fs::u8path(name).lexically_normal().generic_u8string();
+			const std::string key(normal.begin(), normal.end());
+			if (w.Names.count(key))
+				luaL_error(L, "%s: the archive has an entry '%s' already", fn, name.c_str());
 			MZ_TIME_T now = std::time(nullptr);
-			if (!mz_zip_writer_add_mem_ex_v2(&w.Zip, name, data.data(), data.size(), nullptr, 0, (mz_uint)level, 0, 0, &now, nullptr, 0, nullptr, 0))
-				luaL_error(L, "%s: cannot add '%s': %s", fn, name, mz_zip_get_error_string(mz_zip_get_last_error(&w.Zip)));
+			if (!mz_zip_writer_add_mem_ex_v2(&w.Zip, name.c_str(), data.data(), data.size(), nullptr, 0, (mz_uint)level, 0, 0, &now, nullptr, 0, nullptr, 0))
+				luaL_error(L, "%s: cannot add '%s': %s", fn, name.c_str(), mz_zip_get_error_string(mz_zip_get_last_error(&w.Zip)));
+			w.Names.insert(key);
 		}
 
 		int WriterAdd(lua_State* L)
 		{
 			Writer& w = CheckWriter(L, "writer:add");
-			const char* name = luaL_checkstring(L, 2);
+			const std::string name = NameArg(L, 2);
 			const std::string_view data = Bytes(L, 3);
 			Add(L, w, name, data, Level(L, 4, "writer:add"), "writer:add");
 			lua_settop(L, 1);
@@ -487,8 +646,8 @@ namespace cluau::runtime::detail {
 		int WriterAddFile(lua_State* L)
 		{
 			Writer& w = CheckWriter(L, "writer:addFile");
-			const char* name = luaL_checkstring(L, 2);
-			const std::string path = luaL_checkstring(L, 3);
+			const std::string name = NameArg(L, 2);
+			const std::string path = PathArg(L, 3, "writer:addFile");
 			std::string data;
 			if (!ReadFile(path, data))
 				luaL_error(L, "writer:addFile: cannot read '%s'", path.c_str());
@@ -500,10 +659,10 @@ namespace cluau::runtime::detail {
 		int WriterAddDirectory(lua_State* L)
 		{
 			Writer& w = CheckWriter(L, "writer:addDirectory");
-			std::string name = luaL_checkstring(L, 2);
+			std::string name = NameArg(L, 2);
 			if (name.empty() || name.back() != '/')
 				name += '/';
-			Add(L, w, name.c_str(), {}, 0, "writer:addDirectory");
+			Add(L, w, name, {}, 0, "writer:addDirectory");
 			lua_settop(L, 1);
 			return 1;
 		}

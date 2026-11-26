@@ -1,0 +1,68 @@
+// @std/regex at its edges: empty matches in matches, replace and split
+// (as Perl and Python find them), \K, positions out of range, duplicate
+// group names, escaping for the x flag, and the limits.
+const regex = require("@std/regex")
+
+function spans(pattern: string, text: string): string {
+	const found: { string } = {}
+	for (m in regex.compile(pattern):matches(text)) {
+		table.insert(found, `[{m.text}]@{m.start}`)
+	}
+	return table.concat(found, " ")
+}
+
+// After an empty match, a non-empty one at the same place comes next.
+print("matches |abc", spans("|abc", "abc"))
+print("matches a??", spans("a??", "bab"))
+print("matches x* over UTF-8", spans("x*", "é日"))
+print("replace a*?", (regex.compile("a*?"):replace("baac", "-")))
+print("replace x*", (regex.compile("x*"):replace("abc", "-")))
+print("replace a*", (regex.compile("a*"):replace("baac", "-")))
+print("split a??", table.concat(regex.compile("a??"):split("bab"), "|"))
+print("split a*", table.concat(regex.compile("a*"):split("baac"), "|"))
+
+// \K: an empty match that took text.
+print("matches a\\K", spans("a\\K", "aaa"))
+print("replace a\\K", (regex.compile("a\\K"):replace("aaa", "-")))
+print("replace (?<=a)\\Kb", (regex.compile("a\\Kb"):replace("abab", "-")))
+
+// Positions past the end find nothing, as with string.find; huge ones too.
+const dollar = regex.compile("$")
+print("start", dollar:test("abc", 4), dollar:test("abc", 5), dollar:test("abc", 100), dollar:test("abc", 2 ^ 31), string.find("abc", "$", 100))
+print("match past the end", regex.compile("x?"):match("abc", 2 ^ 40) == nil)
+print("split limit", #regex.compile(","):split("a,b,c", 2 ^ 32), #regex.compile(","):split("a,b,c", 2))
+print("replace count", (regex.compile("a"):replace("aaa", "b", 2 ^ 40)), (regex.compile("a"):replace("aaa", "b", 1)))
+print("start 0", (pcall(function() {
+	dollar:test("abc", 0)
+})))
+
+// One name for several groups (?J): the group that took part.
+const either = regex.compile("(?J)(?<n>a)|(?<n>b)")
+print("duplicate names", (either:replace("ab", "<${n}>")))
+
+// Escaped text matches itself with the x flag, white space beyond ASCII too.
+for (_, ch in { " ", "\t", "\u{85}", "\u{200E}", "\u{200F}", "\u{2028}", "\u{2029}" }) {
+	const text = "a" .. ch .. "b"
+	const re = regex.compile("^" .. regex.escape(text) .. "$", "x")
+	print(string.format("escape U+%04X", utf8.codepoint(ch)), re:test(text), re:test("ab"))
+}
+
+// Text that is not UTF-8 matches where it is valid.
+print("invalid UTF-8", regex.compile("."):match("\xff") == nil, table.concat(regex.compile("x"):split("a\xffxb"), "|") == "a\xff|b")
+
+// A search may use so much memory, and the searches of one call so many
+// steps in all: a text with many costly matches stops with an error.
+const groups = regex.compile("(a|b)*\\d")
+print("long repeated group", (pcall(function() {
+	groups:test(string.rep("a", 1000000) .. "1")
+})))
+print("short repeated group", groups:test(string.rep("a", 10000) .. "1"))
+const costly = regex.compile("(a|aa)+b|c")
+const piece = string.rep("a", 24) .. "c"
+print("one costly piece", costly:test(piece))
+const ok, why = pcall(function() {
+	costly:replace(string.rep(piece, 400), "-")
+})
+print("many costly pieces", ok, string.find(tostring(why), "gave up", 1, true) != nil)
+const _, cheap = regex.compile("x*"):replace(string.rep("ab", 50000), "-")
+print("many cheap pieces", cheap)

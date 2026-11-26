@@ -34,6 +34,8 @@ print(#random, random != crypto.randomBytes(32))
 const id = crypto.uuid()
 print(#id, string.match(id, "^%x+%-%x+%-4%x+%-[89ab]%x+%-%x+$") != nil, id != crypto.uuid())
 print(crypto.equal("secret", "secret"), crypto.equal("secret", "secreT"), crypto.equal("a", "ab"))
+// Only strings and buffers: a number is not the text it would print as.
+print("equal", crypto.equal(buffer.fromstring("1"), "1"), (pcall(crypto.equal, 1 :: any, "1"))) // allow-any: a wrong argument
 
 // The checker refuses a hash it does not know; at run time it is an error too.
 const unknown: string = "sha3"

@@ -1101,8 +1101,10 @@ classes, quantifiers (greedy and lazy), groups (numbered and
 `(?<name>...)`), lookahead and lookbehind, backreferences, `\b`, `\d`,
 `\s`, `\w`, and Unicode properties (`\p{L}`). A pattern is compiled once
 and matched as UTF-8 text: `\w`, `\d` and case-insensitive matching know
-letters beyond ASCII. Positions are 1-based byte offsets, as `string.find`
-gives them.
+letters beyond ASCII. Text that is not valid UTF-8 is matched where it is
+valid: no pattern matches an invalid byte. Positions are 1-based byte
+offsets, as `string.find` gives them; a `start` past the end of the text
+plus one finds nothing.
 
 | function | is |
 |---|---|
@@ -1117,11 +1119,15 @@ A `Regex`'s methods (and `pattern`, its source):
 | `match(text, start?): Match?` | the first match (from `start`) |
 | `matches(text)` | an iterator over every match: `for (m in re:matches(text)) { }` |
 | `replace(text, replacement, count?): (string, number)` | the text with each match (the first `count`) replaced, and how many were. `replacement` is a string, where `$1`..`$99` are groups, `${name}` a named group, `$&` (or `$0`) the match and `$$` a dollar sign; or a function given the `Match`, returning the text |
-| `split(text, limit?): {string}` | the pieces between matches (at most `limit` of them) |
+| `split(text, limit?): {string}` | the pieces between matches (at most `limit` of them); an empty match at the very start or end splits nothing off |
 
 A `Match` is `{ text, start, finish, groups, named }`: the matched text,
 where it starts and ends, the groups by number (a group that took no part
 is `nil`) and by name.
+
+`matches`, `replace` and `split` find every match as Perl and Python do:
+after an empty match, a non-empty one starting at the same place comes
+next, if there is one (so `|abc` finds `""`, `"abc"` and `""` in `"abc"`).
 
 ```
 const regex = require("@std/regex")
@@ -1134,7 +1140,12 @@ print(date:replace("2026-11-25", "${day}/${month}/${year}")) // 25/11/2026 1
 ```
 
 A pattern that backtracks too long on a text (nested repetition such as
-`(a+)+$`) stops with an error instead of running on.
+`(a+)+$`) stops with an error instead of running on: one search may take
+ten million steps and 64 MB of memory, and the searches of one
+`matches`, `replace` or `split` about ten million steps in all and a
+thousand more for each byte of the text. (A group repeated over a long
+text, such as `(a|b)*` over a few hundred thousand characters, needs more
+memory than that: match the pieces instead, `[ab]*`.)
 
 ### `@std/net`
 
@@ -1365,7 +1376,7 @@ a `buffer`; a digest is lowercase hex, or its bytes (a string) with
 | `hasher(algorithm): Hasher` | a hash fed in parts: `update(data)` (which returns the hasher, to chain), then `digest(options?)` once |
 | `randomBytes(count): string` | `count` random bytes from the operating system (for keys, tokens, salts) |
 | `uuid(): string` | a random (version 4) UUID: `"9f1c...-....-4...-....-............"` |
-| `equal(a, b): boolean` | whether two secrets are equal, compared in a time that does not depend on where they differ |
+| `equal(a, b): boolean` | whether two secrets (strings or buffers) are equal, compared in a time that does not depend on where they differ |
 
 ```
 const crypto = require("@std/crypto")
@@ -1404,7 +1415,7 @@ a string or a `buffer`; what comes out is a string of the bytes.
 | function | is |
 |---|---|
 | `gzip(data, options?): string` | gzip's format (what `.gz` files hold); `options.level` from 0 (stored) to 9 (smallest), 6 by default |
-| `gunzip(data): string` | the contents of gzip data (of each part, when gzip files were joined), its checksum checked |
+| `gunzip(data): string` | the contents of gzip data (of each part, when gzip files were joined), its checksums checked; a header with flags gzip reserves is refused |
 | `deflate(data, options?): string` | zlib's format (deflate with its header and checksum); `options.raw` for deflate alone; `options.level` |
 | `inflate(data, options?): string` | the contents of zlib data (`options.raw`: of raw deflate) |
 
@@ -1423,14 +1434,21 @@ An `Archive` has `entries()` (each `{ name, size, compressedSize,
 directory, modified }`, `modified` a time as `@std/time` has them),
 `read(name)` (an entry's contents), `extract(directory)` (every entry under
 the directory, made when missing; returns how many files it wrote) and `close()`.
-Entry names are matched exactly, case included.
-`extract` refuses an entry whose name would put it outside the directory
-(an absolute name, or one through `..`), so an archive from anywhere is
-safe to extract.
+Entry names are matched exactly, case included; when two entries have one
+name, `read` gives the last, which is also the one `extract` leaves.
+An archive from anywhere is safe to open and extract: `extract` refuses an
+entry whose name would put it outside the directory (an absolute name, one
+through `..`, or one with a `\`), and opening refuses an archive whose
+entries share their data or name other files in their local headers, or
+whose entries claim more than 1,040 times the archive's size (and 64 KB)
+in all. So what `extract` writes, and what reading every entry once gives,
+is at most that (deflate itself expands at most about 1,032 times): check
+the `entries()` sizes first when even that is too much.
 
 A `Writer` has `add(name, data, options?)`, `addFile(name, path, options?)`
 and `addDirectory(name)` (each returns the writer, to chain;
-`options.level` as for `@std/compress`), and `finish()`.
+`options.level` as for `@std/compress`), and `finish()`. A name `extract`
+would refuse, and a name already in the archive, are errors.
 
 ```
 const zip = require("@std/zip")
@@ -1488,19 +1506,24 @@ A `Database` has `path`, and:
 | `exec(sql)` | runs the statements in the text (no parameters, no results): a schema, a script |
 | `query(sql, ...): {Row}` | every row of the result |
 | `first(sql, ...): Row?` | the first row, or `nil` |
-| `rows(sql, ...)` | an iterator over the rows, read as the loop goes: `for (row in db:rows(sql)) { }` |
+| `rows(sql, ...)` | an iterator over the rows, read as the loop goes: `for (row in db:rows(sql)) { }`. Until the last row is read, the statement holds a read lock on the database (see below) |
 | `run(sql, ...): { changes, lastId }` | runs an `INSERT`, `UPDATE` or `DELETE`: the rows it changed, and the last inserted row's id |
-| `prepare(sql): Statement` | the statement compiled once, to run many times: its `query`, `first`, `rows` and `run` take the parameters; `columns()` lists the result's columns; `close()` |
-| `transaction(fn, ...)` | `fn(...)` in a transaction: committed when it returns, rolled back when it raises (and the error raised again); nested ones are savepoints. Returns what `fn` returned |
-| `close()` | closes the database (its statements too) |
+| `prepare(sql): Statement` | the statement compiled once, to run many times: its `query`, `first`, `rows` and `run` take the parameters; `columns()` lists the result's columns; `close()`. Running it again while one of its `rows` loops is under way ends that loop with an error |
+| `transaction(fn, ...)` | `fn(...)` in a transaction: committed when it returns, rolled back when it raises (and the error raised again); nested ones are savepoints. When the commit itself fails (a deferred foreign key, another connection reading), the transaction is rolled back and the error raised. Returns what `fn` returned |
+| `close()` | closes the database (its statements too, which also lets go of their locks) |
 
 The parameters after the SQL fill its `?`s in order, or one table fills
-named ones (`:name`, `@name`, `$name`: the table's keys are the names). A
-row is a table of its columns by name: `NULL` is `nil` (so the column is
-missing from the table), `INTEGER` and `REAL` are numbers, `TEXT` is a
-string and a `BLOB` a `buffer`; a boolean parameter is stored as 1 or 0,
-and a buffer as a `BLOB`. A row's type is what the variable it goes to
-says it is:
+named ones (`:name`, `@name`, `$name`: the table's keys are the names; a
+name the table lacks is `NULL`, as a `nil` value is). SQL holding a NUL
+byte is an error. A row is a table of its columns by name: `NULL` is `nil`
+(so the column is missing from the table), `INTEGER` and `REAL` are
+numbers, `TEXT` is a string and a `BLOB` a `buffer`; a boolean parameter
+is stored as 1 or 0, and a buffer as a `BLOB`. Two columns of one name
+are one key: name them apart with `AS`. A
+number is a double, so an `INTEGER` beyond 2^53 (about 9e15) comes back
+rounded: read such values with `CAST(x AS TEXT)`. `run` gives 0 `changes`
+for a statement that changes no rows. A row's type is what the variable it
+goes to says it is:
 
 ```
 const sqlite = require("@std/sqlite")
@@ -1518,7 +1541,11 @@ db:close()
 ```
 
 Foreign keys are enforced, and a database another program holds is
-waited on for up to five seconds. The calls run on the script's thread
+waited on for up to five seconds. A `rows` loop left early (with `break`)
+keeps its read lock until the statement is collected, and another
+connection that writes meanwhile waits and then fails: use `query` for
+results that are read in part, or `prepare` the statement and `close()`
+it after the loop (closing the database ends it too). The calls run on the script's thread
 (in a task, the others wait until a query is done).
 
 ### `@std/task`

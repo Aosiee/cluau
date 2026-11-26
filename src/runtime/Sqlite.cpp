@@ -11,9 +11,11 @@
 #include <cmath>
 #include <sqlite3.h>
 
+#include <climits>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 namespace cluau::runtime::detail {
 
@@ -22,12 +24,15 @@ namespace cluau::runtime::detail {
 		constexpr const char* kDatabaseMeta = "cluau.Database";
 		constexpr const char* kStatementMeta = "cluau.Statement";
 
+		struct StatementBox;
+
 		// A connection, shared by its statements (it closes after the last).
 		struct Connection
 		{
 			sqlite3* Db = nullptr;
 			std::string Path;
-			int Savepoints = 0; // nested transactions under way
+			int Savepoints = 0;                           // nested transactions under way
+			std::unordered_set<StatementBox*> Statements; // the prepared ones, which close() finalizes
 
 			~Connection()
 			{
@@ -45,6 +50,7 @@ namespace cluau::runtime::detail {
 		{
 			std::shared_ptr<Connection>* Owner = nullptr;
 			sqlite3_stmt* Statement = nullptr;
+			unsigned Runs = 0; // how many times it was run: a rows() loop sees another run start
 		};
 
 		Connection& Open(lua_State* L, int index, const char* fn)
@@ -58,17 +64,23 @@ namespace cluau::runtime::detail {
 
 		[[noreturn]] void Fail(lua_State* L, sqlite3* db, const char* fn) { luaL_error(L, "%s: %s", fn, sqlite3_errmsg(db)); }
 
-		sqlite3_stmt* Prepare(lua_State* L, Connection& c, const char* sql, size_t len, const char* fn, const char** rest = nullptr)
+		// SQLite reads SQL up to a NUL byte: what follows one would be left
+		// out unseen.
+		void CheckSql(lua_State* L, const char* sql, size_t len, const char* fn)
 		{
+			if (std::memchr(sql, 0, len))
+				luaL_error(L, "%s: the SQL holds a NUL byte", fn);
+		}
+
+		sqlite3_stmt* Prepare(lua_State* L, Connection& c, const char* sql, size_t len, const char* fn)
+		{
+			CheckSql(L, sql, len, fn);
+			if (len > (size_t)INT_MAX)
+				luaL_error(L, "%s: the SQL is too long", fn);
 			sqlite3_stmt* statement = nullptr;
 			const char* tail = nullptr;
 			if (sqlite3_prepare_v2(c.Db, sql, (int)len, &statement, &tail) != SQLITE_OK)
 				Fail(L, c.Db, fn);
-			if (rest)
-			{
-				*rest = tail;
-				return statement;
-			}
 			if (!statement)
 				luaL_error(L, "%s: the SQL holds no statement", fn);
 			// One statement only: a second would otherwise be left out unseen.
@@ -77,12 +89,10 @@ namespace cluau::runtime::detail {
 			{
 				sqlite3_stmt* next = nullptr;
 				const char* after = nullptr;
-				if (sqlite3_prepare_v2(c.Db, tail, (int)(end - tail), &next, &after) != SQLITE_OK)
-				{
-					sqlite3_finalize(statement);
-					Fail(L, c.Db, fn);
-				}
-				if (next)
+				// What follows is a statement when it prepares to one, and when
+				// it fails to prepare (white space and comments prepare to none).
+				const bool failed = sqlite3_prepare_v2(c.Db, tail, (int)(end - tail), &next, &after) != SQLITE_OK;
+				if (failed || next)
 				{
 					sqlite3_finalize(next);
 					sqlite3_finalize(statement);
@@ -236,11 +246,15 @@ namespace cluau::runtime::detail {
 			}
 			else
 			{
+				// sqlite3_changes64 keeps the count of the last INSERT, UPDATE
+				// or DELETE: a statement that changes nothing leaves it as it was.
+				const sqlite3_int64 before = sqlite3_total_changes64(db);
 				while (Step(L, db, statement, fn))
 				{
 				}
+				const bool changed = sqlite3_total_changes64(db) != before;
 				lua_createtable(L, 0, 2);
-				lua_pushnumber(L, (double)sqlite3_changes64(db));
+				lua_pushnumber(L, changed ? (double)sqlite3_changes64(db) : 0.0);
 				lua_setfield(L, -2, "changes");
 				lua_pushnumber(L, (double)sqlite3_last_insert_rowid(db));
 				lua_setfield(L, -2, "lastId");
@@ -287,8 +301,11 @@ namespace cluau::runtime::detail {
 		int DatabaseExec(lua_State* L)
 		{
 			Connection& c = Open(L, 1, "db:exec");
+			size_t len = 0;
+			const char* sql = luaL_checklstring(L, 2, &len);
+			CheckSql(L, sql, len, "db:exec");
 			char* error = nullptr;
-			if (sqlite3_exec(c.Db, luaL_checkstring(L, 2), nullptr, nullptr, &error) != SQLITE_OK)
+			if (sqlite3_exec(c.Db, sql, nullptr, nullptr, &error) != SQLITE_OK)
 			{
 				const std::string message = error ? error : sqlite3_errmsg(c.Db);
 				sqlite3_free(error);
@@ -303,30 +320,51 @@ namespace cluau::runtime::detail {
 				StatementBox* box = static_cast<StatementBox*>(p);
 				if (box->Statement)
 					sqlite3_finalize(box->Statement);
+				if (box->Owner)
+					(*box->Owner)->Statements.erase(box);
 				delete box->Owner;
 			}));
+			box->Owner = nullptr;
+			box->Statement = nullptr;
+			box->Runs = 0;
 			box->Owner = new std::shared_ptr<Connection>(owner);
 			box->Statement = statement;
+			owner->Statements.insert(box);
 			luaL_getmetatable(L, kStatementMeta);
 			lua_setmetatable(L, -2);
 			return box;
 		}
 
-		// The iterator rows() gives: its statement (upvalue 1) steps on.
+		// The iterator rows() gives: its statement (upvalue 1) steps on, as
+		// long as nothing else ran the statement since (upvalue 2, the run
+		// it belongs to; nil once the rows are done).
 		int RowsNext(lua_State* L)
 		{
 			StatementBox* box = static_cast<StatementBox*>(lua_touserdata(L, lua_upvalueindex(1)));
-			if (!box->Statement)
+			if (lua_isnil(L, lua_upvalueindex(2)))
 				return 0;
 			if (!(*box->Owner)->Db)
 				luaL_error(L, "rows: the database is closed");
+			if (!box->Statement)
+				return 0;
+			if ((unsigned)lua_tonumber(L, lua_upvalueindex(2)) != box->Runs)
+				luaL_error(L, "rows: the statement was run again while its rows were read");
 			if (!Step(L, (*box->Owner)->Db, box->Statement, "rows"))
 			{
 				sqlite3_reset(box->Statement);
+				lua_pushnil(L);
+				lua_replace(L, lua_upvalueindex(2));
 				return 0;
 			}
 			PushRow(L, box->Statement);
 			return 1;
+		}
+
+		// The rows() iterator over the statement at the top of the stack.
+		void PushRows(lua_State* L, StatementBox& box)
+		{
+			lua_pushnumber(L, (double)box.Runs);
+			lua_pushcclosure(L, RowsNext, "rows", 2);
 		}
 
 		int DatabaseRows(lua_State* L)
@@ -339,8 +377,7 @@ namespace cluau::runtime::detail {
 			Bind(L, c.Db, guard.Statement, 3, "db:rows");
 			sqlite3_stmt* statement = guard.Statement;
 			guard.Statement = nullptr; // the iterator's now
-			NewStatement(L, *db->Shared, statement);
-			lua_pushcclosure(L, RowsNext, "rows", 1);
+			PushRows(L, *NewStatement(L, *db->Shared, statement));
 			return 1;
 		}
 
@@ -371,6 +408,17 @@ namespace cluau::runtime::detail {
 				sqlite3_free(error);
 				return message;
 			};
+			// Undoes the savepoint. One begun outside any transaction is the
+			// transaction itself, which must be over afterwards: when its
+			// RELEASE fails (another connection reading, say), it is rolled
+			// back whole.
+			const bool outermost = sqlite3_get_autocommit(c.Db) != 0;
+			auto rollback = [&] {
+				exec("ROLLBACK TO " + name);
+				exec("RELEASE " + name);
+				if (outermost && c.Db && !sqlite3_get_autocommit(c.Db))
+					exec("ROLLBACK");
+			};
 			if (std::string error = exec("SAVEPOINT " + name); !error.empty())
 				luaL_error(L, "db:transaction: %s", error.c_str());
 			c.Savepoints++;
@@ -379,12 +427,16 @@ namespace cluau::runtime::detail {
 			c.Savepoints--;
 			if (status != LUA_OK)
 			{
-				exec("ROLLBACK TO " + name);
-				exec("RELEASE " + name);
+				rollback();
 				lua_error(L);
 			}
+			// The commit can fail too (a deferred foreign key, a database
+			// another connection reads): then nothing is kept.
 			if (std::string error = exec("RELEASE " + name); !error.empty())
+			{
+				rollback();
 				luaL_error(L, "db:transaction: %s", error.c_str());
+			}
 			return lua_gettop(L) - 1;
 		}
 
@@ -394,6 +446,17 @@ namespace cluau::runtime::detail {
 			Connection& c = **box->Shared;
 			if (c.Db)
 			{
+				// The prepared statements are finalized now, not when they are
+				// collected: until then SQLite would keep the file open, and a
+				// statement under way its lock on it.
+				for (StatementBox* statement : c.Statements)
+					if (statement->Statement)
+					{
+						sqlite3_finalize(statement->Statement);
+						statement->Statement = nullptr;
+					}
+				if (!sqlite3_get_autocommit(c.Db))
+					sqlite3_exec(c.Db, "ROLLBACK", nullptr, nullptr, nullptr);
 				sqlite3_close_v2(c.Db);
 				c.Db = nullptr;
 			}
@@ -426,27 +489,31 @@ namespace cluau::runtime::detail {
 		int StatementQuery(lua_State* L)
 		{
 			StatementBox& s = CheckStatement(L, "statement:query");
+			s.Runs++;
 			return RunStatement(L, (*s.Owner)->Db, s.Statement, 2, Want::All, "statement:query");
 		}
 
 		int StatementFirst(lua_State* L)
 		{
 			StatementBox& s = CheckStatement(L, "statement:first");
+			s.Runs++;
 			return RunStatement(L, (*s.Owner)->Db, s.Statement, 2, Want::First, "statement:first");
 		}
 
 		int StatementRun(lua_State* L)
 		{
 			StatementBox& s = CheckStatement(L, "statement:run");
+			s.Runs++;
 			return RunStatement(L, (*s.Owner)->Db, s.Statement, 2, Want::Changes, "statement:run");
 		}
 
 		int StatementRows(lua_State* L)
 		{
 			StatementBox& s = CheckStatement(L, "statement:rows");
+			s.Runs++;
 			Bind(L, (*s.Owner)->Db, s.Statement, 2, "statement:rows");
 			lua_pushvalue(L, 1);
-			lua_pushcclosure(L, RowsNext, "rows", 1);
+			PushRows(L, s);
 			return 1;
 		}
 
@@ -478,7 +545,11 @@ namespace cluau::runtime::detail {
 		// options.readonly, options.create (true by default).
 		int SqliteOpen(lua_State* L)
 		{
-			const std::string path = luaL_checkstring(L, 1);
+			size_t len = 0;
+			const char* given = luaL_checklstring(L, 1, &len);
+			const std::string path(given, len);
+			if (path.find('\0') != std::string::npos)
+				luaL_error(L, "sqlite.open: the path holds a NUL byte");
 			bool readonly = false, create = true;
 			if (lua_istable(L, 2))
 			{

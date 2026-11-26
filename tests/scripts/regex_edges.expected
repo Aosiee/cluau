@@ -1,0 +1,31 @@
+matches |abc	[]@1 [abc]@1 []@4
+matches a??	[]@1 []@2 [a]@2 []@3 []@4
+matches x* over UTF-8	[]@1 []@3 []@6
+replace a*?	-b-----c-
+replace x*	-a-b-c-
+replace a*	-b--c-
+split a??	b|||b
+split a*	b||c
+matches a\K	[]@2 []@3 []@4
+replace a\K	a-a-a-
+replace (?<=a)\Kb	a-a-
+start	true	false	false	false	nil
+match past the end	true
+split limit	3	2
+replace count	bbb	baa
+start 0	false
+duplicate names	<a><b>
+escape U+0020	true	false
+escape U+0009	true	false
+escape U+0085	true	false
+escape U+200E	true	false
+escape U+200F	true	false
+escape U+2028	true	false
+escape U+2029	true	false
+invalid UTF-8	true	true
+long repeated group	false
+short repeated group	true
+one costly piece	true
+many costly pieces	false	true
+many cheap pieces	100001
+exit: 0

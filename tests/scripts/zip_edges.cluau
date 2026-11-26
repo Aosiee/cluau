@@ -1,0 +1,109 @@
+// @std/zip and gunzip at their edges: archives made to give out more than
+// they hold, entry names the writer refuses, long names, and gzip headers.
+const zip = require("@std/zip")
+const compress = require("@std/compress")
+const fs = require("@std/fs")
+const path = require("@std/path")
+
+function made(): string {
+	const w = zip.create()
+	w:add("aa", string.rep("x", 1000), { level = 0 })
+	w:add("ab", string.rep("y", 1000), { level = 0 })
+	return w:finish() :: string
+}
+
+// Where each central directory entry of an archive starts (one with no
+// comment, as the writer makes them).
+function number(bytes: string, at: number, format: string): number {
+	return string.unpack(format, bytes, at) :: number // allow-any: string.unpack's results
+}
+
+function central(bytes: string): { number } {
+	const count = number(bytes, #bytes - 21 + 10, "<I2")
+	let at = number(bytes, #bytes - 21 + 16, "<I4")
+	const starts: { number } = {}
+	for (_ = 1, count) {
+		table.insert(starts, at + 1)
+		at += 46 + number(bytes, at + 1 + 28, "<I2") + number(bytes, at + 1 + 30, "<I2") + number(bytes, at + 1 + 32, "<I2")
+	}
+	return starts
+}
+
+// The bytes with `text` written at `at` (1-based).
+function patch(bytes: string, at: number, text: string): string {
+	return string.sub(bytes, 1, at - 1) .. text .. string.sub(bytes, at + #text)
+}
+
+function opens(bytes: string): string {
+	const ok, why = pcall(zip.fromString, bytes)
+	return if (ok) "opens" else string.gsub(tostring(why), "^.*is damaged: ", "")
+}
+
+const good = made()
+print("as made", opens(good))
+const second = central(good)[2]
+
+// Two central entries for one local file: refused.
+const firstHeader = number(good, central(good)[1] + 42, "<I4")
+print("shared data", opens(patch(patch(good, second + 46, "aa"), second + 42, string.pack("<I4", firstHeader))))
+// A central entry whose local header names another file: refused.
+print("other name", opens(patch(good, second + 46, "ac")))
+// Entries that claim far more than the archive could hold: refused.
+print("claims", opens(patch(good, second + 24, string.pack("<I4", 2 ^ 31))))
+
+// Two entries of one name: read gives the last, which extract leaves.
+const secondHeader = number(good, second + 42, "<I4")
+const twice = patch(patch(good, second + 46, "aa"), secondHeader + 1 + 30, "aa")
+const archive = zip.fromString(twice)
+print("entries", #archive:entries(), archive:entries()[2].name, string.sub(archive:read("aa"), 1, 1))
+const dir = path.join(fs.tempDir(), `cluau-zip-edges-{math.floor(os.clock() * 1e6)}`)
+print("extracted", archive:extract(dir), string.sub(fs.read(path.join(dir, "aa")), 1, 1))
+fs.remove(dir, true)
+print("name with NUL", (pcall(function() {
+	archive:read("aa\0junk")
+})))
+
+// A name of more than 511 bytes is kept whole.
+const long = string.rep("n", 600)
+const longArchive = zip.create()
+longArchive:add(long, "long name")
+const reopened = zip.fromString(longArchive:finish() :: string)
+print("long name", #reopened:entries()[1].name, reopened:read(long))
+
+// The writer refuses names extract would refuse, and a name twice.
+for (_, name in { "../up.txt", "/abs.txt", "a\\b.txt", "C:/x.txt", "x/../../y", "nul\0name", "" }) {
+	print("refused", string.format("%q", name), (pcall(function() {
+		zip.create():add(name, "data")
+	})))
+}
+const writer = zip.create()
+writer:add("x/../y", "kept")
+print("twice", (pcall(function() {
+	writer:add("y", "again")
+})), (pcall(function() {
+	writer:addDirectory("d"):addDirectory("d/")
+})))
+print("directory as a file", (pcall(function() {
+	writer:addFile("d", fs.tempDir())
+})))
+print("path with NUL", (pcall(zip.open, "a\0b.zip")))
+
+// gzip headers: the optional fields, the header's checksum, and the flags
+// gzip reserves.
+const body = string.sub(compress.gzip("hello"), 11)
+function crc32(data: string): number {
+	const gz = compress.gzip(data)
+	return number(gz, #gz - 7, "<I4")
+}
+function gunzips(header: string): string {
+	const ok, out = pcall(compress.gunzip, header .. body)
+	return if (ok) out else string.gsub(tostring(out), "^.*gunzip: ", "")
+}
+const fields = "\x1f\x8b\x08\x1c\0\0\0\0\0\255" .. "\3\0xyz" .. "name\0" .. "comment\0"
+print("fields", gunzips(fields))
+const withCrc = "\x1f\x8b\x08\x1e\0\0\0\0\0\255" .. "\3\0xyz" .. "name\0" .. "comment\0"
+const crc = crc32(withCrc) % 65536
+print("header checksum", gunzips(withCrc .. string.pack("<I2", crc)), gunzips(withCrc .. string.pack("<I2", (crc + 1) % 65536)))
+print("reserved flag", gunzips("\x1f\x8b\x08\x20\0\0\0\0\0\255"))
+print("cut short", (pcall(compress.gunzip, "\x1f\x8b\x08\x08\0\0\0\0\0\255" .. string.rep("n", 20))))
+print("level", (pcall(compress.deflate, "x", { level = math.huge })), (pcall(compress.deflate, "x", { level = 2 ^ 40 })))

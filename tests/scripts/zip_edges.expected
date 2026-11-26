@@ -1,0 +1,24 @@
+as made	opens
+shared data	its entries overlap
+other name	'ac' is another name in its local header
+claims	its entries claim 2147484648 bytes from 2214
+entries	2	aa	y
+extracted	2	y
+name with NUL	false
+long name	600	long name
+refused	"../up.txt"	false
+refused	"/abs.txt"	false
+refused	"a\\b.txt"	false
+refused	"C:/x.txt"	false
+refused	"x/../../y"	false
+refused	"nul\000name"	false
+refused	""	false
+twice	false	false
+directory as a file	false
+path with NUL	false
+fields	hello
+header checksum	hello	the gzip header's checksum does not match: the data is damaged
+reserved flag	the gzip header has flags this reader does not know
+cut short	false
+level	false	false
+exit: 0
