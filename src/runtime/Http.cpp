@@ -17,6 +17,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -53,18 +57,26 @@ namespace cluau::runtime::detail {
 			(void)done;
 		}
 
+		// The statuses a redirect is followed for.
+		bool IsRedirect(long status) { return status == 301 || status == 302 || status == 303 || status == 307 || status == 308; }
+
 		struct Transfer
 		{
 			std::string Body;
 			FILE* File = nullptr; // download: the body goes here
 			std::map<std::string, std::string> Headers;
 			bool WriteFailed = false;
+			bool Follow = false; // redirects are followed
+			long Status = 0;     // the status line's, as it arrives
+			bool Skip = false;   // the body of a redirect that is followed
 		};
 
 		size_t OnBody(char* data, size_t size, size_t count, void* user)
 		{
 			Transfer& t = *static_cast<Transfer*>(user);
 			const size_t n = size * count;
+			if (t.Skip)
+				return n;
 			if (t.File)
 			{
 				if (std::fwrite(data, 1, n, t.File) != n)
@@ -93,10 +105,18 @@ namespace cluau::runtime::detail {
 			Transfer& t = *static_cast<Transfer*>(user);
 			const size_t n = size * count;
 			const std::string line(data, n);
-			// A new status line: the response after a redirect starts afresh.
+			// A new status line: the response after a 1xx starts afresh.
 			if (line.rfind("HTTP/", 0) == 0)
 			{
 				t.Headers.clear();
+				const size_t space = line.find(' ');
+				t.Status = space == std::string::npos ? 0 : std::strtol(line.c_str() + space + 1, nullptr, 10);
+				return n;
+			}
+			// The end of the head: a redirect to follow has a body no one reads.
+			if (line == "\r\n" || line == "\n")
+			{
+				t.Skip = t.Follow && IsRedirect(t.Status) && t.Headers.count("location") > 0;
 				return n;
 			}
 			const size_t colon = line.find(':');
@@ -117,12 +137,45 @@ namespace cluau::runtime::detail {
 		{
 			std::string Method = "GET";
 			std::string Url;
-			std::vector<std::string> Headers; // "Name: value"
+			std::vector<std::pair<std::string, std::string>> Headers; // the script's, and Content-Type for json
 			std::optional<std::string> Body;
 			double Timeout = 0;
 			bool FollowRedirects = true;
 			std::string CaFile;
 		};
+
+		// A header name or a method: an HTTP token (RFC 9110 5.6.2).
+		bool IsToken(const std::string& text)
+		{
+			if (text.empty())
+				return false;
+			for (unsigned char c : text)
+				if (!std::isalnum(c) && !std::strchr("!#$%&'*+-.^_`|~", c))
+					return false;
+			return true;
+		}
+
+		// The URL as an error message shows it: without a user name and
+		// password.
+		std::string Shown(const std::string& url)
+		{
+			const size_t scheme = url.find("://");
+			if (scheme == std::string::npos)
+				return url;
+			const size_t start = scheme + 3;
+			const size_t end = std::min(url.find_first_of("/?#", start), url.size());
+			const size_t at = url.rfind('@', end - 1);
+			if (at == std::string::npos || at < start || end == start)
+				return url;
+			return url.substr(0, start) + url.substr(at + 1);
+		}
+
+		// A URL is text with no NUL in it (curl would read it only up to one).
+		void CheckUrl(lua_State* L, const char* url, size_t length, const char* fn)
+		{
+			if (std::strlen(url) != length)
+				luaL_error(L, "%s: the address has a NUL byte in it", fn);
+		}
 
 		std::string StringField(lua_State* L, int table, const char* name, const char* fn)
 		{
@@ -148,6 +201,8 @@ namespace cluau::runtime::detail {
 			luaL_checktype(L, index, LUA_TTABLE);
 			if (std::string method = StringField(L, index, "method", fn); !method.empty())
 			{
+				if (!IsToken(method))
+					luaL_error(L, "%s: options.method '%s' is not a method name", fn, method.c_str());
 				std::transform(method.begin(), method.end(), method.begin(), [](unsigned char c) { return (char)std::toupper(c); });
 				request.Method = method;
 			}
@@ -161,11 +216,21 @@ namespace cluau::runtime::detail {
 				{
 					if (lua_type(L, -2) != LUA_TSTRING || !lua_isstring(L, -1))
 						luaL_error(L, "%s: options.headers maps names to text", fn);
-					const std::string name = lua_tostring(L, -2);
+					size_t nameLength = 0, valueLength = 0;
+					const char* nameText = lua_tolstring(L, -2, &nameLength);
+					const std::string name(nameText, nameLength);
+					if (!IsToken(name))
+						luaL_error(L, "%s: options.headers: '%s' is not a header name", fn, name.c_str());
+					lua_pushvalue(L, -1); // lua_tolstring would turn a number into text in place
+					const char* valueText = lua_tolstring(L, -1, &valueLength);
+					const std::string value(valueText, valueLength);
+					lua_pop(L, 1);
+					if (value.find_first_of(std::string("\r\n\0", 3)) != std::string::npos)
+						luaL_error(L, "%s: options.headers: the %s header's value has a line break or a NUL in it", fn, name.c_str());
 					std::string lower = name;
 					std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
 					contentType = contentType || lower == "content-type";
-					request.Headers.push_back(name + ": " + lua_tostring(L, -1));
+					request.Headers.emplace_back(name, value);
 					lua_pop(L, 1);
 				}
 			}
@@ -189,13 +254,13 @@ namespace cluau::runtime::detail {
 					luaL_error(L, "%s: options.body and options.json are each a body: give one", fn);
 				request.Body = JsonEncodeValue(L, lua_gettop(L));
 				if (!contentType)
-					request.Headers.push_back("Content-Type: application/json");
+					request.Headers.emplace_back("Content-Type", "application/json");
 			}
 			lua_pop(L, 1);
 			lua_getfield(L, index, "timeout");
 			if (!lua_isnil(L, -1))
 			{
-				if (!lua_isnumber(L, -1) || lua_tonumber(L, -1) <= 0)
+				if (!lua_isnumber(L, -1) || !(lua_tonumber(L, -1) > 0))
 					luaL_error(L, "%s: options.timeout is a number of seconds", fn);
 				request.Timeout = lua_tonumber(L, -1);
 			}
@@ -206,16 +271,91 @@ namespace cluau::runtime::detail {
 			lua_pop(L, 1);
 		}
 
+		std::string Lower(std::string text)
+		{
+			std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+			return text;
+		}
+
 		bool HasHeader(const Request& request, const std::string& lowerName)
 		{
-			for (const std::string& h : request.Headers)
-			{
-				std::string name = h.substr(0, h.find(':'));
-				std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-				if (name == lowerName)
+			for (const auto& [name, value] : request.Headers)
+				if (Lower(name) == lowerName)
 					return true;
-			}
 			return false;
+		}
+
+		// The scheme, host and port of a URL ("" when it does not parse).
+		std::string Origin(const std::string& url)
+		{
+			std::string origin;
+			CURLU* parsed = curl_url();
+			if (parsed && curl_url_set(parsed, CURLUPART_URL, url.c_str(), 0) == CURLUE_OK)
+			{
+				char *scheme = nullptr, *host = nullptr, *port = nullptr;
+				curl_url_get(parsed, CURLUPART_SCHEME, &scheme, 0);
+				curl_url_get(parsed, CURLUPART_HOST, &host, 0);
+				curl_url_get(parsed, CURLUPART_PORT, &port, CURLU_DEFAULT_PORT);
+				if (scheme && host)
+					origin = Lower(scheme) + "://" + Lower(host) + ":" + (port ? port : "");
+				curl_free(scheme);
+				curl_free(host);
+				curl_free(port);
+			}
+			curl_url_cleanup(parsed);
+			return origin;
+		}
+
+		// A URL without its user name and password.
+		std::string WithoutCredentials(const std::string& url)
+		{
+			std::string out = url;
+			CURLU* parsed = curl_url();
+			if (parsed && curl_url_set(parsed, CURLUPART_URL, url.c_str(), 0) == CURLUE_OK)
+			{
+				curl_url_set(parsed, CURLUPART_USER, nullptr, 0);
+				curl_url_set(parsed, CURLUPART_PASSWORD, nullptr, 0);
+				char* text = nullptr;
+				if (curl_url_get(parsed, CURLUPART_URL, &text, 0) == CURLUE_OK && text)
+					out = text;
+				curl_free(text);
+			}
+			curl_url_cleanup(parsed);
+			return out;
+		}
+
+		// The request a redirect (`status`, to `next`) makes of `request`:
+		// a 303 is followed with GET (but HEAD), a 301 or 302 after a POST
+		// too, without the body; 307 and 308 keep the method and the body.
+		// Another host (or scheme, or port) gets none of the script's own
+		// headers but those that say what is sent and wanted, and no user
+		// name or password: they may be credentials meant for the first.
+		void Redirect(Request& request, long status, const std::string& next)
+		{
+			if ((status == 303 && request.Method != "HEAD") || ((status == 301 || status == 302) && request.Method == "POST"))
+			{
+				request.Method = "GET";
+				request.Body.reset();
+				request.Headers.erase(std::remove_if(request.Headers.begin(), request.Headers.end(),
+										  [](const auto& h) {
+											  const std::string name = Lower(h.first);
+											  return name == "content-type" || name == "content-length";
+										  }),
+					request.Headers.end());
+			}
+			if (Origin(next) != Origin(request.Url))
+			{
+				static const char* kKept[] = { "accept", "accept-language", "content-type", "user-agent" };
+				request.Headers.erase(std::remove_if(request.Headers.begin(), request.Headers.end(),
+										  [](const auto& h) {
+											  const std::string name = Lower(h.first);
+											  return std::none_of(std::begin(kKept), std::end(kKept), [&](const char* kept) { return name == kept; });
+										  }),
+					request.Headers.end());
+				request.Url = WithoutCredentials(next);
+			}
+			else
+				request.Url = next;
 		}
 
 		// A finished transfer: what the script's thread turns into the
@@ -230,25 +370,16 @@ namespace cluau::runtime::detail {
 			std::string Failure; // set when the request could not even start
 		};
 
-		// Runs a request (on a job's thread: no Lua state). `file` receives
-		// the body (a download), else the outcome holds it.
-		std::shared_ptr<Outcome> Run(const Request& request, FILE* file)
+		// Sets `curl` up for one request (one step of a redirect chain).
+		curl_slist* Configure(CURL* curl, const Request& request, Transfer& transfer, char* errorText, curl_blob& pem)
 		{
-			auto outcome = std::make_shared<Outcome>();
-			CURL* curl = curl_easy_init();
-			if (!curl)
-			{
-				outcome->Failure = "cannot start a transfer";
-				return outcome;
-			}
-			Transfer& transfer = outcome->Transfer;
-			transfer.File = file;
-			char errorText[CURL_ERROR_SIZE] = {};
+			curl_easy_reset(curl);
 			curl_slist* headers = nullptr;
-			for (const std::string& h : request.Headers)
-				headers = curl_slist_append(headers, h.c_str());
+			for (const auto& [name, value] : request.Headers)
+				// "Name;" is curl's way to send a header with an empty value.
+				headers = curl_slist_append(headers, (value.empty() ? name + ";" : name + ": " + value).c_str());
 
-			const std::string agent = std::string("cluau/") + Version();
+			static const std::string agent = std::string("cluau/") + Version();
 			curl_easy_setopt(curl, CURLOPT_URL, request.Url.c_str());
 			curl_easy_setopt(curl, CURLOPT_USERAGENT, agent.c_str());
 			curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorText);
@@ -258,13 +389,11 @@ namespace cluau::runtime::detail {
 			curl_easy_setopt(curl, CURLOPT_HEADERDATA, &transfer);
 			curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 			curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, OnProgress);
-			curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, request.FollowRedirects ? 1L : 0L);
-			curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+			// Redirects are followed here (Run), not by curl, which would keep
+			// a custom method after a 303 and the script's headers on another host.
+			curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
 			curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
-			curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
 			curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-			if (request.Timeout > 0)
-				curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)(request.Timeout * 1000));
 
 			// A body only when there is one (POST always has one, maybe empty),
 			// with the content type the script gives (curl's form default off).
@@ -287,7 +416,6 @@ namespace cluau::runtime::detail {
 
 			// The certificates the server's must chain to.
 			const Certificates& system = SystemCertificates();
-			curl_blob pem{};
 			if (!request.CaFile.empty())
 				curl_easy_setopt(curl, CURLOPT_CAINFO, request.CaFile.c_str());
 			else
@@ -304,14 +432,64 @@ namespace cluau::runtime::detail {
 					curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &pem);
 				}
 			}
+			return headers;
+		}
 
-			outcome->Code = curl_easy_perform(curl);
-			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &outcome->Status);
-			char* finalUrl = nullptr;
-			curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &finalUrl);
-			outcome->Url = finalUrl ? finalUrl : request.Url;
-			outcome->ErrorText = errorText;
-			curl_slist_free_all(headers);
+		// Runs a request (on a job's thread: no Lua state), following its
+		// redirects. `file` receives the body (a download), else the outcome
+		// holds it.
+		std::shared_ptr<Outcome> Run(const Request& first, FILE* file)
+		{
+			auto outcome = std::make_shared<Outcome>();
+			CURL* curl = curl_easy_init();
+			if (!curl)
+			{
+				outcome->Failure = "cannot start a transfer";
+				return outcome;
+			}
+			Transfer& transfer = outcome->Transfer;
+			transfer.File = file;
+			transfer.Follow = first.FollowRedirects;
+			char errorText[CURL_ERROR_SIZE] = {};
+			curl_blob pem{};
+			Request request = first;
+			// The time limit is for the whole request, its redirects too (at
+			// least a millisecond: curl reads 0 as none).
+			const auto started = std::chrono::steady_clock::now();
+			for (int redirects = 0;; redirects++)
+			{
+				transfer.Headers.clear();
+				transfer.Body.clear();
+				transfer.Status = 0;
+				transfer.Skip = false;
+				errorText[0] = 0;
+				curl_slist* headers = Configure(curl, request, transfer, errorText, pem);
+				if (first.Timeout > 0)
+				{
+					const double left = first.Timeout - std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+					const double ms = std::min(std::ceil(std::max(left, 0.0) * 1000), (double)INT_MAX);
+					curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, std::max(1L, (long)ms));
+				}
+				outcome->Code = curl_easy_perform(curl);
+				curl_slist_free_all(headers);
+				outcome->Status = 0;
+				curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &outcome->Status);
+				char* finalUrl = nullptr;
+				curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &finalUrl);
+				outcome->Url = finalUrl ? finalUrl : request.Url;
+				outcome->ErrorText = errorText;
+				char* next = nullptr;
+				curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &next);
+				if (outcome->Code != CURLE_OK || !transfer.Skip || !next)
+					break;
+				if (redirects == 10)
+				{
+					outcome->Code = CURLE_TOO_MANY_REDIRECTS;
+					outcome->ErrorText = "more than 10 redirects";
+					break;
+				}
+				Redirect(request, outcome->Status, next);
+			}
 			curl_easy_cleanup(curl);
 			transfer.File = nullptr;
 			return outcome;
@@ -339,7 +517,7 @@ namespace cluau::runtime::detail {
 						: " (trusted certificates: " + (request.CaFile.empty() ? system.Where : request.CaFile) + ")";
 				else if (outcome.Transfer.WriteFailed)
 					why = "cannot write the download";
-				luaL_error(L, "%s: %s %s: %s", fn, request.Method.c_str(), request.Url.c_str(), why.c_str());
+				luaL_error(L, "%s: %s %s: %s", fn, request.Method.c_str(), Shown(request.Url).c_str(), why.c_str());
 			}
 
 			const Transfer& transfer = outcome.Transfer;
@@ -382,6 +560,7 @@ namespace cluau::runtime::detail {
 			request.Url = StringField(L, 1, "url", "http.request");
 			if (request.Url.empty())
 				luaL_error(L, "http.request: options.url is the address");
+			CheckUrl(L, request.Url.c_str(), request.Url.size(), "http.request");
 			ReadOptions(L, 1, "http.request", request);
 			return Perform(L, "http.request", std::move(request));
 		}
@@ -389,7 +568,10 @@ namespace cluau::runtime::detail {
 		int HttpGet(lua_State* L)
 		{
 			Request request;
-			request.Url = luaL_checkstring(L, 1);
+			size_t length = 0;
+			const char* url = luaL_checklstring(L, 1, &length);
+			CheckUrl(L, url, length, "http.get");
+			request.Url = url;
 			ReadOptions(L, 2, "http.get", request);
 			return Perform(L, "http.get", std::move(request));
 		}
@@ -399,7 +581,10 @@ namespace cluau::runtime::detail {
 		{
 			Request request;
 			request.Method = "POST";
-			request.Url = luaL_checkstring(L, 1);
+			size_t length = 0;
+			const char* url = luaL_checklstring(L, 1, &length);
+			CheckUrl(L, url, length, "http.post");
+			request.Url = url;
 			if (!lua_isnoneornil(L, 2))
 			{
 				size_t len = 0;
@@ -417,7 +602,10 @@ namespace cluau::runtime::detail {
 		int HttpDownload(lua_State* L)
 		{
 			Request request;
-			request.Url = luaL_checkstring(L, 1);
+			size_t length = 0;
+			const char* url = luaL_checklstring(L, 1, &length);
+			CheckUrl(L, url, length, "http.download");
+			request.Url = url;
 			const std::string shown = luaL_checkstring(L, 2);
 			const fs::path path = fs::u8path(shown);
 			ReadOptions(L, 3, "http.download", request);
@@ -444,7 +632,9 @@ namespace cluau::runtime::detail {
 				if (ok)
 				{
 					fs::rename(partial, path, ec);
-					if (ec)
+					// What is in the way is replaced only when it is a file:
+					// a directory (even an empty one) is an error.
+					if (std::error_code isDir; ec && !fs::is_directory(fs::symlink_status(path, isDir)))
 					{
 						fs::remove(path, ec);
 						fs::rename(partial, path, ec);

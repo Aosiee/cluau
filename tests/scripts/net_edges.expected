@@ -1,0 +1,19 @@
+readLine(3) of abc\r\n	true	abc
+readLine(3) of abcd\r\n	false	socket:readLine: a line longer than 3 bytes
+readLine(4) of abcd\r\n	true	abcd
+readLine(math.huge)	true	abc
+readLine(0/0)	false	invalid argument #2 to 'readLine' (the longest line, a whole number of bytes (none: no limit))
+read(1.5)	false	invalid argument #2 to 'read' (a number of bytes from 1)
+setTimeout(0/0)	false	invalid argument #2 to 'setTimeout' (a number of seconds (none, or 0: no limit))
+setDeadline(-1)	false	invalid argument #2 to 'setDeadline' (a number of seconds (none: no deadline))
+connect timeout 0/0	false	net.connect: options.timeout is a number of seconds
+before close	first
+readLine after close	true	 line
+readLine after close	true	second, without a line break
+read after close	false	socket:read: the socket is closed
+deadline	false	socket:readLine: the time setDeadline gave has passed
+deadline took about half a second	true
+no deadline	true	0123456789abcdefghijklmnopqrstuvwxyz
+long line	4194304	after
+echo	STILL HERE
+exit: 0

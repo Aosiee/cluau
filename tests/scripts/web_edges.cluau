@@ -241,6 +241,126 @@ print(pcall(function() {
 	ws:ping(string.rep("p", 126))
 }))
 
+// Close frames a client may not send: a code that is never sent (1005), one
+// outside the ranges (2999), a reason that is not UTF-8. A code of its own
+// (3000) is answered with the same. A message in more fragments than any
+// message needs is refused, even when they are empty.
+const CloseFrame = function(code: number, reason: string): string {
+	return Frame(136, string.pack(">I2", code) .. reason, true)
+}
+for (_, case in {
+	{ "close 1005", CloseFrame(1005, "") },
+	{ "close 2999", CloseFrame(2999, "") },
+	{ "close 3000", CloseFrame(3000, "") },
+	{ "close reason not UTF-8", CloseFrame(1000, "\255") },
+	{ "empty fragments", Frame(1, "", true) .. string.rep(Frame(0, "", true), 65536) },
+}) {
+	const socket = Upgraded()
+	pcall(function() {
+		socket:write(case[2])
+	})
+	print("websocket", case[1], Answer(socket))
+	socket:close()
+}
+
+// What the client sends, and what it makes of the answer: the request line
+// (a query alone gets a /, a #fragment is not sent), a 101 that does not
+// say Upgrade, a head that never ends, a quiet connection after a timeout
+// that was for the handshake, and the code the server closes with.
+const Recording = function(answer: (key: string) -> string, after: (socket: net.Socket) -> ()): (net.Server, { string }) {
+	const listening = net.listen("127.0.0.1", 0)
+	const seen: { string } = {}
+	task.spawn(function() {
+		const socket = listening:accept()
+		let key = ""
+		const first = socket:readLine() or ""
+		table.insert(seen, first)
+		while (true) {
+			const line = socket:readLine() or ""
+			if (line == "") {
+				break
+			}
+			key = string.match(line, "^Sec%-WebSocket%-Key: (.+)$") or key
+		}
+		pcall(function() {
+			socket:write(answer(key))
+			after(socket)
+		})
+		task.wait(0.3)
+		pcall(function() {
+			socket:close()
+		})
+	})
+	return listening, seen
+}
+const Switching = function(key: string): string {
+	return `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {websocket._accept(key)}\r\n\r\n`
+}
+const Nothing = function(socket: net.Socket) {}
+for (_, target in { "?x=1", "/path?y=2#fragment" }) {
+	const listening, seen = Recording(Switching, Nothing)
+	const ws = websocket.connect(`ws://127.0.0.1:{listening.port}{target}`)
+	print("client, request line for", target, seen[1])
+	ws:close()
+	listening:close()
+}
+{
+	const listening = Recording(function(key: string): string {
+		return `HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: {websocket._accept(key)}\r\n\r\n`
+	}, Nothing)
+	const ok, problem = pcall(websocket.connect, `ws://127.0.0.1:{listening.port}/`)
+	print("client, 101 without Upgrade", ok, string.find(tostring(problem), "without Upgrade", 1, true) != nil)
+	listening:close()
+}
+{
+	const listening = Recording(function(key: string): string {
+		return "HTTP/1.1 101 Switching Protocols\r\n" .. string.rep("X-Filler: " .. string.rep("f", 1000) .. "\r\n", 300)
+	}, Nothing)
+	const ok, problem = pcall(websocket.connect, `ws://127.0.0.1:{listening.port}/`)
+	print("client, endless head", ok, string.find(tostring(problem), "more than", 1, true) != nil)
+	listening:close()
+}
+{
+	const listening = Recording(Switching, function(socket: net.Socket) {
+		task.wait(0.6)
+		socket:write(Frame(129, "late", false))
+		// The client's close, answered with a code of the server's.
+		socket:read(8)
+		socket:write(Frame(136, string.pack(">I2", 1001) .. "bye", false))
+	})
+	const ws = websocket.connect(`ws://127.0.0.1:{listening.port}/`, { timeout = 0.3 })
+	const message = ws:receive()
+	print("client, quiet after the handshake", if (message != nil) message.data else "nil")
+	ws:close()
+	print("client, the server's close", ws.closeCode, ws.closeReason)
+	listening:close()
+}
+// What the client would send that could end a header or the request line
+// early is refused before anything is sent.
+type Refused = { name: string, url: string, options: websocket.ConnectOptions }
+const refusals: { Refused } = {
+	{ name = "header value", url = "ws://127.0.0.1:1/", options = { headers = { ["X-A"] = "1\r\nX-Injected: yes" } } },
+	{ name = "header name", url = "ws://127.0.0.1:1/", options = { headers = { ["X-B\r\nX-Injected: yes"] = "1" } } },
+	{ name = "protocol", url = "ws://127.0.0.1:1/", options = { protocols = { "chat\r\nX-Injected: yes" } } },
+	{ name = "target", url = "ws://127.0.0.1:1/echo HTTP/1.1\r\nX-Injected: yes", options = {} },
+}
+for (_, case in refusals) {
+	const ok, problem = pcall(websocket.connect, case.url, case.options)
+	print("client refuses", case.name, ok, (string.gsub(string.match(tostring(problem), "websocket%.connect: (.*)$") or "", "[\r\n]", " ")))
+}
+{
+	const listening = Recording(Switching, Nothing)
+	const ws = websocket.connect(`ws://127.0.0.1:{listening.port}/`)
+	print("close 1005", pcall(function() {
+		ws:close(1005)
+	}))
+	print("close, reason not UTF-8", pcall(function() {
+		ws:close(1000, "\255")
+	}))
+	ws:close()
+	listening:close()
+}
+
 // close() closes the connections waiting for their next request at once.
 {
 	const socket = net.connect("127.0.0.1", running.port)

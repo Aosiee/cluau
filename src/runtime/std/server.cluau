@@ -10,7 +10,9 @@
 // serve returns at once: the server runs in tasks, so it goes on after the
 // script's last line (until it is closed, or Ctrl-C). A handler may answer
 // with a table (status, headers, body), a string (200, text), or nil
-// (404); an error in it is a 500, with the error on stderr.
+// (404); an error in it, or an answer of another kind, is a 500, with the
+// error on stderr. Nothing a client sends, and nothing a handler answers,
+// ends the server: an error on one connection ends that connection.
 
 const net = require("@std/net")
 const task = require("@std/task")
@@ -23,6 +25,7 @@ export type Request = {
 	method: string,
 	path: string,         // without the query, decoded
 	target: string,       // as the request line gave it
+	version: string,      // "1.1" or "1.0"
 	query: { [string]: string },
 	headers: { [string]: string }, // names in lowercase
 	body: string,
@@ -31,7 +34,17 @@ export type Request = {
 	remotePort: number,
 	socket: net.Socket,
 }
-export type Response = { status: number?, headers: { [string]: string }?, body: (string | buffer)? }
+// A file files() answers with: sent as it is read, not read whole first.
+class FileBody {
+	File: fs.File = nil :: any // allow-any: given by the constructor
+	Size: number = 0
+	function Init(file: fs.File, size: number) {
+		self.File = file
+		self.Size = size
+	}
+}
+
+export type Response = { status: number?, headers: { [string]: string }?, body: (string | buffer | FileBody)? }
 export type Answer = Response | string | nil
 export type Handler = (request: Request) -> Answer
 export type Options = {
@@ -40,20 +53,35 @@ export type Options = {
 	tls: { certFile: string, keyFile: string }?,
 	maxBody: number?,   // bytes a request's body may have (16 MiB by default)
 	idle: number?,      // seconds a connection may wait between requests (60)
+	headTimeout: number?, // seconds a request's head may take from its first byte (30; 0: no limit)
 }
 
 const kReasons: { [number]: string } = {
 	[101] = "Switching Protocols", [200] = "OK", [201] = "Created", [204] = "No Content", [301] = "Moved Permanently", [302] = "Found",
 	[304] = "Not Modified", [400] = "Bad Request", [401] = "Unauthorized", [403] = "Forbidden", [404] = "Not Found",
 	[405] = "Method Not Allowed", [408] = "Request Timeout", [413] = "Content Too Large", [414] = "URI Too Long",
-	[417] = "Expectation Failed", [431] = "Request Header Fields Too Large", [500] = "Internal Server Error",
-	[501] = "Not Implemented", [503] = "Service Unavailable",
+	[417] = "Expectation Failed", [426] = "Upgrade Required", [431] = "Request Header Fields Too Large",
+	[500] = "Internal Server Error", [501] = "Not Implemented", [503] = "Service Unavailable",
+	[505] = "HTTP Version Not Supported",
 }
 
 // The most a line of a request's head may have, and the whole head (its
 // request line and headers).
 const kLineLimit = 64 * 1024
 const kHeadLimit = 256 * 1024
+
+// The headers a handler's answer may not give: the server frames the
+// answer itself, and these belong to one connection, not to the answer
+// (a relayed answer's Transfer-Encoding would contradict its framing).
+const kFraming: { [string]: boolean } = {
+	["content-length"] = true, connection = true, ["transfer-encoding"] = true, te = true, trailer = true, upgrade = true,
+	["keep-alive"] = true,
+}
+
+// How much of a body is written at a time: a client that reads slowly
+// holds this much of the server's memory, and each piece must be taken
+// within the connection's idle time.
+const kSlice = 256 * 1024
 
 // %XX (and + in a query) back to their characters.
 const Decode = function(text: string, query: boolean): string {
@@ -103,7 +131,8 @@ const Fail = function(status: number, message: string): never {
 }
 
 // A line of a request's head or of a chunked body's framing, of at most
-// `limit` bytes: a longer one is answered with `status` and `message`.
+// `limit` bytes: a longer one is answered with `status` and `message`, and
+// a head that is not in by its deadline with 408.
 const ReadLine = function(socket: net.Socket, limit: number, status: number, message: string): string? {
 	const ok, line = pcall(function(): string? {
 		return socket:readLine(limit)
@@ -112,9 +141,31 @@ const ReadLine = function(socket: net.Socket, limit: number, status: number, mes
 		if (string.find(tostring(line), "longer than", 1, true) != nil) {
 			Fail(status, message)
 		}
+		if (string.find(tostring(line), "setDeadline", 1, true) != nil) {
+			Fail(408, "the request's head took too long")
+		}
 		error(line, 0)
 	}
 	return line
+}
+
+// A request's target in origin form (/path?query): an absolute one
+// (http://host/path) without its scheme and host.
+const OriginForm = function(target: string): string {
+	const rest = string.match(target, "^%a[%w+.-]*://[^/?#]*(.*)$")
+	if (rest == nil) {
+		return target
+	}
+	return if (string.sub(rest, 1, 1) == "/") rest else "/" .. rest
+}
+
+// A comma-separated list of tokens (Connection's), in lowercase.
+const Tokens = function(text: string?): { [string]: boolean } {
+	const tokens: { [string]: boolean } = {}
+	for (part in string.gmatch(string.lower(text or ""), "[^,]+")) {
+		tokens[string.match(part, "^[ \t]*(.-)[ \t]*$") or part] = true
+	}
+	return tokens
 }
 
 // A chunked body (its trailers read and left out); nil when it ends early.
@@ -169,11 +220,27 @@ const ReadChunked = function(socket: net.Socket, maxBody: number): string {
 	return table.concat(parts)
 }
 
-// The next request on the connection (nil when it closed between requests).
-// `busy` is called once its first line has arrived.
-const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()): Request? {
+// The next request on the connection (nil when it closed between requests),
+// and whether the connection may be kept after it. `busy` is called once
+// its first byte has arrived; from then its head (the request line and the
+// headers) has `headTimeout` seconds in all, however it arrives.
+const ReadRequest = function(socket: net.Socket, maxBody: number, headTimeout: number, busy: () -> ()): (Request?, boolean) {
+	const first = socket:read(1)
+	if (first == nil) {
+		return nil, false
+	}
+	busy()
+	if (headTimeout > 0) {
+		socket:setDeadline(headTimeout)
+	}
 	const tooLong = `a request line of more than {kLineLimit} bytes`
-	let line = ReadLine(socket, kLineLimit, 414, tooLong)
+	let line: string? = ""
+	if (first == "\r") {
+		const rest = ReadLine(socket, kLineLimit - 1, 414, tooLong)
+		line = if (rest == "") "" else "\r" .. (rest or "")
+	} else if (first != "\n") {
+		line = first .. (ReadLine(socket, kLineLimit - 1, 414, tooLong) or "")
+	}
 	// Browsers may send an empty line between requests.
 	let blank = 0
 	while (line == "" && blank < 16) {
@@ -181,22 +248,25 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()
 		line = ReadLine(socket, kLineLimit, 414, tooLong)
 	}
 	if (line == nil) {
-		return nil
+		return nil, false
 	}
-	busy()
 	const method, target, version = string.match(line, "^(%u+) (%S+) HTTP/(%d%.%d)$")
 	if (method == nil || target == nil || version == nil) {
 		Fail(400, "a request line is METHOD /path HTTP/1.1")
 	}
+	if (version != "1.1" && version != "1.0") {
+		Fail(505, `HTTP/{version} (this server speaks HTTP/1.1 and 1.0)`)
+	}
 	const headers: { [string]: string } = {}
 	let count = 0
+	let hosts = 0
 	let head = #line
 	while (true) {
 		const room = kHeadLimit - head
 		const header = if (room >= kLineLimit) ReadLine(socket, kLineLimit, 431, `a header line of more than {kLineLimit} bytes`)
 			else ReadLine(socket, room + 1, 431, `headers of more than {kHeadLimit} bytes`)
 		if (header == nil) {
-			return nil
+			return nil, false
 		}
 		if (header == "") {
 			break
@@ -209,13 +279,28 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()
 		if (count > 100) {
 			Fail(431, "more than 100 headers")
 		}
-		const name, value = string.match(header, "^([^:%s]+):%s*(.-)%s*$")
+		// A name is a token; white space around a value is spaces and tabs
+		// only, and a value has no control characters (CR, NUL) but tabs.
+		const name, value = string.match(header, "^([%w!#$%%&'*+%-.^_`|~]+):[ \t]*(.-)[ \t]*$")
 		if (name == nil || value == nil) {
 			Fail(400, "a header is Name: value")
 		}
+		if (string.find(value, "[%z\1-\8\10-\31\127]") != nil) {
+			Fail(400, `the {name} header's value has a control character in it`)
+		}
 		const key = string.lower(name)
+		if (key == "host") {
+			hosts += 1
+		}
 		headers[key] = if (headers[key] != nil) headers[key] .. ", " .. value else value
 	}
+	// An HTTP/1.1 request names its host, once.
+	if (version == "1.1" && hosts != 1) {
+		Fail(400, if (hosts == 0) "an HTTP/1.1 request has a Host header" else "a request has one Host header")
+	}
+	socket:setDeadline(nil)
+	const connection = Tokens(headers["connection"])
+	let keep = if (version == "1.1") !connection["close"] else connection["keep-alive"] == true && !connection["close"]
 	if (version == "1.0" && headers["connection"] == nil) {
 		headers["connection"] = "close"
 	}
@@ -231,7 +316,7 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()
 		}
 		const codings: { string } = {}
 		for (coding in string.gmatch(string.lower(encoding), "[^,]+")) {
-			table.insert(codings, string.match(coding, "^%s*(.-)%s*$") or coding)
+			table.insert(codings, string.match(coding, "^[ \t]*(.-)[ \t]*$") or coding)
 		}
 		if (codings[#codings] != "chunked") {
 			Fail(400, "a Transfer-Encoding ends with chunked")
@@ -240,10 +325,15 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()
 			Fail(501, `Transfer-Encoding {encoding} (only chunked is understood)`)
 		}
 		chunked = true
+		// An HTTP/1.0 message cannot be framed so (RFC 9112 6.1): it is
+		// read, and the connection closes after it.
+		if (version == "1.0") {
+			keep = false
+		}
 	} else if (declared != nil) {
 		// Digits only; repeated, the same number each time.
 		for (part in string.gmatch(declared .. ",", "([^,]*),")) {
-			const digits = string.match(part, "^%s*(%d+)%s*$")
+			const digits = string.match(part, "^[ \t]*(%d+)[ \t]*$")
 			if (digits == nil) {
 				Fail(400, "Content-Length is a number of bytes")
 			}
@@ -273,11 +363,13 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()
 	} else if (length != nil && length > 0) {
 		body = Exactly(socket, length) or Fail(400, `the body ends before its {length} bytes`)
 	}
-	const rawPath, rawQuery = string.match(target, "^([^?]*)%??(.*)$")
+	const origin = OriginForm(target)
+	const rawPath, rawQuery = string.match(origin, "^([^?]*)%??(.*)$")
 	return {
 		method = method,
-		path = Decode(rawPath or target, false),
+		path = Decode(rawPath or origin, false),
 		target = target,
+		version = version,
 		query = ParseQuery(rawQuery or ""),
 		headers = headers,
 		body = body,
@@ -285,66 +377,153 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, busy: () -> ()
 		remoteHost = socket.remoteHost,
 		remotePort = socket.remotePort,
 		socket = socket,
-	}
+	}, keep
 }
 
-// A response's headers are names and values that cannot end the header
-// they are in (no line break), so a handler cannot add a header or a body
-// it did not mean to.
-const CheckHeaders = function(headers: { [string]: string }) {
-	for (name, value in headers) {
-		if (type(name) != "string" || string.find(name, "^[%w!#$%%&'*+%-.^_`|~]+$") == nil) {
+// A handler's answer as a response, checked: a status from 200 to 999; a
+// body that is a string, a buffer or a file; headers whose names are header
+// names and whose values (strings or numbers) cannot end the header they are
+// in (no line break), so a handler cannot add a header or a body it did not
+// mean to. Anything else is an error, which the server answers with a 500.
+const Prepare = function(answer: unknown): Response {
+	if (answer == nil) {
+		return { status = 404, body = "Not Found" }
+	}
+	if (type(answer) == "string") {
+		return { status = 200, body = answer :: string }
+	}
+	if (type(answer) != "table") {
+		error(`server: the handler answered with a {typeof(answer)} (a table, a string or nil)`, 0)
+	}
+	const response = answer :: Response
+	const status = response.status
+	if (status != nil && (type(status) != "number" || status != math.floor(status) || status < 200 || status > 999)) {
+		error(`server: the status {repr(status)} is not a whole number from 200 to 999`, 0)
+	}
+	const body: unknown = response.body
+	if (body != nil && type(body) != "string" && type(body) != "buffer" && getmetatable(body :: any) != FileBody) {
+		error(`server: the body is a {typeof(body)} (a string or a buffer)`, 0)
+	}
+	const headers: unknown = response.headers
+	if (headers != nil && type(headers) != "table") {
+		error(`server: the headers are a {typeof(headers)} (a table of names and values)`, 0)
+	}
+	for (name, value in (headers or {}) :: { [unknown]: unknown }) {
+		if (type(name) != "string" || string.find(name :: string, "^[%w!#$%%&'*+%-.^_`|~]+$") == nil) {
 			error(`server: '{tostring(name)}' is not a header name`, 0)
+		}
+		if (type(value) != "string" && type(value) != "number") {
+			error(`server: the {name} header's value is a {typeof(value)} (a string)`, 0)
 		}
 		if (string.find(tostring(value), "[\r\n%z]") != nil) {
 			error(`server: the {name} header's value has a line break in it`, 0)
 		}
 	}
+	return response
 }
 
-const Write = function(socket: net.Socket, request: Request?, response: Response, keepAlive: boolean) {
+// Writes `count` bytes of a body from `piece(offset, count)`, a slice at a
+// time, each within `idle` seconds (0: no limit).
+const WriteSlices = function(socket: net.Socket, size: number, idle: number, piece: (offset: number, count: number) -> string) {
+	let sent = 0
+	while (sent < size) {
+		const count = math.min(kSlice, size - sent)
+		const data = piece(sent, count)
+		if (#data != count) {
+			error("server: the file ended before its size", 0)
+		}
+		if (idle > 0) {
+			socket:setDeadline(idle)
+		}
+		socket:write(data)
+		sent += count
+	}
+	socket:setDeadline(nil)
+}
+
+// Sends a prepared response: Content-Length (none for a 204 or a 304, which
+// have no body), and Connection; the body, if any, a slice at a time.
+const Write = function(socket: net.Socket, request: Request?, response: Response, keepAlive: boolean, idle: number) {
 	const status = response.status or 200
 	const given = response.body
-	const body = if (type(given) == "buffer") buffer.tostring(given) else (given :: string?) or ""
+	const file = if (getmetatable(given :: any) == FileBody) given :: FileBody else nil
+	const size = if (file != nil) file.Size else if (type(given) == "buffer") buffer.len(given) else #((given :: string?) or "")
+	const bodiless = status == 204 || status == 304
 	const lines = { `HTTP/1.1 {status} {kReasons[status] or "Status"}` }
-	const headers = response.headers or {}
 	let typed = false
-	CheckHeaders(headers)
-	for (name, value in headers) {
+	for (name, value in response.headers or {}) {
 		const lower = string.lower(name)
-		if (lower != "content-length" && lower != "connection") {
+		if (!kFraming[lower]) {
 			table.insert(lines, `{name}: {value}`)
 		}
 		typed = typed || lower == "content-type"
 	}
-	if (!typed && #body > 0) {
-		table.insert(lines, "Content-Type: text/plain; charset=utf-8")
+	if (!bodiless) {
+		if (!typed && size > 0) {
+			table.insert(lines, "Content-Type: text/plain; charset=utf-8")
+		}
+		table.insert(lines, `Content-Length: {size}`)
 	}
-	table.insert(lines, `Content-Length: {#body}`)
 	table.insert(lines, if (keepAlive) "Connection: keep-alive" else "Connection: close")
 	const head = table.concat(lines, "\r\n") .. "\r\n\r\n"
-	if (request != nil && request.method == "HEAD") {
+	if (bodiless || size == 0 || (request != nil && request.method == "HEAD")) {
 		socket:write(head)
+	} else if (file != nil) {
+		socket:write(head)
+		WriteSlices(socket, size, idle, function(offset: number, count: number): string {
+			return file.File:read(count) or ""
+		})
+	} else if (type(given) == "buffer") {
+		socket:write(head)
+		WriteSlices(socket, size, idle, function(offset: number, count: number): string {
+			return buffer.readstring(given, offset, count)
+		})
+	} else if (size <= kSlice) {
+		socket:write(head, given :: string)
 	} else {
-		socket:write(head, body)
+		socket:write(head)
+		WriteSlices(socket, size, idle, function(offset: number, count: number): string {
+			return string.sub(given :: string, offset + 1, offset + count)
+		})
+	}
+}
+
+// A file body is closed once it is sent (or not).
+const Done = function(response: Response?) {
+	const given = if (response != nil) response.body else nil
+	if (getmetatable(given :: any) == FileBody) {
+		pcall(function() {
+			(given :: FileBody).File:close()
+		})
 	}
 }
 
 // What upgrade() answers with: the connection becomes a WebSocket.
 class Upgrade {
 	Run: ((ws: websocket.WebSocket) -> ())? = nil
-	function Init(run: (ws: websocket.WebSocket) -> ()) {
+	Accept: string = "" // the handshake's answer to the request's key
+	function Init(run: (ws: websocket.WebSocket) -> (), accept: string) {
 		self.Run = run
+		self.Accept = accept
 	}
 }
 
 // A request's answer that makes the connection a WebSocket: `run` gets it
-// (and the connection ends when run returns).
+// (and the connection ends when run returns). The request is checked as
+// RFC 6455 4.2.1 has it: a GET of HTTP/1.1, Upgrade: websocket, Connection:
+// Upgrade, a key of 16 bytes in base64 (400 otherwise), and version 13 (426
+// otherwise, naming it).
 const upgrade = function(request: Request, run: (ws: websocket.WebSocket) -> ()): Answer {
-	if (string.lower(request.headers["upgrade"] or "") != "websocket" || request.headers["sec-websocket-key"] == nil) {
-		return { status = 400, body = "a WebSocket request (Upgrade: websocket)" }
+	const key = request.headers["sec-websocket-key"] or ""
+	if (request.method != "GET" || request.version != "1.1" || !Tokens(request.headers["upgrade"])["websocket"] ||
+		!Tokens(request.headers["connection"])["upgrade"] || #key != 24 || string.find(key, "^[%w+/]+==$") == nil) {
+			return { status = 400, body = "a WebSocket request (GET, HTTP/1.1, Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Key)" }
+		}
+	if (request.headers["sec-websocket-version"] != "13") {
+		return { status = 426, headers = { ["Sec-WebSocket-Version"] = "13" }, body = "WebSocket version 13" }
 	}
-	return Upgrade(run) :: any // allow-any: an answer serve knows
+	// An error in a build without @std/crypto: the handler's, so a 500.
+	return Upgrade(run, websocket._accept(key)) :: any // allow-any: an answer serve knows
 }
 
 class Running {
@@ -377,12 +556,12 @@ class Running {
 }
 
 // After answering a request that was not read to its end: what the client
-// is still sending is read and dropped for a moment before closing. Closing
-// with it unread would reset the connection, and the client could lose the
-// answer.
+// is still sending is read and dropped for a moment (half a second in all)
+// before closing. Closing with it unread would reset the connection, and the
+// client could lose the answer.
 const Linger = function(socket: net.Socket) {
 	pcall(function() {
-		socket:setTimeout(0.5)
+		socket:setDeadline(0.5)
 		let dropped = 0
 		while (dropped < 1024 * 1024) {
 			const chunk = socket:read()
@@ -394,12 +573,23 @@ const Linger = function(socket: net.Socket) {
 	})
 }
 
-const Serve = function(socket: net.Socket, handler: Handler, options: Options, running: Running) {
-	socket:setTimeout(options.idle or 60)
+// The 500 for a handler's error (or answer it cannot give), with the error
+// on stderr.
+const Broken = function(socket: net.Socket, request: Request, problem: unknown, idle: number) {
+	io.writeError(`server: {request.method} {request.path}: {tostring(problem)}\n`)
+	pcall(Write, socket, request, { status = 500, body = "Internal Server Error" }, false, idle)
+}
+
+// A connection's requests, one after another, until it closes, a request
+// asks it to, or one cannot be answered.
+const Connection = function(socket: net.Socket, handler: Handler, options: Options, running: Running) {
+	const idle = options.idle or 60
+	socket:setTimeout(idle)
 	const maxBody = options.maxBody or 16 * 1024 * 1024
+	const headTimeout = options.headTimeout or 30
 	while (!running.Closed) {
 		running.Idle[socket] = true
-		const read, request = pcall(ReadRequest, socket, maxBody, function() {
+		const read, request, keep = pcall(ReadRequest, socket, maxBody, headTimeout, function() {
 			running.Idle[socket] = nil
 		})
 		running.Idle[socket] = nil
@@ -407,26 +597,31 @@ const Serve = function(socket: net.Socket, handler: Handler, options: Options, r
 			// A broken request is answered; a connection gone quiet just ends.
 			if (typeof(request) == "table" && getmetatable(request) == Failure) {
 				const failure = request :: Failure
-				pcall(Write, socket, nil, { status = failure.Status, body = failure.Message }, false)
+				socket:setDeadline(nil) // the head's, which may be what passed
+				pcall(Write, socket, nil, { status = failure.Status, body = failure.Message }, false, idle)
 				Linger(socket)
 			}
-			break
+			return
 		}
 		if (request == nil) {
-			break
+			return
 		}
-		const keepAlive = string.lower(request.headers["connection"] or "") != "close"
+		const keepAlive = keep :: boolean
 		const answered, answer = pcall(handler, request)
 		if (!answered) {
-			io.writeError(`server: {request.method} {request.path}: {tostring(answer)}\n`)
-			pcall(Write, socket, request, { status = 500, body = "Internal Server Error" }, false)
-			break
+			Broken(socket, request, answer, idle)
+			return
 		}
 		if (typeof(answer) == "table" && getmetatable(answer) == Upgrade) {
 			const up = answer :: Upgrade
-			const key = request.headers["sec-websocket-key"] or ""
-			socket:write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ",
-				websocket._accept(key), "\r\n\r\n")
+			// The client may be gone already: that connection just ends.
+			const switched = pcall(function() {
+				socket:write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", up.Accept,
+					"\r\n\r\n")
+			})
+			if (!switched) {
+				return
+			}
 			socket:setTimeout(0)
 			const ws = websocket._fromSocket(socket)
 			const ran, problem = pcall(up.Run :: (ws: websocket.WebSocket) -> (), ws)
@@ -438,24 +633,26 @@ const Serve = function(socket: net.Socket, handler: Handler, options: Options, r
 			})
 			return
 		}
-		let response: Response
-		if (answer == nil) {
-			response = { status = 404, body = "Not Found" }
-		} else if (type(answer) == "string") {
-			response = { status = 200, body = answer }
-		} else {
-			response = answer :: Response
+		const prepared, response = pcall(Prepare, answer)
+		if (!prepared) {
+			Broken(socket, request, response, idle)
+			return
 		}
-		const valid, problem = pcall(CheckHeaders, response.headers or {})
-		if (!valid) {
-			io.writeError(`server: {request.method} {request.path}: {tostring(problem)}\n`)
-			pcall(Write, socket, request, { status = 500, body = "Internal Server Error" }, false)
-			break
-		}
-		const wrote = pcall(Write, socket, request, response, keepAlive && !running.Closed)
+		const wrote = pcall(Write, socket, request, response, keepAlive && !running.Closed, idle)
+		Done(response)
 		if (!wrote || !keepAlive) {
-			break
+			return
 		}
+	}
+}
+
+// A connection's task: whatever goes wrong on it ends it, not the server
+// (an error in a task would end the script).
+const Serve = function(socket: net.Socket, handler: Handler, options: Options, running: Running) {
+	const ok, problem = pcall(Connection, socket, handler, options, running)
+	running.Idle[socket] = nil
+	if (!ok) {
+		io.writeError(`server: a connection from {socket.remoteHost}: {tostring(problem)}\n`)
 	}
 	pcall(function() {
 		socket:close()
@@ -531,7 +728,7 @@ class Router {
 	function handle(request: Request): Answer {
 		// The path's parts as the request wrote them, each decoded after, so
 		// that /users/a%2Fb has the one part a/b.
-		const raw = string.match(request.target, "^/[^?]*")
+		const raw = string.match(OriginForm(request.target), "^/[^?]*")
 		const source = if (raw != nil && Decode(raw, false) == request.path) raw else nil
 		const parts: { string } = {}
 		for (part in string.gmatch(source or request.path, "[^/]+")) {
@@ -641,8 +838,15 @@ const files = function(directory: string): Handler {
 		if (!fs.isFile(file) || !Inside(file, directory)) {
 			return nil
 		}
+		// Sent as it is read: a large file is never held whole.
+		const opened, handle = pcall(fs.open, file)
+		if (!opened) {
+			return nil
+		}
+		const size = handle:seek(0, "end")
+		handle:seek(0, "set")
 		const extension = string.lower(string.match(file, "%.([^./\\]+)$") or "")
-		return { status = 200, headers = { ["content-type"] = kTypes[extension] or "application/octet-stream" }, body = fs.readBuffer(file) }
+		return { status = 200, headers = { ["content-type"] = kTypes[extension] or "application/octet-stream" }, body = FileBody(handle, size) }
 	}
 }
 

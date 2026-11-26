@@ -1,0 +1,188 @@
+// @std/server against what can go wrong on either side of it: handlers
+// that answer with something other than an answer, answers relayed with
+// their framing headers, statuses without a body, bodies larger than a
+// write, requests that bend HTTP/1.1, heads that arrive too slowly, and
+// WebSocket requests that are not quite one. The server keeps serving
+// through all of it.
+const server = require("@std/server")
+const websocket = require("@std/websocket")
+const net = require("@std/net")
+const task = require("@std/task")
+const fs = require("@std/fs")
+const path = require("@std/path")
+const time = require("@std/time")
+const io = require("@std/io")
+
+const site = path.join(fs.tempDir(), `cluau-web-answers-{math.floor(time.now() * 1000)}`)
+fs.mkdir(site)
+// A file of several write slices, each byte telling its place.
+const pieces: { string } = {}
+for (i = 0, 49999) {
+	table.insert(pieces, string.format("%07d\n", i))
+}
+const bigFile = table.concat(pieces) .. "end"
+fs.write(path.join(site, "big.txt"), bigFile)
+
+// Wrong answers, each a 500 with what was wrong on stderr.
+const wrong: { [string]: unknown } = {
+	number = 404,
+	boolean = true,
+	["function"] = print,
+	["body number"] = { body = 123 },
+	["body table"] = { body = {} },
+	["header table"] = { headers = { ["x-t"] = {} }, body = "h" },
+	["headers string"] = { headers = "x", body = "h" },
+	["status fraction"] = { status = 200.5, body = "s" },
+	["status line"] = { status = "200 OK\r\nSet-Cookie: evil=1\r\nX:", body = "s" },
+	["status 99"] = { status = 99, body = "s" },
+}
+
+const routes = server.router()
+routes:get("/wrong/:kind", function(request: server.Request): server.Answer {
+	io.flush()
+	return wrong[request.params.kind] :: any // allow-any: wrong answers on purpose
+})
+routes:get("/relay", function(request: server.Request): server.Answer {
+	return {
+		headers = {
+			["transfer-encoding"] = "chunked", te = "trailers", trailer = "x", upgrade = "h2c", ["keep-alive"] = "timeout=5",
+			["content-length"] = "99", ["x-kept"] = 7 :: any, // allow-any: a number as a header's value
+		},
+		body = "hello",
+	}
+})
+routes:get("/status/:code", function(request: server.Request): server.Answer {
+	return { status = tonumber(request.params.code), body = "a body that is not sent" }
+})
+routes:get("/big", function(request: server.Request): server.Answer {
+	return bigFile
+})
+routes:get("/bigbuffer", function(request: server.Request): server.Answer {
+	return { body = buffer.fromstring(bigFile) }
+})
+routes:get("/static/*", server.files(site))
+routes:get("/echo", function(request: server.Request): server.Answer {
+	return `{request.method} {request.path} {request.query.a or "-"} HTTP/{request.version}`
+})
+routes:post("/echo", function(request: server.Request): server.Answer {
+	return `{request.version} {request.body}`
+})
+routes:get("/gone", function(request: server.Request): server.Answer {
+	request.socket:close()
+	return "nobody reads this"
+})
+routes:get("/ws", function(request: server.Request): server.Answer {
+	return server.upgrade(request, function(ws: websocket.WebSocket) {
+		for (message in ws:messages()) {
+			ws:send(message.data)
+		}
+	})
+})
+routes:get("/ws-gone", function(request: server.Request): server.Answer {
+	// The client is gone before the 101 goes out.
+	request.socket:close()
+	return server.upgrade(request, function(ws: websocket.WebSocket) {})
+})
+const running = server.serve({ port = 0, headTimeout = 1 }, routes:handler())
+
+// What the server answers `data` with: the head (its lines joined), and the
+// body's length and its last bytes.
+const Exchange = function(data: string): string {
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:setTimeout(5)
+	socket:write(data)
+	const ok, answer = pcall(function(): string {
+		return socket:readAll()
+	})
+	socket:close()
+	if (!ok) {
+		return `(no answer: {answer})`
+	}
+	const head, body = string.match(answer, "^(.-)\r\n\r\n(.*)$")
+	if (head == nil || body == nil) {
+		return `(no head: {repr(answer)})`
+	}
+	return `{string.gsub(head, "\r\n", " | ")} || {#body}: {repr(string.sub(body, -12))}`
+}
+const Get = function(target: string): string {
+	return Exchange(`GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)
+}
+
+const kinds: { string } = {}
+for (kind in wrong) {
+	table.insert(kinds, kind)
+}
+table.sort(kinds)
+for (_, kind in kinds) {
+	print(`wrong {kind}`, Get(`/wrong/{string.gsub(kind, " ", "%%20")}`))
+	io.flush()
+}
+print("relay", Get("/relay"))
+for (_, code in { "204", "304", "201" }) {
+	print(`status {code}`, Get(`/status/{code}`))
+}
+print("big string", Get("/big"))
+print("big buffer", Get("/bigbuffer"))
+print("big file", Get("/static/big.txt"))
+print("big file, HEAD", Exchange("HEAD /static/big.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+print("gone", Get("/gone"))
+print("after gone", Get("/echo"))
+
+// The request line and headers, read as RFC 9112 has them.
+for (_, case in {
+	{ "absolute form", "GET http://x/echo?a=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" },
+	{ "HTTP/2.0", "GET /echo HTTP/2.0\r\nHost: x\r\n\r\n" },
+	{ "no Host", "GET /echo HTTP/1.1\r\nConnection: close\r\n\r\n" },
+	{ "two Hosts", "GET /echo HTTP/1.1\r\nHost: x\r\nHost: y\r\nConnection: close\r\n\r\n" },
+	{ "HTTP/1.0 without Host", "GET /echo HTTP/1.0\r\n\r\n" },
+	{ "vertical tab", "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\11\r\nConnection: close\r\n\r\n0\r\n\r\n" },
+	{ "CR in a value", "GET /echo HTTP/1.1\r\nHost: x\r\nX-A: a\rb\r\nConnection: close\r\n\r\n" },
+	{ "name not a token", "GET /echo HTTP/1.1\r\nHost: x\r\nX(A): 1\r\nConnection: close\r\n\r\n" },
+	{ "close in a list", "GET /echo HTTP/1.1\r\nHost: x\r\nConnection: close, TE\r\n\r\n" },
+	{ "1.0 keep-alive in a list", "GET /echo HTTP/1.0\r\nConnection: TE, keep-alive\r\n\r\nGET /echo?a=2 HTTP/1.0\r\n\r\n" },
+	{ "1.0 chunked, then closed", "POST /echo HTTP/1.0\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\nGET /echo HTTP/1.0\r\n\r\n" },
+}) {
+	print(case[1], Exchange(case[2]))
+}
+
+// A head that arrives a byte at a time is cut off by its deadline (408),
+// however often the bytes come (here a little longer than the deadline,
+// 1 second, then no more, so that the answer is not lost to a reset).
+{
+	const socket = net.connect("127.0.0.1", running.port)
+	socket:setTimeout(5)
+	const started = time.monotonic()
+	const answer = task.spawn(function(): string {
+		return socket:readAll()
+	})
+	pcall(function() {
+		for (_, byte in { string.byte("GET /echo HTTP/1.1\r\nX-Slow: abcdefghijklmnopqrstuvwxyz", 1, -1) }) {
+			if (time.monotonic() - started > 1.05) {
+				break
+			}
+			socket:write(string.char(byte))
+			task.wait(0.04)
+		}
+	})
+	const got = task.join(answer)
+	const took = time.monotonic() - started
+	print("slow head", string.match(got, "^[^\r]*"), took > 0.9 && took < 2.5)
+	socket:close()
+}
+
+// WebSocket requests: a good one, and those RFC 6455 refuses.
+const Upgrade = function(lines: string): string {
+	return Exchange(`GET /ws HTTP/1.1\r\nHost: x\r\n{lines}\r\n`)
+}
+const key = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+const ws = websocket.connect(`ws://127.0.0.1:{running.port}/ws`)
+ws:send("still serving")
+print("websocket", (ws:receive() :: websocket.Message).data)
+ws:close()
+print("websocket version 8", Upgrade(`Upgrade: websocket\r\nConnection: Upgrade\r\n{key}Sec-WebSocket-Version: 8\r\nConnection: close\r\n`))
+print("websocket short key", Upgrade("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: x\r\nSec-WebSocket-Version: 13\r\nConnection: close\r\n"))
+print("websocket no Connection", Upgrade(`Upgrade: websocket\r\n{key}Sec-WebSocket-Version: 13\r\nConnection: close\r\n`))
+print("websocket client gone", Exchange(`GET /ws-gone HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n{key}Sec-WebSocket-Version: 13\r\n\r\n`))
+print("still serving", Get("/echo"))
+running:close()
+fs.remove(site, true)

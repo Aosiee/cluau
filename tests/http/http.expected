@@ -21,4 +21,25 @@ error:	false	http.post: options.body and options.json are each a body: give one
 error:	false	http.get: GET file:///etc/passwd
 tasks:	hello	true
 https tasks:	hello,hello,hello,hello
+303 after PUT:	GET body="" type="" agent=cluau custom=""
+303 after DELETE:	GET body="" type="" agent=cluau custom=""
+301 after POST:	GET body="" type="" agent=cluau custom=""
+307 after PUT:	PUT body="kept" type="" agent=cluau custom=""
+same host:	GET 127.0.0.1 Accept=text/plain Authorization=Bearer secret X-Api-Key=secret
+other host:	GET localhost Accept=text/plain
+empty header:	GET 127.0.0.1 Accept=*/* X-Empty=
+refused:	false	http.get: options.headers: the X-A header's value has a line break or a NUL in it
+refused:	false	http.get: options.headers: 'X-B  X-Injected: yes' is not a header name
+refused:	false	http.request: options.method 'GET /evil HTTP/1.1  X-Injected: yes  X:' is not a method name
+refused:	false	http.get: the address has a NUL byte in it
+tiny timeout:	false	true	true
+password hidden:	false	true
+download after a redirect:	200	hello
+download onto a directory:	false	true	true
 exit: 0
+SSL_CERT_FILE=test-cert.pem
+http	true	hello
+net	true	connected
+SSL_CERT_FILE=missing.pem
+http	false	trusted certificates: SSL_CERT_FILE (missing.pem))
+net	false	no trusted certificates were found in SSL_CERT_FILE (missing.pem)

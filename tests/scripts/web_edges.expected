@@ -38,5 +38,22 @@ client, masked frame	nil	1002
 client, protocol not offered	false	true
 client, IPv6	Host: [::1]:<port>
 false	web_edges.cluau:241: websocket: a ping's data is at most 125 bytes, not 126
+websocket	close 1005	close 1002
+websocket	close 2999	close 1002
+websocket	close 3000	close 3000
+websocket	close reason not UTF-8	close 1007
+websocket	empty fragments	close 1009
+client, request line for	?x=1	GET /?x=1 HTTP/1.1
+client, request line for	/path?y=2#fragment	GET /path?y=2 HTTP/1.1
+client, 101 without Upgrade	false	true
+client, endless head	false	true
+client, quiet after the handshake	late
+client, the server's close	1001	bye
+client refuses	header value	false	options.headers: the X-A header's value is text with no line break
+client refuses	header name	false	options.headers: 'X-B  X-Injected: yes' is not a header name
+client refuses	protocol	false	'chat  X-Injected: yes' is not a protocol name
+client refuses	target	false	'ws://127.0.0.1:1/echo HTTP/1.1  X-Injected: yes' has white space or a control character in it
+close 1005	false	web_edges.cluau:355: websocket: 1005 is not a close code to send (1000 to 1003, 1007 to 1014, 3000 to 4999)
+close, reason not UTF-8	false	web_edges.cluau:358: websocket: a close's reason is UTF-8
 idle connection closed	nil	true
 exit: 0
