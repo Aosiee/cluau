@@ -1,4 +1,4 @@
-false	tar_edges.cluau:75: archive:extract: "..\0/..\0/escaped.txt" holds a NUL byte: nothing more extracted
+false	tar_edges.cluau:75: archive:extract: "..\000/..\000/escaped.txt" holds a NUL byte: nothing more extracted
 escaped	false	false
 pax size	"big.txt"	5	1600000000
 pax size	"next.txt"	3	1600000000
@@ -24,5 +24,5 @@ mode	nan	false	tar_edges.cluau:123: writer: the mode nan is not a whole number f
 mode	1.5	false	tar_edges.cluau:123: writer: the mode 1.5 is not a whole number from 0 to 0o7777777 (0644 is 420)
 mode kept	f	2097151
 mode kept	g	0
-false	tar_edges.cluau:131: writer: the name "a\0b" holds a NUL byte
+false	tar_edges.cluau:131: writer: the name "a\000b" holds a NUL byte
 exit: 0

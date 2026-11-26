@@ -53,8 +53,8 @@ false	encoding.fromHex: 'z' (at 1) is not a hex digit
 "z"
 "link"
 "reset"
-"\27"
-"a\27"
+"\027"
+"a\027"
 1
 false	process.setEnv: 'A=B' is not a variable name (a name is not empty and has no '=')
 false	process.setEnv: '' is not a variable name (a name is not empty and has no '=')

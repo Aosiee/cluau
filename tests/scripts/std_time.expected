@@ -29,7 +29,7 @@ false	time.fromParts: parts.month is a number (got string)
 "2016-12-31T23:59:60Z"	true	1483228800
 "2020-01-01T00:00:00.Z"	false	time.parse: expected the fraction's digits in '2020-01-01T00:00:00.Z'
 "2020-01-01T00:00:00,5Z"	true	1577836800.5
-"2020-01-01\0garbage"	false	invalid argument #1 to 'parse' (the text holds a NUL byte)
+"2020-01-01\000garbage"	false	invalid argument #1 to 'parse' (the text holds a NUL byte)
 1970-01-01 00:00:00 Thu Jan 001 %	+0000 UTC	true
 false	time.format: '%-' is not one of the conversions strftime has everywhere ('%%' writes a '%')
 false	time.format: '%k' is not one of the conversions strftime has everywhere ('%%' writes a '%')
