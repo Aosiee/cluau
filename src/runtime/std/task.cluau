@@ -30,11 +30,17 @@ export type Task<R...> = {
 	__returns: (...any) -> R...,
 }
 
+// What the tasks are kept by, whatever their functions return.
+type Handle = { done: boolean, cancelled: boolean }
+
+// What table.pack gives: a task's arguments, and what resuming it returned.
+type Packed = { n: number, [number]: unknown }
+
 type State = {
-	task: Task<any>,
+	task: Handle,
 	thread: thread,
 	started: boolean,
-	args: { any },
+	args: Packed,
 	waiters: { State },
 	wake: number,
 	order: number,
@@ -52,9 +58,9 @@ const onJobs: { State } = {}
 // The tasks still to finish; a finished one keeps only its results, and
 // both go with the task once nothing refers to it (a server makes a task
 // for each connection).
-const states: { [Task<any>]: State } = {}
-const known: { [Task<any>]: boolean } = setmetatable({}, { __mode = "k" }) :: any
-const resultsOf: { [Task<any>]: { any } } = setmetatable({}, { __mode = "k" }) :: any
+const states: { [Handle]: State } = {}
+const known = setmetatable({} :: { [Handle]: boolean }, { __mode = "k" })
+const resultsOf = setmetatable({} :: { [Handle]: Packed }, { __mode = "k" })
 const byThread: { [thread]: State } = {}
 // `since`: the count of finished jobs when RunUntil looked last (a job
 // finishing after that ends an idle wait).
@@ -62,9 +68,9 @@ const counter = { next = 0, since = 0 }
 // The last task that failed, and its error: an error that ends the script
 // is reported with that task's stack when it is this one (the runtime's).
 // `count` goes up with each failure.
-const failure: { message: any, thread: thread?, count: number } = { message = nil, thread = nil, count = 0 }
+const failure: { message: unknown, thread: thread?, count: number } = { message = nil, thread = nil, count = 0 }
 // What a task that cancels itself where it cannot yield raises to end.
-const cancelled = newproxy()
+const cancelled: unknown = newproxy() // allow-any: Luau types newproxy() as any; this is an opaque marker
 
 // Into `waiting`, kept latest first so the next due is the last: found by
 // halving, so many tasks cost little each.
@@ -103,7 +109,7 @@ const Finish = function(state: State) {
 // Runs the task until it waits or ends; its error is raised here.
 const Resume = function(state: State) {
 	const failures = failure.count
-	let results: { any }
+	let results: Packed
 	if (state.started) {
 		const with = state.resumeWith
 		state.resumeWith = nil
@@ -116,7 +122,7 @@ const Resume = function(state: State) {
 		// Cancelled while it ran (it ends with `cancelled`, or went on past a
 		// pcall): what it did since is dropped, and so is any job it started.
 		if (results[1] && results[2] == jobs.marker) {
-			jobs.forget(results[3])
+			jobs.forget(results[3] :: number)
 		}
 		return
 	}
@@ -137,7 +143,7 @@ const Resume = function(state: State) {
 		resultsOf[state.task] = results
 		Finish(state)
 	} else if (results[2] == jobs.marker) {
-		state.job = results[3]
+		state.job = results[3] :: number
 		table.insert(onJobs, state)
 	}
 }
@@ -231,8 +237,7 @@ const RunUntil = function(stop: () -> boolean, deadline: number?) {
 	}
 }
 
-const Make = function(fn: (...any) -> ...any, args: { any }): State {
-	const task: Task<any> = { done = false, cancelled = false, __returns = fn }
+const Make = function<R...>(task: Handle, fn: (...any) -> R..., args: Packed): State {
 	const state: State = {
 		task = task,
 		thread = coroutine.create(fn),
@@ -256,17 +261,17 @@ const Current = function(): State? {
 }
 
 // Starts `fn(...)` as a task now: it runs until it first waits.
-const spawn = function<R...>(fn: (...any) -> R..., ...: any): Task<R...> {
-	const state = Make(fn, table.pack(...))
-	Resume(state)
-	return state.task
+const spawn = function<R...>(fn: (...any) -> R..., ...: unknown): Task<R...> {
+	const task: Task<R...> = { done = false, cancelled = false, __returns = fn }
+	Resume(Make(task, fn, table.pack(...)))
+	return task
 }
 
 // Starts `fn(...)` as a task after `seconds`.
-const delay = function<R...>(seconds: number, fn: (...any) -> R..., ...: any): Task<R...> {
-	const state = Make(fn, table.pack(...))
-	Due(state, time.monotonic() + math.max(0, seconds))
-	return state.task
+const delay = function<R...>(seconds: number, fn: (...any) -> R..., ...: unknown): Task<R...> {
+	const task: Task<R...> = { done = false, cancelled = false, __returns = fn }
+	Due(Make(task, fn, table.pack(...)), time.monotonic() + math.max(0, seconds))
+	return task
 }
 
 // Waits `seconds` (none: until the other tasks due now have run), letting
@@ -315,11 +320,9 @@ const join = function<R...>(task: Task<R...>): R... {
 			}
 		}
 	}
-	const results = resultsOf[task]
-	if (results == nil) {
-		return
-	}
-	return table.unpack(results, 1, results.n)
+	// None for a task that was cancelled or failed.
+	const results = resultsOf[task] or { n = 0 }
+	return (table.unpack :: any)(results, 1, results.n) // allow-any: the results are kept untyped; Task<R...> gives their type
 }
 
 // Stops the task: it does not run again, and what joins it gets nothing.
@@ -351,7 +354,7 @@ const cancel = function<R...>(task: Task<R...>) {
 // The task running now (nil in the script's own code).
 const running = function(): Task<...unknown>? {
 	const state = Current()
-	return if (state != nil) state.task else nil
+	return if (state != nil) state.task :: Task<...unknown> else nil
 }
 
 // The runtime's, at the end of the script: the waiting tasks run to the end.

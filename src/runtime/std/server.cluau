@@ -130,6 +130,12 @@ const Fail = function(status: number, message: string): never {
 	error(Failure(status, message), 0)
 }
 
+// Whether `value` is an instance of the class `of` (FileBody, Failure,
+// Upgrade): whether that is its metatable.
+const IsInstance = function(value: unknown, of: unknown): boolean {
+	return getmetatable(value :: any) == of // allow-any: Luau types getmetatable for tables only; a handler may answer with any value
+}
+
 // A line of a request's head or of a chunked body's framing, of at most
 // `limit` bytes: a longer one is answered with `status` and `message`, and
 // a head that is not in by its deadline with 408.
@@ -175,12 +181,15 @@ const ReadChunked = function(socket: net.Socket, maxBody: number): string {
 	while (true) {
 		const sizeLine = ReadLine(socket, kLineLimit, 400, "a chunk's size line is too long")
 		if (sizeLine == nil) {
-			Fail(400, "the body ends before its last chunk")
+			return Fail(400, "the body ends before its last chunk")
 		}
 		// The size in hex, then perhaps ;extensions.
 		const hex = string.match(sizeLine, "^%x+")
-		const rest = string.sub(sizeLine, #(hex or "") + 1)
-		if (hex == nil || (rest != "" && string.find(rest, "^[ \t]*;") == nil)) {
+		if (hex == nil) {
+			return Fail(400, "a chunk's size is a hexadecimal number")
+		}
+		const rest = string.sub(sizeLine, #hex + 1)
+		if (rest != "" && string.find(rest, "^[ \t]*;") == nil) {
 			Fail(400, "a chunk's size is a hexadecimal number")
 		}
 		if (#hex > 12) {
@@ -210,7 +219,7 @@ const ReadChunked = function(socket: net.Socket, maxBody: number): string {
 		}
 		const data = Exactly(socket, chunk)
 		if (data == nil) {
-			Fail(400, "the body ends inside a chunk")
+			return Fail(400, "the body ends inside a chunk")
 		}
 		table.insert(parts, data)
 		if (ReadLine(socket, kLineLimit, 400, "a chunk does not end with a line break") != "") {
@@ -252,7 +261,7 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, headTimeout: n
 	}
 	const method, target, version = string.match(line, "^(%u+) (%S+) HTTP/(%d%.%d)$")
 	if (method == nil || target == nil || version == nil) {
-		Fail(400, "a request line is METHOD /path HTTP/1.1")
+		return Fail(400, "a request line is METHOD /path HTTP/1.1")
 	}
 	if (version != "1.1" && version != "1.0") {
 		Fail(505, `HTTP/{version} (this server speaks HTTP/1.1 and 1.0)`)
@@ -283,7 +292,7 @@ const ReadRequest = function(socket: net.Socket, maxBody: number, headTimeout: n
 		// only, and a value has no control characters (CR, NUL) but tabs.
 		const name, value = string.match(header, "^([%w!#$%%&'*+%-.^_`|~]+):[ \t]*(.-)[ \t]*$")
 		if (name == nil || value == nil) {
-			Fail(400, "a header is Name: value")
+			return Fail(400, "a header is Name: value")
 		}
 		if (string.find(value, "[%z\1-\8\10-\31\127]") != nil) {
 			Fail(400, `the {name} header's value has a control character in it`)
@@ -401,7 +410,7 @@ const Prepare = function(answer: unknown): Response {
 		error(`server: the status {repr(status)} is not a whole number from 200 to 999`, 0)
 	}
 	const body: unknown = response.body
-	if (body != nil && type(body) != "string" && type(body) != "buffer" && getmetatable(body :: any) != FileBody) {
+	if (body != nil && type(body) != "string" && type(body) != "buffer" && !IsInstance(body, FileBody)) {
 		error(`server: the body is a {typeof(body)} (a string or a buffer)`, 0)
 	}
 	const headers: unknown = response.headers
@@ -446,12 +455,13 @@ const WriteSlices = function(socket: net.Socket, size: number, idle: number, pie
 const Write = function(socket: net.Socket, request: Request?, response: Response, keepAlive: boolean, idle: number) {
 	const status = response.status or 200
 	const given = response.body
-	const file = if (getmetatable(given :: any) == FileBody) given :: FileBody else nil
+	const file = if (IsInstance(given, FileBody)) given :: FileBody else nil
 	const size = if (file != nil) file.Size else if (type(given) == "buffer") buffer.len(given) else #((given :: string?) or "")
 	const bodiless = status == 204 || status == 304
 	const lines = { `HTTP/1.1 {status} {kReasons[status] or "Status"}` }
 	let typed = false
-	for (name, value in response.headers or {}) {
+	const headers: { [string]: string } = response.headers or {}
+	for (name, value in headers) {
 		const lower = string.lower(name)
 		if (!kFraming[lower]) {
 			table.insert(lines, `{name}: {value}`)
@@ -491,7 +501,7 @@ const Write = function(socket: net.Socket, request: Request?, response: Response
 // A file body is closed once it is sent (or not).
 const Done = function(response: Response?) {
 	const given = if (response != nil) response.body else nil
-	if (getmetatable(given :: any) == FileBody) {
+	if (IsInstance(given, FileBody)) {
 		pcall(function() {
 			(given :: FileBody).File:close()
 		})
@@ -595,8 +605,9 @@ const Connection = function(socket: net.Socket, handler: Handler, options: Optio
 		running.Idle[socket] = nil
 		if (!read) {
 			// A broken request is answered; a connection gone quiet just ends.
-			if (typeof(request) == "table" && getmetatable(request) == Failure) {
-				const failure = request :: Failure
+			const problem: unknown = request
+			if (typeof(problem) == "table" && IsInstance(problem, Failure)) {
+				const failure = problem :: Failure
 				socket:setDeadline(nil) // the head's, which may be what passed
 				pcall(Write, socket, nil, { status = failure.Status, body = failure.Message }, false, idle)
 				Linger(socket)
@@ -607,13 +618,15 @@ const Connection = function(socket: net.Socket, handler: Handler, options: Optio
 			return
 		}
 		const keepAlive = keep :: boolean
+		// What the handler answered or raised: an Upgrade from upgrade() too.
 		const answered, answer = pcall(handler, request)
+		const result: unknown = answer
 		if (!answered) {
-			Broken(socket, request, answer, idle)
+			Broken(socket, request, result, idle)
 			return
 		}
-		if (typeof(answer) == "table" && getmetatable(answer) == Upgrade) {
-			const up = answer :: Upgrade
+		if (typeof(result) == "table" && IsInstance(result, Upgrade)) {
+			const up = result :: Upgrade
 			// The client may be gone already: that connection just ends.
 			const switched = pcall(function() {
 				socket:write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ", up.Accept,
@@ -624,7 +637,7 @@ const Connection = function(socket: net.Socket, handler: Handler, options: Optio
 			}
 			socket:setTimeout(0)
 			const ws = websocket._fromSocket(socket)
-			const ran, problem = pcall(up.Run :: (ws: websocket.WebSocket) -> (), ws)
+			const ran, problem = pcall(up.Run :: (ws: websocket.WebSocket) -> ...unknown, ws)
 			if (!ran) {
 				io.writeError(`server: the WebSocket at {request.path}: {tostring(problem)}\n`)
 			}
@@ -633,7 +646,7 @@ const Connection = function(socket: net.Socket, handler: Handler, options: Optio
 			})
 			return
 		}
-		const prepared, response = pcall(Prepare, answer)
+		const prepared, response = pcall(Prepare, result)
 		if (!prepared) {
 			Broken(socket, request, response, idle)
 			return
@@ -649,7 +662,8 @@ const Connection = function(socket: net.Socket, handler: Handler, options: Optio
 // A connection's task: whatever goes wrong on it ends it, not the server
 // (an error in a task would end the script).
 const Serve = function(socket: net.Socket, handler: Handler, options: Options, running: Running) {
-	const ok, problem = pcall(Connection, socket, handler, options, running)
+	// (Connection returns nothing, which pcall's type gives no error value.)
+	const ok, problem = pcall(Connection :: (net.Socket, Handler, Options, Running) -> ...unknown, socket, handler, options, running)
 	running.Idle[socket] = nil
 	if (!ok) {
 		io.writeError(`server: a connection from {socket.remoteHost}: {tostring(problem)}\n`)
@@ -661,7 +675,7 @@ const Serve = function(socket: net.Socket, handler: Handler, options: Options, r
 
 // Serves `handler` on options.host and options.port; returns at once.
 const serve = function(options: Options?, handler: Handler): Running {
-	const given = options or {}
+	const given: Options = options or {}
 	const listening = net.listen(given.host or "127.0.0.1", given.port or 8080, { tls = given.tls })
 	const running = Running(listening)
 	task.spawn(function() {

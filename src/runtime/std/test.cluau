@@ -34,16 +34,24 @@ const state = {
 	exit = nil :: ((number?) -> never)?,
 }
 
+// @std/task, and a task of it whatever its function returns (Task<R...>'s
+// shape): types only, as the module is loaded when the first case runs.
+type TaskModule = typeof(require("@std/task"))
+type Started = { done: boolean, cancelled: boolean, __returns: (...any) -> ...unknown }
+
 // @std/task, once a case has run (nil without it), and the tasks the case
 // running now has started, which it waits for before it is reported.
 const tasks = {
-	module = nil :: any,
-	started = nil :: { any }?,
+	module = nil :: TaskModule?,
+	started = nil :: { Started }?,
 }
+
+// debug.info with the options "sl": the source and the line.
+const SourceLine = debug.info :: (level: number, options: string) -> (string?, number?)
 
 // The line that called the assertion `depth` calls up (file:line).
 function Where(depth: number): string {
-	const source, line = debug.info(depth + 1, "sl")
+	const source, line = SourceLine(depth + 1, "sl")
 	if (source == nil || line == nil) {
 		return "?"
 	}
@@ -70,8 +78,8 @@ function Describe(problem: unknown): string {
 	if (type(problem) == "string") {
 		return problem :: string
 	}
-	const meta = getmetatable(problem :: any)
-	if (type(meta) == "table" && (meta :: any).__tostring != nil) {
+	const meta: unknown = getmetatable(problem :: any) // allow-any: Luau types getmetatable for tables only; an error can be any value
+	if (type(meta) == "table" && (meta :: { __tostring: unknown }).__tostring != nil) {
 		return tostring(problem)
 	}
 	return `an error that is not a string: {repr(problem)}`
@@ -79,26 +87,29 @@ function Describe(problem: unknown): string {
 
 // @std/task, loaded for the cases (blocking calls then wait the way they do
 // in any script with tasks); its spawn and delay note the tasks a case starts.
-function TaskModule(): any {
+function TaskModule(): TaskModule? {
 	if (tasks.module == nil) {
-		const loaded, module = pcall(require, "@std/task")
+		const loaded, module = pcall(function(): TaskModule {
+			return require("@std/task")
+		})
 		if (!loaded) {
 			return nil
 		}
 		tasks.module = module
 		const spawn = module.spawn
 		const delay = module.delay
-		local function Note(started: any): any {
+		local function Note<T>(started: T): T {
 			if (tasks.started != nil) {
-				table.insert(tasks.started :: { any }, started)
+				// Kept without its results' type (Luau widens no Task<R...>).
+				table.insert(tasks.started, (started :: unknown) :: Started)
 			}
 			return started
 		}
-		module.spawn = function(...: any): any {
-			return Note(spawn(...))
+		module.spawn = function(fn, ...: unknown) {
+			return Note(spawn(fn, ...))
 		}
-		module.delay = function(...: any): any {
-			return Note(delay(...))
+		module.delay = function(seconds, fn, ...: unknown) {
+			return Note(delay(seconds, fn, ...))
 		}
 	}
 	return tasks.module
@@ -107,7 +118,7 @@ function TaskModule(): any {
 // The tasks a case started (and those they started) run to their end; the
 // first error among them, or nil. After an error the rest are cancelled, and
 // so is a task that can never finish.
-function Settle(started: { any }, failed: boolean): unknown? {
+function Settle(started: { Started }, failed: boolean): unknown? {
 	const module = tasks.module
 	if (module == nil) {
 		return nil
@@ -179,9 +190,10 @@ function case(name: string, fn: () -> ()) {
 	}
 	TaskModule()
 	const outer = tasks.started
-	const started: { any } = {}
+	const started: { Started } = {}
 	tasks.started = started
-	const ok, raised = pcall(fn)
+	// (pcall's type gives a function returning nothing no error value.)
+	const ok, raised = pcall(fn :: () -> ...unknown)
 	// A task the case started that fails later is the case's failure, not
 	// that of whichever case is running then.
 	const late = Settle(started, !ok)
@@ -243,7 +255,7 @@ function near(actual: number, expected: number, tolerance: number?, message: str
 // `fn` raises an error (whose message contains `text`, when given); the
 // error's message.
 function raises(fn: () -> (), text: string?): string {
-	const completed, problem = pcall(fn)
+	const completed, problem = pcall(fn :: () -> ...unknown)
 	if (completed) {
 		return Fail(if (text != nil) `expected an error containing '{text}', but none was raised` else "expected an error, but none was raised", 2)
 	}

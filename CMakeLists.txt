@@ -437,6 +437,26 @@ if(CLUAU_BUILD_RUNTIME)
                 COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${script} -DMODE=check
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
         endforeach()
+        # The standard modules written in cluau pass `cluau check` themselves.
+        # One that names a module this build leaves out (in a type, or loaded
+        # only when needed) is left out with it.
+        set(cluau_std_needs_tar CLUAU_COMPRESS)
+        set(cluau_std_needs_websocket CLUAU_CRYPTO)
+        foreach(module ${CLUAU_STD_SOURCES})
+            get_filename_component(name ${module} NAME_WE)
+            set(cluau_test_missing "")
+            foreach(need IN LISTS cluau_std_needs_${name})
+                if(NOT ${need})
+                    set(cluau_test_missing ${need})
+                endif()
+            endforeach()
+            if(cluau_test_missing)
+                continue()
+            endif()
+            add_test(NAME check:std/${name}
+                COMMAND ${CMAKE_COMMAND} -DCLUAU=$<TARGET_FILE:cluau> -DSCRIPT=${module} -DMODE=check
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_script.cmake)
+        endforeach()
     endif()
 endif()
 

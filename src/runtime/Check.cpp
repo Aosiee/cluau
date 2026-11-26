@@ -159,7 +159,8 @@ return m :: {
 	marker: unknown,
 	done: (id: number) -> boolean,
 	pending: () -> number,
-	wait: (seconds: number?) -> (),
+	completed: () -> number,
+	wait: (seconds: number?, since: number?) -> (),
 	forget: (id: number) -> (),
 	register: (tasks: { [thread]: unknown }, runUntilJob: (id: number) -> ()) -> (),
 }

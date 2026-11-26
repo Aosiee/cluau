@@ -256,7 +256,7 @@ function ParseToml(text: string, file: string): { [string]: Table } {
 		if (key == nil || rest == nil) {
 			problem("expected `key = value` or `[section]`")
 		}
-		const name = string.gsub(key, "[\"']", "")
+		const name = string.gsub(key :: string, "[\"']", "")
 		// A value may go on over the next lines (an array, a """string""").
 		let source = rest :: string
 		let ok, value, after = pcall(ParseValue, source, 1)
@@ -295,16 +295,14 @@ function Quote(text: string): string {
 // The directory holding cluau.toml: the working directory or one above it.
 function FindProject(): string? {
 	let dir = process.cwd()
-	while (true) {
-		if (fs.isFile(path.join(dir, kProject))) {
-			return dir
-		}
+	while (!fs.isFile(path.join(dir, kProject))) {
 		const parent = path.dirname(dir)
 		if (parent == dir || parent == "") {
 			return nil
 		}
 		dir = parent
 	}
+	return dir
 }
 
 function RequireProject(): string {
@@ -447,7 +445,8 @@ function Dependencies(project: string, shown: string): { Dependency } {
 			Fail(`{shown}: [{section}] is not read: write it as {string.sub(section, 14)} = \{ git = "...", tag = "..." } under [dependencies]`)
 		}
 	}
-	for (name, spec in tables.dependencies or {}) {
+	const dependencies: Table = tables.dependencies or {}
+	for (name, spec in dependencies) {
 		if (!IsName(name)) {
 			Fail(`{shown}: '{name}' is not a package name (letters, digits, - and _)`)
 		}
@@ -600,7 +599,8 @@ function Git(args: { string }, cwd: string?): (boolean, string) {
 		table.insert(command, a)
 	}
 	// No prompts (a private or missing repository fails instead of waiting).
-	const ok, result = pcall(process.run, command, { cwd = cwd, stderr = "capture", env = { GIT_TERMINAL_PROMPT = "0" } })
+	const options: process.RunOptions = { cwd = cwd, stderr = "capture", env = { GIT_TERMINAL_PROMPT = "0" } }
+	const ok, result = pcall(process.run, command, options)
 	if (!ok) {
 		// The program not found, or the directory to run it in gone.
 		const reason = tostring(result)
@@ -655,7 +655,7 @@ function RemoteRefs(url: string): { [string]: string } {
 	}
 	const refs: { [string]: string } = {}
 	for (commit, name in string.gmatch(output, "(%x+)%s+([^\r\n]+)")) {
-		refs[name] = commit
+		refs[name :: string] = commit
 	}
 	return refs
 }
@@ -717,7 +717,7 @@ function Installed(project: string, name: string, commit: string): boolean {
 // `commit` of `url` into cluau_modules/<name>. With `onRef` (a branch, or
 // HEAD), the commit must be on it: that branch's history is fetched and the
 // commit looked for there.
-function Fetch(project: string, name: string, url: string, commit: string, onRef: string?) {
+function Fetch(project: string, name: string, url: string, commit: string, onRef: string?): () {
 	if (!IsCommit(commit)) {
 		return Fail(`{kLock}: {name}'s commit '{commit}' is not a commit id`)
 	}
@@ -869,7 +869,7 @@ function Init(args: { string }) {
 	}
 }
 
-function Add(project: string, args: { string }) {
+function Add(project: string, args: { string }): () {
 	let given: string? = nil
 	let name: string? = nil
 	let i = 1
@@ -947,7 +947,8 @@ function Add(project: string, args: { string }) {
 	}
 	EditDependency(project, package, spec)
 	Say(`added {package} ({url}{if (wanted != "HEAD") " " .. wanted else ""}) to {kProject}`)
-	const installed, problem = pcall(Install, project, { [package] = true })
+	// (Install returns nothing, which pcall's type gives no error value.)
+	const installed, problem = pcall(Install :: (string, { [string]: boolean }) -> ...unknown, project, { [package] = true })
 	const restore = undo
 	undo = nil
 	if (!installed) {
@@ -1015,7 +1016,7 @@ function main(args: { string }) {
 	local function Holding(run: (string, { string }) -> ()) {
 		const project = RequireProject()
 		Hold(project)
-		const ok, problem = pcall(run, project, rest)
+		const ok, problem = pcall(run :: (string, { string }) -> ...unknown, project, rest)
 		Release()
 		if (!ok) {
 			error(problem, 0)
