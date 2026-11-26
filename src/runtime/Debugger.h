@@ -37,6 +37,7 @@
 #include <atomic>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -312,7 +313,7 @@ namespace cluau::runtime::detail {
 
 		lua_State* m_StepThread = nullptr;
 		int m_StepDepth = 0;
-		bool m_AnyTry = false; // a chunk loaded has a try statement (StepDepth looks at the stack)
+		std::set<int> m_TryFunctionLines; // every chunk's TryFunctions (StepDepth looks further only at a function starting on one)
 		int m_StepLine = 0;
 		// A thread broken out at a BREAK runs it again on resuming: that hit is skipped.
 		lua_State* m_SkipBreakThread = nullptr;

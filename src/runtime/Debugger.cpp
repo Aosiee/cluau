@@ -658,7 +658,7 @@ namespace cluau::runtime::detail {
 				chunk.TryLines.push_back(line + 1);
 			for (int line : translation.TryFunctionLines)
 				chunk.TryFunctions.push_back(line + 1);
-			m_AnyTry = m_AnyTry || !chunk.TryFunctions.empty();
+			m_TryFunctionLines.insert(chunk.TryFunctions.begin(), chunk.TryFunctions.end());
 		}
 		m_Chunks.push_back(chunk);
 		if (chunk.File.empty())
@@ -699,10 +699,8 @@ namespace cluau::runtime::detail {
 	int Debugger::StepDepth(lua_State* L, const lua_Debug& top) const
 	{
 		int depth = lua_stackdepth(L);
-		if (!m_AnyTry)
-			return depth;
 		lua_Debug ar = top;
-		for (int level = 0; IsLuaFrame(ar); level += 2)
+		for (int level = 0; IsLuaFrame(ar) && m_TryFunctionLines.count(ar.linedefined); level += 2)
 		{
 			const Chunk* chunk = ChunkNamed(ChunkOf(ar));
 			if (!chunk || !std::binary_search(chunk->TryFunctions.begin(), chunk->TryFunctions.end(), ar.linedefined))
