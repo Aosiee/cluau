@@ -7,4 +7,5 @@ sorted in a task	1,2,3
 write timed out	false	true	true
 long line	false	true
 two accepts	accepted, timed out
+answers read in the script's own code	300
 exit: 0

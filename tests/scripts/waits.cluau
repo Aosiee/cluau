@@ -112,3 +112,22 @@ table.sort(results)
 print("two accepts", table.concat(results, ", "))
 client:close()
 server:close()
+
+// A read in the script's own code while a server's tasks run: each one
+// ends when its answer comes, however the job and the scheduler interleave.
+const web = require("@std/server")
+const site = web.serve({ port = 0 }, function(request: web.Request): web.Answer {
+	return "ok"
+})
+let answered = 0
+for (i = 1, 300) {
+	const s = net.connect("127.0.0.1", site.port)
+	s:setTimeout(5)
+	s:write("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if (string.find(s:readAll(), "\r\n\r\nok", 1, true) != nil) {
+		answered += 1
+	}
+	s:close()
+}
+print("answers read in the script's own code", answered)
+site:close()
