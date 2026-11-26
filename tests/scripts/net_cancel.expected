@@ -1,0 +1,8 @@
+after a read cancelled while it waits:	first	second
+after a read cancelled once it was done:	"one\r\ntwo\n"
+after a cancelled read:	abcdef
+after a cancelled readAll:	the rest
+after an accept cancelled while it waits:	true	hello
+after an accept cancelled once it was done:	queued
+a queued connection closes with the server:	""
+exit: 0

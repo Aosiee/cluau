@@ -26,6 +26,7 @@
 #include <chrono>
 #include <climits>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -215,6 +216,15 @@ namespace cluau::runtime::detail {
 			std::mutex Writing;
 			std::string Buffer; // read, not yet given out
 			bool Ended = false;
+			// Text a read took and then gave back, its task cancelled once it
+			// was done: the next read puts it before the buffer. (Its own lock,
+			// so giving back never waits for a read in progress.)
+			std::mutex Giving;
+			std::string GivenBack;
+			// A server's: connections accepted for an accept whose task was
+			// cancelled, taken by the next accept (closed with the server).
+			std::mutex Queue;
+			std::deque<std::shared_ptr<Socket>> Accepted;
 			std::atomic<double> Timeout{ 0 };  // seconds a wait may take (0: no limit)
 			std::atomic<double> Deadline{ 0 }; // when every wait ends (Now(); 0: none)
 			std::string LocalHost, RemoteHost;
@@ -244,9 +254,62 @@ namespace cluau::runtime::detail {
 			// number under a wait). A closed server stops listening.
 			void Close()
 			{
+				// The connections no accept took are closed, once the locks are let
+				// go (each one takes its own).
+				std::deque<std::shared_ptr<Socket>> unaccepted;
+				{
+					std::lock_guard<std::mutex> lock(Using);
+					if (Closed.load())
+						return;
+					CloseLocked();
+					std::lock_guard<std::mutex> queue(Queue);
+					unaccepted.swap(Accepted);
+				}
+				for (const std::shared_ptr<Socket>& socket : unaccepted)
+					socket->Close();
+			}
+
+			// Queues a connection for the next accept; false when the server
+			// is closed (the connection then closes when the caller lets go).
+			bool Requeue(std::shared_ptr<Socket> socket)
+			{
 				std::lock_guard<std::mutex> lock(Using);
 				if (Closed.load())
+					return false;
+				std::lock_guard<std::mutex> queue(Queue);
+				Accepted.push_back(std::move(socket));
+				return true;
+			}
+
+			std::shared_ptr<Socket> Dequeue()
+			{
+				std::lock_guard<std::mutex> queue(Queue);
+				if (Accepted.empty())
+					return nullptr;
+				std::shared_ptr<Socket> socket = std::move(Accepted.front());
+				Accepted.pop_front();
+				return socket;
+			}
+
+			void GiveBack(const std::string& text)
+			{
+				std::lock_guard<std::mutex> lock(Giving);
+				GivenBack += text;
+			}
+
+			// With the reading lock held: what was given back goes first.
+			void TakeBack()
+			{
+				std::lock_guard<std::mutex> lock(Giving);
+				if (GivenBack.empty())
 					return;
+				Buffer.insert(0, GivenBack);
+				GivenBack.clear();
+			}
+
+			// Close's work, with the Using lock held.
+			void CloseLocked()
+			{
 #ifdef CLUAU_HAS_MBEDTLS
 				// The peer is told (when no wait is using the connection: one
 				// that is may be making the handshake, which sets Tls).
@@ -841,18 +904,49 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// A job whose task may be cancelled: whichever of the job's end and
+		// the cancel comes second deals with what the job got.
+		template <typename T>
+		struct Pending
+		{
+			std::mutex Lock;
+			bool Dropped = false; // the task was cancelled
+			bool Done = false; // the job has its result
+			T Got{};
+		};
+
 		int ServerAccept(lua_State* L)
 		{
 			std::shared_ptr<Socket> server = Check(L, 1, kServerMeta);
 			const double timeout = TimeoutOption(L, 2, "server:accept");
-			return Await(L, [server, timeout]() -> JobResult {
+			// A connection accepted for a cancelled task is the next accept's.
+			auto pending = std::make_shared<Pending<std::shared_ptr<Socket>>>();
+			auto unclaimed = [server, pending] {
+				std::shared_ptr<Socket> socket;
+				{
+					std::lock_guard<std::mutex> lock(pending->Lock);
+					pending->Dropped = true;
+					if (!pending->Done)
+						return;
+					socket = std::move(pending->Got);
+				}
+				if (socket)
+					server->Requeue(std::move(socket));
+			};
+			auto work = [server, timeout, pending]() -> JobResult {
 				Use use(*server);
 				if (!use.Entered)
 					return Failure("server:accept: the socket is closed");
+				const double until = timeout > 0 ? Now() + timeout : 0;
 				std::shared_ptr<Socket> socket;
-				for (;;)
+				while (!(socket = server->Dequeue()))
 				{
-					const Ready ready = WaitFor(*server, false, timeout);
+					// In steps, so a connection queued meanwhile (by another
+					// accept, whose task was cancelled) is taken.
+					const double step = Now() + 0.1;
+					const Ready ready = WaitFor(*server, false, 0, until > 0 && until < step ? until : step);
+					if (ready == Ready::TimedOut && (until == 0 || Now() < until))
+						continue;
 					if (ready != Ready::Yes)
 						return Failure("server:accept: " + Why(ready, timeout));
 					const SocketHandle s = ::accept(server->Handle, nullptr, nullptr);
@@ -884,11 +978,22 @@ namespace cluau::runtime::detail {
 #endif
 					break;
 				}
-				return [socket](lua_State* L) {
-					PushSocket(L, socket, kSocketMeta);
-					return 1;
-				};
-			});
+				{
+					std::lock_guard<std::mutex> lock(pending->Lock);
+					if (!pending->Dropped)
+					{
+						pending->Done = true;
+						pending->Got = socket;
+						return [socket](lua_State* L) {
+							PushSocket(L, socket, kSocketMeta);
+							return 1;
+						};
+					}
+				}
+				server->Requeue(std::move(socket));
+				return [](lua_State*) { return 0; }; // never taken
+			};
+			return Await(L, std::move(work), std::move(unclaimed));
 		}
 
 		int ServerClose(lua_State* L)
@@ -1015,10 +1120,28 @@ namespace cluau::runtime::detail {
 
 		enum class ReadKind { Some, Line, All };
 
+		// A read whose task is cancelled gives back what it took: the next
+		// read gets it first.
 		int AwaitRead(lua_State* L, std::shared_ptr<Socket> socket, ReadKind kind, size_t count, const char* fn)
 		{
-			return Await(L, [socket, kind, count, fn]() -> JobResult {
+			// What the read took: its text, and a line's line break.
+			using Taken = std::pair<std::shared_ptr<std::string>, std::string>;
+			auto pending = std::make_shared<Pending<Taken>>();
+			auto unclaimed = [socket, pending] {
+				Taken taken;
+				{
+					std::lock_guard<std::mutex> lock(pending->Lock);
+					pending->Dropped = true;
+					if (!pending->Done)
+						return;
+					taken = std::move(pending->Got);
+				}
+				if (taken.first)
+					socket->GiveBack(*taken.first + taken.second);
+			};
+			auto work = [socket, kind, count, fn, pending]() -> JobResult {
 				std::lock_guard<std::mutex> reading(socket->Reading);
+				socket->TakeBack();
 				Use use(*socket);
 				if (!use.Entered)
 				{
@@ -1030,6 +1153,7 @@ namespace cluau::runtime::detail {
 				}
 				std::string why;
 				auto text = std::make_shared<std::string>();
+				std::string ending; // the line break a line had
 				bool got = false;
 				if (kind == ReadKind::Some)
 				{
@@ -1073,8 +1197,12 @@ namespace cluau::runtime::detail {
 					{
 						*text = socket->Buffer.substr(0, newline);
 						socket->Buffer.erase(0, newline + 1);
+						ending = "\n";
 						if (!text->empty() && text->back() == '\r')
+						{
 							text->pop_back();
+							ending = "\r\n";
+						}
 						got = true;
 					}
 					else if (!socket->Buffer.empty() && why.empty())
@@ -1095,6 +1223,19 @@ namespace cluau::runtime::detail {
 				}
 				if (!why.empty() && !got)
 					return Failure(std::string(fn) + ": " + why);
+				{
+					std::lock_guard<std::mutex> lock(pending->Lock);
+					if (pending->Dropped)
+					{
+						// The reading lock is still held: it goes back in place.
+						if (got)
+							socket->Buffer.insert(0, *text + ending);
+						return [](lua_State*) { return 0; }; // never taken
+					}
+					pending->Done = true;
+					if (got)
+						pending->Got = { text, ending };
+				}
 				return [text, got](lua_State* L) {
 					if (got)
 						lua_pushlstring(L, text->data(), text->size());
@@ -1102,7 +1243,8 @@ namespace cluau::runtime::detail {
 						lua_pushnil(L);
 					return 1;
 				};
-			});
+			};
+			return Await(L, std::move(work), std::move(unclaimed));
 		}
 
 		int SocketRead(lua_State* L)
