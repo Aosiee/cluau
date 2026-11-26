@@ -181,17 +181,26 @@ __cluau_meta = {
 			lua_error(L);
 		}
 
-		void OnSigint(int)
+		void Interrupted()
 		{
 			// A second Ctrl-C while the first is pending ends the process.
 			if (g_Interrupt)
 				std::_Exit(130);
 			g_Interrupt = 1;
 			g_Interrupts++;
-	#ifdef _WIN32
-			std::signal(SIGINT, OnSigint);
-	#endif
 		}
+
+	#ifdef _WIN32
+		void OnSigint(int)
+		{
+			Interrupted();
+			std::signal(SIGINT, OnSigint);
+		}
+	#else
+		// With SA_SIGINFO's three arguments: the prompt's line editor calls
+		// the handler it found before its own that way.
+		void OnSigint(int, siginfo_t*, void*) { Interrupted(); }
+	#endif
 
 		void CatchSigint()
 		{
@@ -206,9 +215,9 @@ __cluau_meta = {
 			// Without SA_RESTART, so a script blocked reading standard input
 			// gets its read back and stops at the first Ctrl-C.
 			struct sigaction action = {};
-			action.sa_handler = OnSigint;
+			action.sa_sigaction = OnSigint;
 			sigemptyset(&action.sa_mask);
-			action.sa_flags = 0;
+			action.sa_flags = SA_SIGINFO;
 			sigaction(SIGINT, &action, nullptr);
 	#endif
 		}
@@ -1307,7 +1316,7 @@ end
 		// the default action. With none of ours under it the signal would be
 		// lost: a closed terminal's SIGHUP left the prompt reading a terminal
 		// that is gone, at full speed, for good. Ours takes the default action.
-		void TakeDefault(int signum)
+		void TakeDefault(int signum, siginfo_t*, void*)
 		{
 			std::signal(signum, SIG_DFL);
 			std::raise(signum); // delivered once isocline's handler returns
@@ -1321,8 +1330,9 @@ end
 				if (sigaction(signum, nullptr, &current) != 0 || (current.sa_flags & SA_SIGINFO) || current.sa_handler != SIG_DFL)
 					continue;
 				struct sigaction action = {};
-				action.sa_handler = TakeDefault;
+				action.sa_sigaction = TakeDefault; // isocline calls it with three arguments
 				sigemptyset(&action.sa_mask);
+				action.sa_flags = SA_SIGINFO;
 				sigaction(signum, &action, nullptr);
 			}
 		}
@@ -1395,8 +1405,10 @@ end
 		// Luau's collector takes the heap's growth between collections as
 		// an unsigned difference, which a heap that shrank meanwhile turns
 		// into a huge number (and an out-of-range conversion); the fix Luau
-		// keeps behind this flag measures it properly.
-		DFFlag::LuauGcHeapShrinkFix.value = true;
+		// keeps behind this flag measures it properly. The flag is the
+		// process's: set once, before any runtime (on any thread) runs.
+		static std::once_flag shrinkFix;
+		std::call_once(shrinkFix, [] { DFFlag::LuauGcHeapShrinkFix.value = true; });
 		lua_State* L = rt.L = luaL_newstate();
 		rt.Native = rt.Opts.Native && !rt.Opts.Coverage && Luau::CodeGen::isSupported();
 		if (rt.Native)
