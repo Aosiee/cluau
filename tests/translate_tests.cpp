@@ -418,6 +418,13 @@ TEST("format: trailing blank lines go, line breaks keep their kind, a second pas
 	CHECK_EQ(cluau::Format("if (a) {\nf()\n}\n", spaces).Text, std::string("if (a) {\n    f()\n}\n"));
 }
 
+TEST("format: a carriage return that does not end a line is space")
+{
+	const std::string once = Formatted("if (x) {\n\r \n\ty() \r\n\r\tz()\n}\n");
+	CHECK_EQ(once, std::string("if (x) {\n\n\ty()\r\n\tz()\n}\n"));
+	CHECK_EQ(Formatted(once), once);
+}
+
 TEST("format: a source that does not lex is left as it is")
 {
 	const cluau::FormatResult r = cluau::Format("let s = \"unterminated\n  let t = 1\n");
@@ -456,6 +463,23 @@ TEST("language: throw raises a value as it is")
 	// `throw` as a name stays a name.
 	CHECK_EQ(Luau("throw = 1\nthrow.x = 2\n"), std::string("throw = 1\nthrow.x = 2\n"));
 	CHECK(HasError(cluau::Translate("throw\n"), "throw raises a value"));
+}
+
+TEST("language: every line stays on its line, with a string type continued on the next and after mistakes")
+{
+	// A field typed by a string that continues on the next line: the class
+	// line's type says the line break as `\n`.
+	const std::string continued = "class P {\n\tX: \"a\\\nb\" = \"a\\\nb\"\n}\nprint(P().X)\n";
+	const cluau::TranslateResult r = ScriptTranslation(continued);
+	CHECK(!r.HasErrors());
+	CHECK_EQ(Lines(r.Luau), Lines(continued));
+	CHECK(r.Luau.find("{ X: \"a\\nb\", }") != std::string::npos);
+	// A long string a mistake drops keeps its lines.
+	for (const std::string source : { std::string("class Square {\n[[x\ny\n"), std::string("class A {\n\tX: { string` = 1\n2`\n}\nlet b = 2\n") })
+	{
+		CHECK_EQ(Lines(cluau::Translate(source).Luau), Lines(source));
+		CHECK_EQ(Lines(ScriptTranslation(source).Luau), Lines(source));
+	}
 }
 
 TEST("language: try / catch / finally keep every line on its line")

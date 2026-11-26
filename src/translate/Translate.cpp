@@ -299,7 +299,10 @@ namespace cluau {
 
 			// The code of tokens [from, to) on one line: comments left out, and
 			// one space wherever the source has whitespace or a comment (the
-			// tokens themselves, strings included, are copied as they are).
+			// tokens themselves, strings included, are copied as they are,
+			// except that a string continued on the next line (`\` at a
+			// line's end) says its line break with `\n`, and any other line
+			// break in a token, which only a mistake puts there, is a space).
 			std::string CodeText(size_t from, size_t to) const
 			{
 				std::string out;
@@ -311,7 +314,27 @@ namespace cluau {
 						continue;
 					if (prevEnd != npos && t.Begin > prevEnd)
 						out += ' ';
-					out.append(t.Text);
+					if (t.Line == t.EndLine)
+						out.append(t.Text);
+					else
+						for (size_t c = 0; c < t.Text.size(); c++)
+						{
+							const char next = c + 1 < t.Text.size() ? t.Text[c + 1] : '\0';
+							if (t.Text[c] == '\\' && (next == '\n' || next == '\r'))
+							{
+								out += "\\n";
+								c += next == '\r' && c + 2 < t.Text.size() && t.Text[c + 2] == '\n' ? 2 : 1;
+							}
+							else if (t.Text[c] == '\\' && next)
+							{
+								out += t.Text[c];
+								out += t.Text[++c];
+							}
+							else if (t.Text[c] == '\n' || t.Text[c] == '\r')
+								out += ' ';
+							else
+								out += t.Text[c];
+						}
 					prevEnd = t.End;
 				}
 				return out;
@@ -2526,6 +2549,11 @@ namespace cluau {
 						m_R.Generated.push_back({ { t.EndLine, outCol }, { t.EndLine, outCol + (int)m_After[i].size() } });
 						append(m_After[i]);
 					}
+					// A token spanning lines that is replaced (a long string an
+					// error drops) keeps its line breaks, so every line after it
+					// stays on its line.
+					for (int missing = t.EndLine - t.Line - (int)std::count(text.begin(), text.end(), '\n'); missing > 0; missing--)
+						append("\n");
 					if (!out.empty() && isWord(out.back()) && t.End < m_Src.size() && isWord(m_Src[t.End]))
 						append(" ");
 					m_R.Map.AddAnchor(t.EndLine, t.EndCol, outCol);
