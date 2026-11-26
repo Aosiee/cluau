@@ -1,0 +1,397 @@
+// @std/log: structured logging. A record is a level, a message and fields
+// (names with values), written as one line: text for people to read, or
+// JSON lines for programs.
+//
+//   const log = require("@std/log")
+//   log.info("started", { port = 8080 })   // 2026-11-26T21:00:00.123Z INFO  started port=8080
+//   const db = log.logger("db"):with({ file = "app.db" })
+//   db:warn("slow query", { ms = 812 })     // ... WARN  [db] slow query file=app.db ms=812
+//   log.configure({ level = "debug", format = "json" })
+//
+// Records go to standard error. The level is "info" unless CLUAU_LOG names
+// another when the module loads; a level given to configure wins over it.
+
+const io = require("@std/io")
+const json = require("@std/json")
+const process = require("@std/process")
+const time = require("@std/time")
+
+export type Level = "debug" | "info" | "warn" | "error"
+// A level to log from: records below it are left out ("off": all of them).
+export type Threshold = Level | "off"
+export type Format = "text" | "json"
+export type Fields = { [string]: unknown }
+export type Output = "stderr" | "stdout" | ((line: string) -> ())
+export type Options = { level: Threshold?, format: Format?, time: boolean?, output: Output? }
+export type LoggerOptions = { level: Threshold? }
+
+const Ranks: { [string]: number } = { debug = 1, info = 2, warn = 3, error = 4, off = 5 }
+const Labels: { [string]: string } = { debug = "DEBUG", info = "INFO", warn = "WARN", error = "ERROR" }
+// The keys a JSON record has of its own; a field of one of these names is
+// written with a `_` in front.
+const Reserved: { [string]: boolean } = { time = true, level = true, message = true, logger = true }
+
+type Settings = { Rank: number, Format: Format, Time: boolean, Write: (line: string) -> () }
+
+const ToError = function(line: string) {
+	io.writeError(line, "\n")
+}
+
+const settings: Settings = { Rank = Ranks.info, Format = "text", Time = true, Write = ToError }
+
+function Rank(level: unknown, where: string): number {
+	const rank = if (type(level) == "string") Ranks[level] else nil
+	if (rank == nil) {
+		error(`{where}: a level is debug, info, warn, error or off, not '{tostring(level)}'`, 3)
+	}
+	return rank
+}
+
+// A value as text, whatever it is: a string as it is, a table by `repr`. A
+// value that cannot be shown (its __tostring raises) is its type: <table>.
+function Show(value: unknown): string {
+	if (type(value) == "string") {
+		return value
+	}
+	if (type(value) == "number" || type(value) == "boolean") {
+		return tostring(value)
+	}
+	const ok, shown = pcall(repr, value)
+	if (ok && type(shown) == "string") {
+		return shown
+	}
+	return `<{type(value)}>`
+}
+
+const Escapes: { [string]: string } = { ["\\"] = "\\\\", ["\""] = "\\\"", ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t" }
+
+function EscapeOne(c: string): string {
+	return Escapes[c] or string.format("\\x%02x", string.byte(c))
+}
+
+// Control characters written as escapes (\n, \x1b), so a record stays on
+// its line.
+function Controls(text: string): string {
+	return (string.gsub(text, "%c", EscapeOne))
+}
+
+// A name or a value in a text record: quoted, with `\` and `"` escaped too,
+// when it is empty or holds a space, a quote, `=` or a control character.
+function Quote(text: string): string {
+	if (text != "" && string.find(text, "[%s%c\"=]") == nil) {
+		return text
+	}
+	return "\"" .. string.gsub(text, "[%c\\\"]", EscapeOne) .. "\""
+}
+
+// The text with each byte that is not part of UTF-8 replaced by U+FFFD.
+function Utf8(text: string): string {
+	const out: { string } = {}
+	let at = 1
+	while (at <= #text) {
+		const length, bad = utf8.len(text, at)
+		if (length != nil || bad == nil) {
+			table.insert(out, string.sub(text, at))
+			break
+		}
+		table.insert(out, string.sub(text, at, bad - 1))
+		table.insert(out, "\u{FFFD}")
+		at = bad + 1
+	}
+	return table.concat(out)
+}
+
+// A value in a JSON record: its JSON, or for one with no JSON form (a table
+// that contains itself, a function, NaN, bytes that are not UTF-8) its text
+// as a JSON string.
+function Encode(value: unknown): string {
+	const ok, text = pcall(json.encode, value)
+	if (ok) {
+		return text
+	}
+	const fallback, shown = pcall(json.encode, Utf8(Show(value)))
+	return if (fallback) shown else `"<{type(value)}>"`
+}
+
+// The fields' names as text (a name that is not a string is shown as one).
+function Name(key: unknown): string {
+	return if (type(key) == "string") key else Show(key)
+}
+
+// Adds the fields to `into`, as far as they can be read: a table whose
+// iteration raises gives what came before.
+function Merge(into: { [string]: unknown }, fields: unknown) {
+	if (type(fields) != "table") {
+		if (fields != nil) {
+			into.fields = fields
+		}
+		return
+	}
+	pcall(function() {
+		for (key, value in fields :: { [unknown]: unknown }) {
+			into[Name(key)] = value
+		}
+	})
+}
+
+// The time now in UTC, to the millisecond (always three digits, which
+// time.iso leaves out for a whole second).
+function Now(): string {
+	const p = time.parts(time.now(), { utc = true })
+	return string.format("%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", p.year, p.month, p.day, p.hour, p.minute, p.second, p.millisecond)
+}
+
+function Text(level: Level, name: string?, message: string, fields: { [string]: unknown }, keys: { string }): string {
+	const parts: { string } = {}
+	if (name != nil) {
+		table.insert(parts, `[{Controls(name)}]`)
+	}
+	if (message != "") {
+		table.insert(parts, Controls(message))
+	}
+	for (_, key in keys) {
+		table.insert(parts, `{Quote(key)}={Quote(Show(fields[key]))}`)
+	}
+	let line = Labels[level]
+	if (#parts > 0) {
+		line = line .. string.rep(" ", 5 - #line) .. " " .. table.concat(parts, " ")
+	}
+	if (settings.Time) {
+		line = Now() .. " " .. line
+	}
+	return line
+}
+
+function Json(level: Level, name: string?, message: string, fields: { [string]: unknown }, keys: { string }): string {
+	const parts: { string } = {}
+	if (settings.Time) {
+		table.insert(parts, `"time":"{Now()}"`)
+	}
+	table.insert(parts, `"level":"{level}"`)
+	if (name != nil) {
+		table.insert(parts, `"logger":{Encode(Utf8(name))}`)
+	}
+	table.insert(parts, `"message":{Encode(Utf8(message))}`)
+	const names: { [string]: string } = {}
+	const written: { string } = {}
+	for (_, key in keys) {
+		let name = key
+		while (Reserved[name] || (name != key && fields[name] != nil)) {
+			name = "_" .. name
+		}
+		names[name] = key
+		table.insert(written, name)
+	}
+	table.sort(written)
+	for (_, name in written) {
+		table.insert(parts, `{Encode(Utf8(name))}:{Encode(fields[names[name]])}`)
+	}
+	return "{" .. table.concat(parts, ",") .. "}"
+}
+
+// A logger's way of writing a record: a message, and fields when there are
+// any. (Two signatures rather than an optional parameter, so that a table
+// written in the call is checked as fields.)
+type LogMethod = ((self: Logger, message: string) -> ()) & ((self: Logger, message: string, fields: Fields) -> ())
+type LogFunction = ((message: string) -> ()) & ((message: string, fields: Fields) -> ())
+
+export type Logger = {
+	debug: LogMethod,
+	info: LogMethod,
+	warn: LogMethod,
+	error: LogMethod,
+	enabled: (self: Logger, level: Level) -> boolean,
+	setLevel: (self: Logger, level: Threshold?) -> (),
+	with: (self: Logger, fields: Fields) -> Logger,
+}
+
+type State = {
+	// The logger's name (nil for the default logger).
+	Name: string?,
+	// Its own level, if it has one; otherwise its parent's, or the default.
+	Rank: number?,
+	// The logger `with` made this one from, whose level it follows.
+	Parent: State?,
+	// The fields every record carries.
+	Bound: { [string]: unknown },
+}
+
+// Each logger's state, kept here so that a logger is its methods only. A
+// logger nothing refers to any more (one made by `with` for a request) goes.
+const states: { [Logger]: State } = {}
+setmetatable(states, { __mode = "k" })
+
+function StateOf(logger: Logger): State {
+	const state = states[logger] :: State?
+	if (state == nil) {
+		error("log: a logger's methods are called with ':' (logger:info(...))", 3)
+	}
+	return state
+}
+
+function Threshold(state: State): number {
+	let at: State? = state
+	while (at != nil) {
+		const rank = at.Rank
+		if (rank != nil) {
+			return rank
+		}
+		at = at.Parent
+	}
+	return settings.Rank
+}
+
+function Write(state: State, level: Level, message: string, fields: Fields?) {
+	if (Ranks[level] < Threshold(state)) {
+		return
+	}
+	const all: { [string]: unknown } = table.clone(state.Bound)
+	Merge(all, fields)
+	const keys: { string } = {}
+	for (key in all) {
+		table.insert(keys, key)
+	}
+	table.sort(keys)
+	const text = if (type(message) == "string") message else Show(message)
+	settings.Write(if (settings.Format == "json") Json(level, state.Name, text, all, keys) else Text(level, state.Name, text, all, keys))
+}
+
+function Method(level: Level): LogMethod {
+	return function(self: Logger, message: string, fields: Fields?) {
+		Write(StateOf(self), level, message, fields)
+	} :: LogMethod
+}
+
+// A new logger with this state (defined below, with the methods it has).
+let New: (state: State) -> Logger
+
+// A logger that adds `fields` to every record (a record's own fields of the
+// same names win), with the parent's name, following its level.
+function Derive(parent: State, fields: Fields): Logger {
+	if (type(fields) != "table") {
+		error(`log.with: the fields are a table, not {type(fields)}`, 3)
+	}
+	const bound: { [string]: unknown } = table.clone(parent.Bound)
+	Merge(bound, fields)
+	return New({ Name = parent.Name, Rank = nil, Parent = parent, Bound = bound })
+}
+
+const methods = {
+	debug = Method("debug"),
+	info = Method("info"),
+	warn = Method("warn"),
+	error = Method("error"),
+	// Whether a record at `level` would be written.
+	enabled = function(self: Logger, level: Level): boolean {
+		return Rank(level, "log.enabled") >= Threshold(StateOf(self))
+	},
+	// Gives the logger a level of its own; nil goes back to following the
+	// default configuration (or, for one made by `with`, its parent).
+	setLevel = function(self: Logger, level: Threshold?) {
+		StateOf(self).Rank = if (level == nil) nil else Rank(level, "log.setLevel")
+	},
+	with = function(self: Logger, fields: Fields): Logger {
+		return Derive(StateOf(self), fields)
+	},
+}
+
+New = function(state: State): Logger {
+	const logger: Logger = {
+		debug = methods.debug,
+		info = methods.info,
+		warn = methods.warn,
+		error = methods.error,
+		enabled = methods.enabled,
+		setLevel = methods.setLevel,
+		with = methods.with,
+	}
+	states[logger] = state
+	return logger
+}
+
+const root: State = { Name = nil, Rank = nil, Parent = nil, Bound = {} }
+const named: { [string]: Logger } = {}
+
+// The level CLUAU_LOG names, read once. The sandbox has no environment, so
+// there the level is the default.
+{
+	const env = (process :: { env: ((name: string) -> string?)? }).env
+	const given = if (env != nil) env("CLUAU_LOG") else nil
+	if (given != nil) {
+		const level = string.lower(string.match(given, "^%s*(.-)%s*$") or "")
+		if (Ranks[level] != nil) {
+			settings.Rank = Ranks[level]
+		} else if (level != "") {
+			ToError(`log: CLUAU_LOG is '{given}', not a level (debug, info, warn, error or off); logging from info`)
+		}
+	}
+}
+
+function Writer(output: unknown): (line: string) -> () {
+	if (output == "stderr") {
+		return ToError
+	}
+	if (output == "stdout") {
+		return function(line: string) {
+			io.write(line, "\n")
+		}
+	}
+	if (type(output) != "function") {
+		error(`log.configure: the output is "stderr", "stdout" or a function, not '{tostring(output)}'`, 3)
+	}
+	return output :: (line: string) -> ()
+}
+
+// Sets what every logger writes: the level (for the loggers without their
+// own), the format, whether records carry the time, and where lines go.
+// Options left out keep their setting.
+function configure(options: Options) {
+	const rank = if (options.level != nil) Rank(options.level, "log.configure") else settings.Rank
+	const format = options.format or settings.Format
+	if (format != "text" && format != "json") {
+		error(`log.configure: the format is "text" or "json", not '{tostring(format)}'`, 2)
+	}
+	if (options.time != nil && type(options.time) != "boolean") {
+		error(`log.configure: time is true or false, not '{tostring(options.time)}'`, 2)
+	}
+	const write = if (options.output != nil) Writer(options.output) else settings.Write
+	settings.Rank = rank
+	settings.Format = format
+	settings.Time = if (options.time != nil) options.time else settings.Time
+	settings.Write = write
+}
+
+// The logger of this name (the same one each time). `options.level` gives
+// it a level of its own.
+function logger(name: string, options: LoggerOptions?): Logger {
+	if (type(name) != "string" || name == "") {
+		error(`log.logger: a logger's name is a string that is not empty, not '{tostring(name)}'`, 2)
+	}
+	const found: Logger = (named[name] :: Logger?) or New({ Name = name, Rank = nil, Parent = nil, Bound = {} })
+	named[name] = found
+	if (options != nil && options.level != nil) {
+		states[found].Rank = Rank(options.level, "log.logger")
+	}
+	return found
+}
+
+function Function(level: Level): LogFunction {
+	return function(message: string, fields: Fields?) {
+		Write(root, level, message, fields)
+	} :: LogFunction
+}
+
+return {
+	debug = Function("debug"),
+	info = Function("info"),
+	warn = Function("warn"),
+	error = Function("error"),
+	enabled = function(level: Level): boolean {
+		return Rank(level, "log.enabled") >= Threshold(root)
+	},
+	with = function(fields: Fields): Logger {
+		return Derive(root, fields)
+	},
+	configure = configure,
+	logger = logger,
+}

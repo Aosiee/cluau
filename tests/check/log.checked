@@ -1,0 +1,54 @@
+log.cluau:4:15: Expected this to be exactly 'Options', but got '{| level: "verbose" |}'
+caused by:
+  Property 'level' is not compatible.
+Expected this to be exactly '("debug" | "error" | "info" | "off" | "warn")?', but got '"verbose"'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly '"debug" | "error" | "info" | "off" | "warn"', but got '"verbose"'; none of the union options are compatible
+log.cluau:5:15: Expected this to be exactly 'Options', but got '{| format: "xml" |}'
+caused by:
+  Property 'format' is not compatible.
+Expected this to be exactly '("json" | "text")?', but got '"xml"'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly '"json" | "text"', but got '"xml"'; none of the union options are compatible
+log.cluau:6:10: Expected this to be 'string', but got 'number'
+log.cluau:7:21: Expected this to be 'Fields', but got 'string'
+log.cluau:8:1: No overload for function accepts 3 arguments.
+log.cluau:8:1: Available overloads: (string) -> (); and (string, Fields) -> ()
+log.cluau:9:29: Expected this to be
+	'LoggerOptions?'
+but got
+	'{| level: "trace" |}'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly
+	'LoggerOptions'
+but got
+	'{| level: "trace" |}'
+caused by:
+  Property 'level' is not compatible.
+Expected this to be exactly '("debug" | "error" | "info" | "off" | "warn")?', but got '"trace"'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly '"debug" | "error" | "info" | "off" | "warn"', but got '"trace"'; none of the union options are compatible
+log.cluau:10:13: Expected this to be '("debug" | "error" | "info" | "off" | "warn")?', but got '"loud"'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be '"debug" | "error" | "info" | "off" | "warn"', but got '"loud"'; none of the union options are compatible
+log.cluau:11:18: Expected this to be '"debug" | "error" | "info" | "warn"', but got '"off"'; none of the union options are compatible
+log.cluau:12:15: Expected this to be exactly 'Options', but got '{| output: (number) -> () |}'
+caused by:
+  Property 'output' is not compatible.
+Expected this to be exactly
+	'("stderr" | "stdout" | ((string) -> ()))?'
+but got
+	'(number) -> ()'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly
+	'"stderr" | "stdout" | ((string) -> ())'
+but got
+	'(number) -> ()'; none of the union options are compatible
+cluau check: 10 error(s), 0 warning(s)
+exit: 1

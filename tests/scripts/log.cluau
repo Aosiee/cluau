@@ -1,0 +1,225 @@
+// @std/log: every level and filtering, the text and JSON formats (each JSON
+// line read back), quoting, values with no text or JSON form, named
+// loggers and `with`, mistakes, and CLUAU_LOG in a child cluau (also in the
+// sandbox, which has no environment).
+const log = require("@std/log")
+const json = require("@std/json")
+const process = require("@std/process")
+const time = require("@std/time")
+const io = require("@std/io")
+
+const lines: { string } = {}
+const Collect = function(line: string) {
+	table.insert(lines, line)
+}
+log.configure({ level = "info", time = false, output = Collect })
+
+// Prints the lines written since the last call.
+function Flush(title: string) {
+	print(`-- {title}`)
+	for (_, line in lines) {
+		print(line)
+	}
+	table.clear(lines)
+}
+
+// The default logger: info and above.
+log.debug("not written")
+log.info("info")
+log.warn("warn")
+log.error("error")
+Flush("info")
+
+const thresholds: { log.Threshold } = { "debug", "warn", "error", "off" }
+for (i = 1, #thresholds) {
+	const level = thresholds[i]
+	log.configure({ level = thresholds[i] })
+	log.debug("debug")
+	log.info("info")
+	log.warn("warn")
+	log.error("error")
+	Flush(level)
+	print("enabled", level, log.enabled("debug"), log.enabled("warn"), log.enabled("error"))
+}
+log.configure({ level = "debug" })
+
+// Fields in the order of their names; a value is quoted when it is empty or
+// holds a space, a quote, = or a control character.
+log.info("fields", {
+	port = 8080,
+	ratio = 0.25,
+	negative = -3,
+	big = 2 ^ 53,
+	on = true,
+	off = false,
+	plain = "a/b:c",
+	space = "a b",
+	quote = "say \"hi\"",
+	equals = "a=b",
+	empty = "",
+	newline = "x\ny",
+	tab = "\t",
+	control = "\1\127",
+	backslash = "a\\b",
+	quotedBackslash = "a \\ b",
+	unicode = "naïve",
+})
+log.info("tables", { list = { 1, 2, 3 }, record = { name = "ada", tags = { "x" } }, none = {} })
+log.info("names", { ["a b"] = 1, ["k=v"] = 2, [""] = 3 })
+// A table that contains itself, one whose __tostring raises, fields whose
+// listing raises part way and fields that are not a table: the record is
+// written with what can be shown.
+const cycle: { [string]: unknown } = { name = "loop" }
+cycle.self = cycle
+const broken = setmetatable({}, {
+	__tostring = function(): string {
+		error("no text")
+	},
+})
+log.info("unshowable", { cycle = cycle, broken = broken })
+const partial = setmetatable({}, {
+	__iter = function(): () -> (string?, number?) {
+		let given = false
+		return function(): (string?, number?) {
+			if (!given) {
+				given = true
+				return "first", 1
+			}
+			error("cannot read further")
+		}
+	},
+})
+log.info("partial", (partial :: unknown) :: log.Fields)
+log.info("not a table", ("port=8080" :: unknown) :: log.Fields)
+// A message's control characters are escaped, so a record is one line.
+log.warn("line\nbreak\ttab \27[1mbold")
+log.info("", { only = "fields" })
+log.info("")
+log.error("", {})
+Flush("text")
+
+// Named loggers: one per name, shown as [name], following the default level
+// unless given their own.
+log.configure({ level = "info" })
+const db = log.logger("db")
+db:info("connected", { file = "app.db" })
+db:debug("not written: db follows the default level")
+db:setLevel("debug")
+db:debug("written: db's own level")
+log.debug("not written: the default is still info")
+const request = db:with({ request = 7, user = "ada" })
+request:debug("with", { user = "bob", extra = true })
+const step = request:with({ step = 2 })
+step:info("with on with")
+db:info("db itself has no request field")
+db:setLevel(nil)
+request:debug("not written: request follows db, which follows the default again")
+request:setLevel("debug")
+step:debug("written: step follows request's own level")
+log.logger("web", { level = "error" }):warn("not written: web's level is error")
+log.logger("web"):error("written")
+const webWarn, webError = log.logger("web"):enabled("warn"), log.logger("web"):enabled("error")
+log.logger("web"):setLevel("off")
+log.logger("web"):error("not written: web is off")
+log.with({ pid = 42 }):info("the default logger with a field")
+log.logger("odd name\n"):info("name escaped")
+Flush("named")
+print("same logger", rawequal(db, log.logger("db")), rawequal(db, log.logger("web")))
+print("web enabled", webWarn, webError, "then off", log.logger("web"):enabled("error"))
+
+// JSON lines: time (when written), level, logger, message, then the fields
+// in the order of their names. A field named like one of the record's own
+// keys has a _ in front; a value with no JSON form is its text.
+log.configure({ format = "json", level = "debug" })
+log.info("started", { port = 8080, path = "/a b", list = { 1, 2 }, record = { ok = true } })
+log.debug("x\ny \"quoted\"", { level = "mine", _level = "theirs", time = 1, message = "m", logger = "l" })
+db:warn("odd values", { cycle = cycle, nan = 0 / 0, bytes = "a\255b", huge = math.huge })
+log.error("bad \255 message")
+step:info("with", { extra = false })
+for (_, line in lines) {
+	print(line)
+	print("  read back:", repr(json.decode(line)))
+}
+table.clear(lines)
+
+// The time: UTC to the millisecond, at the start of a text line and as a
+// JSON record's "time".
+log.configure({ time = true })
+log.info("timed")
+const record = json.decode(lines[1]) :: { time: string }
+print("json time", string.find(record.time, "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$") != nil,
+	math.abs(time.parse(record.time) - time.now()) < 60)
+log.configure({ format = "text" })
+log.info("timed", { a = 1 })
+print("text time", string.find(lines[2], "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ INFO  timed a=1$") != nil)
+table.clear(lines)
+log.configure({ time = false })
+
+// Mistakes are errors at the call, and change nothing.
+print(pcall(function() {
+	log.configure(({ level = "verbose" } :: unknown) :: log.Options)
+}))
+print(pcall(function() {
+	log.configure(({ format = "xml", level = "error" } :: unknown) :: log.Options)
+}))
+print(pcall(function() {
+	log.configure(({ time = "no" } :: unknown) :: log.Options)
+}))
+print(pcall(function() {
+	log.configure(({ output = 3 } :: unknown) :: log.Options)
+}))
+print(pcall(function() {
+	log.logger("")
+}))
+print(pcall(function() {
+	db:setLevel(("loud" :: unknown) :: log.Threshold)
+}))
+print(pcall(function() {
+	log.enabled(("trace" :: unknown) :: log.Level)
+}))
+print(pcall(function() {
+	db:with(("request=7" :: unknown) :: log.Fields)
+}))
+log.info("still info, text, untimed and collected")
+Flush("mistakes")
+
+// An error the output raises is the log call's.
+log.configure({
+	output = function(line: string) {
+		error(`cannot write '{line}'`)
+	},
+})
+print(pcall(function() {
+	log.info("lost")
+}))
+log.configure({ output = "stdout" })
+log.info("to standard output")
+log.configure({ output = Collect })
+
+// CLUAU_LOG sets the level a script starts with (in any case, with spaces
+// around it); configure's level wins over it. Records go to standard error.
+const code = [[const log = require("@std/log")
+log.configure({ time = false })
+log.debug("debug")
+log.info("info")
+log.warn("warn")
+log.configure({ level = "error" })
+log.warn("not written: configured")
+log.error("error")]]
+function Child(level: string, sandbox: boolean) {
+	const command = { process.executable }
+	if (sandbox) {
+		table.insert(command, "--sandbox")
+	}
+	table.insert(command, "-e")
+	table.insert(command, code)
+	const result = process.run(command, { env = { CLUAU_LOG = level }, stderr = "capture" })
+	print(`-- CLUAU_LOG='{level}'{if (sandbox) " in the sandbox" else ""}: exit {result.code}, stdout '{result.output}'`)
+	io.write(result.error)
+}
+Child("", false)
+Child("debug", false)
+Child(" WARN ", false)
+Child("off", false)
+Child("verbose", false)
+Child("debug", true)

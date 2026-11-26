@@ -15,3 +15,9 @@ const missing, missingWhy = pcall(require, "../check/lib/none")
 print(outside, string.gsub(tostring(outsideWhy), "greet", "?") == string.gsub(tostring(missingWhy), "none", "?")) // allow-any: pcall's error values
 
 print(require("@std/json").encode({ ran = true }))
+
+// @std/log works without an environment to read CLUAU_LOG from.
+const log = require("@std/log")
+log.configure({ time = false, output = "stdout" })
+log.debug("not written")
+log.logger("sandbox"):info("logged", { ran = true })

@@ -1,0 +1,16 @@
+// Mistakes with @std/log that cluau check reports.
+const log = require("@std/log")
+
+log.configure({ level = "verbose" })              // a level is debug, info, warn, error or off
+log.configure({ format = "xml" })                 // the format is text or json
+log.info(42)                                      // the message is text
+log.info("started", "port=8080")                  // fields are a table
+log.warn("slow", { ms = 812 }, { query = "x" })   // one table of fields
+const db = log.logger("db", { level = "trace" })
+db:setLevel("loud")
+print(db:enabled("off"))                          // a record's level is not off
+log.configure({
+	output = function(line: number) {             // the output takes a line of text
+		print(line)
+	},
+})

@@ -1,0 +1,90 @@
+-- info
+INFO  info
+WARN  warn
+ERROR error
+-- debug
+DEBUG debug
+INFO  info
+WARN  warn
+ERROR error
+enabled	debug	true	true	true
+-- warn
+WARN  warn
+ERROR error
+enabled	warn	false	true	true
+-- error
+ERROR error
+enabled	error	false	false	true
+-- off
+enabled	off	false	false	false
+-- text
+INFO  fields backslash=a\b big=9007199254740992 control="\x01\x7f" empty="" equals="a=b" negative=-3 newline="x\ny" off=false on=true plain=a/b:c port=8080 quote="say \"hi\"" quotedBackslash="a \\ b" ratio=0.25 space="a b" tab="\t" unicode=naïve
+INFO  tables list="{1, 2, 3}" none={} record="{name = \"ada\", tags = {\"x\"}}"
+INFO  names ""=3 "a b"=1 "k=v"=2
+INFO  unshowable broken=<table> cycle="{name = \"loop\", self = {<cycle>}}"
+INFO  partial first=1
+INFO  not a table fields="port=8080"
+WARN  line\nbreak\ttab \x1b[1mbold
+INFO  only=fields
+INFO
+ERROR
+-- named
+INFO  [db] connected file=app.db
+DEBUG [db] written: db's own level
+DEBUG [db] with extra=true request=7 user=bob
+INFO  [db] with on with request=7 step=2 user=ada
+INFO  [db] db itself has no request field
+DEBUG [db] written: step follows request's own level request=7 step=2 user=ada
+ERROR [web] written
+INFO  the default logger with a field pid=42
+INFO  [odd name\n] name escaped
+same logger	true	false
+web enabled	false	true	then off	false
+{"level":"info","message":"started","list":[1,2],"path":"/a b","port":8080,"record":{"ok":true}}
+  read back:	{level = "info", list = {1, 2}, message = "started", path = "/a b", port = 8080, record = {ok = true}}
+{"level":"debug","message":"x\ny \"quoted\"","__level":"mine","_level":"theirs","_logger":"l","_message":"m","_time":1}
+  read back:	{__level = "mine", _level = "theirs", _logger = "l", _message = "m", _time = 1, level = "debug", message = "x\ny \"quoted\""}
+{"level":"warn","logger":"db","message":"odd values","bytes":"a�b","cycle":"{name = \"loop\", self = {<cycle>}}","huge":"inf","nan":"nan"}
+  read back:	{bytes = "a�b", cycle = "{name = \"loop\", self = {<cycle>}}", huge = "inf", level = "warn", logger = "db", message = "odd values", nan = "nan"}
+{"level":"error","message":"bad � message"}
+  read back:	{level = "error", message = "bad � message"}
+{"level":"info","logger":"db","message":"with","extra":false,"request":7,"step":2,"user":"ada"}
+  read back:	{extra = false, level = "info", logger = "db", message = "with", request = 7, step = 2, user = "ada"}
+json time	true	true
+text time	true
+false	log.cluau:160: log.configure: a level is debug, info, warn, error or off, not 'verbose'
+false	log.cluau:163: log.configure: the format is "text" or "json", not 'xml'
+false	log.cluau:166: log.configure: time is true or false, not 'no'
+false	log.cluau:169: log.configure: the output is "stderr", "stdout" or a function, not '3'
+false	log.cluau:172: log.logger: a logger's name is a string that is not empty, not ''
+false	log.cluau:175: log.setLevel: a level is debug, info, warn, error or off, not 'loud'
+false	log.cluau:178: log.enabled: a level is debug, info, warn, error or off, not 'trace'
+false	log.cluau:181: log.with: the fields are a table, not string
+-- mistakes
+INFO  still info, text, untimed and collected
+false	log.cluau:189: cannot write 'INFO  lost'
+INFO  to standard output
+-- CLUAU_LOG='': exit 0, stdout ''
+INFO  info
+WARN  warn
+ERROR error
+-- CLUAU_LOG='debug': exit 0, stdout ''
+DEBUG debug
+INFO  info
+WARN  warn
+ERROR error
+-- CLUAU_LOG=' WARN ': exit 0, stdout ''
+WARN  warn
+ERROR error
+-- CLUAU_LOG='off': exit 0, stdout ''
+ERROR error
+-- CLUAU_LOG='verbose': exit 0, stdout ''
+log: CLUAU_LOG is 'verbose', not a level (debug, info, warn, error or off); logging from info
+INFO  info
+WARN  warn
+ERROR error
+-- CLUAU_LOG='debug' in the sandbox: exit 0, stdout ''
+INFO  info
+WARN  warn
+ERROR error
+exit: 0
