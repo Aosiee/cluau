@@ -134,9 +134,11 @@ namespace cluau {
 				m_TypeEnd.assign(n, 0);
 				m_DropGap.assign(n, 0);
 				m_ThrowAt.assign(n, 0);
+				m_TryToken.assign(n, 0);
 				m_Skip.assign(n, 0);
 				Classify();
 				Emit();
+				FindTryLines();
 				LimitDiagnostics();
 				return std::move(m_R);
 			}
@@ -801,6 +803,7 @@ namespace cluau {
 				bool Returns = false, Breaks = false, Continues = false;
 				size_t ReturnAt = npos, BreakAt = npos, ContinueAt = npos; // the first of each (in this try or one inside it)
 				bool HasCatch = false, HasFinally = false;
+				size_t CatchAt = npos; // the `catch` keyword
 				bool TryVarargs = false, CatchVarargs = false; // the block uses `...`: its closure passes them on
 			};
 
@@ -879,6 +882,7 @@ namespace cluau {
 				const size_t index = m_TryClosed[m_PrevSig].first;
 				TryState& t = m_Tries[index];
 				t.HasCatch = true;
+				t.CatchAt = i;
 				Generate(i, " if not " + TryName(t, "ok") + " then " + TryName(t, "ok") + ", " + TryName(t, "sig") + ", " + TryName(t, "val") +
 					" = pcall(function");
 				const size_t open = Sig(i + 1);
@@ -899,6 +903,8 @@ namespace cluau {
 					Error(m_Toks[i], "catch is catch (error) { ... }");
 					return;
 				}
+				for (size_t k = i; k <= brace; k++)
+					m_TryToken[k] = 1;
 				t.CatchVarargs = UsesVarargs(brace, MatchClose(brace));
 				if (t.CatchVarargs)
 					Generate(close, ", ...: " + VarargType() + ")");
@@ -918,6 +924,7 @@ namespace cluau {
 					Error(m_Toks[i], "finally needs a block: finally { ... }");
 					return;
 				}
+				m_TryToken[i] = m_TryToken[brace] = 1;
 				MarkBlock(brace, BlockKind::Finally, "do");
 				m_TryOf[brace] = index;
 			}
@@ -1138,7 +1145,52 @@ namespace cluau {
 				m_Repl[q] = " ";
 				if (const size_t let = Sig(p + 1); m_Toks[let].Is("let") || m_Toks[let].Is("local"))
 					Blank(let);
+				TypeClassLoop(p, q);
 				MarkBlock(brace, BlockKind::Loop, "do");
+			}
+
+			// `for (name, value in Class)` over a class this file declared
+			// earlier: the runtime's __iter gives the class's own members, by
+			// name. Luau's checker types the variables of a loop over a value
+			// with __iter as any (it does not call the metamethod's type), so
+			// the variables are annotated with what __iter gives. Not when the
+			// file declares something else by the class's name (a local, a
+			// parameter or a loop variable could be what the loop goes over).
+			void TypeClassLoop(size_t open, size_t close)
+			{
+				if (m_Profile != &ScriptProfile())
+					return;
+				std::vector<size_t> names;
+				size_t k = Sig(open + 1);
+				while (m_Toks[k].Kind == TokenKind::Name && !IsExpressionWord(m_Toks[k].Text))
+				{
+					names.push_back(k);
+					k = Sig(k + 1);
+					if (!m_Toks[k].Is(","))
+						break;
+					k = Sig(k + 1);
+				}
+				if (names.empty() || names.size() > 2 || !m_Toks[k].Is("in"))
+					return;
+				const size_t value = Sig(k + 1);
+				if (m_Toks[value].Kind != TokenKind::Name || Sig(value + 1) != close)
+					return;
+				const std::string_view name = m_Toks[value].Text;
+				if (std::none_of(m_R.Classes.begin(), m_R.Classes.end(), [&](const ClassInfo& c) { return c.Name == name; }))
+					return;
+				for (size_t j = 0; j < m_Toks.size(); j++)
+				{
+					if (m_Toks[j].Kind != TokenKind::Name || m_Toks[j].Text != name)
+						continue;
+					const Token& before = m_Toks[PrevSig(j)];
+					const Token& after = m_Toks[Sig(j + 1)];
+					if (before.Is("let") || before.Is("const") || before.Is("local") || before.Is("function") ||
+						((before.Is("(") || before.Is(",")) && (after.Is(":") || after.Is("in"))))
+						return;
+				}
+				AddAfter(names[0], ": string");
+				if (names.size() > 1)
+					AddAfter(names[1], ": unknown");
 			}
 
 			void Else(size_t i)
@@ -2275,6 +2327,7 @@ namespace cluau {
 						after = Sig(after + 1);
 					const bool lastInFunction = m_Toks[after].Is("}") && !m_Stack.empty() && m_Stack.back().Kind == Frame::Block &&
 						(m_Stack.back().Block == BlockKind::Function || m_Stack.back().Block == BlockKind::Method);
+					m_TryToken[i] = 1;
 					if (!more)
 						text += TryEnd(m_Tries[index], lastInFunction);
 					else
@@ -2358,6 +2411,41 @@ namespace cluau {
 						break;
 					}
 				}
+			}
+
+			// The lines holding nothing but try statements' own syntax (and
+			// comments): what runs there is the lowering's (the test for an
+			// error, the catch block's call, the rethrow), not a statement of
+			// the source's. And the lines each try and catch block's function
+			// starts on.
+			void FindTryLines()
+			{
+				std::map<int, bool> lines; // line -> only the try's tokens so far
+				for (size_t i = 0; i < m_Toks.size(); i++)
+				{
+					const Token& t = m_Toks[i];
+					if (t.Kind == TokenKind::Eof)
+						break;
+					if (t.IsComment())
+						continue;
+					for (int line = t.Line; line <= t.EndLine; line++)
+					{
+						auto [it, added] = lines.emplace(line, m_TryToken[i] != 0);
+						if (!added)
+							it->second = it->second && m_TryToken[i];
+					}
+				}
+				for (const auto& [line, only] : lines)
+					if (only)
+						m_R.TryLines.push_back(line);
+				std::set<int> starts;
+				for (const TryState& t : m_Tries)
+				{
+					starts.insert(m_Toks[t.Token].Line);
+					if (t.CatchAt != npos)
+						starts.insert(m_Toks[t.CatchAt].Line);
+				}
+				m_R.TryFunctionLines.assign(starts.begin(), starts.end());
 			}
 
 			// ---- the emit pass -------------------------------------------
@@ -2463,6 +2551,7 @@ namespace cluau {
 			std::vector<uint8_t> m_Skip;
 			std::vector<uint8_t> m_DropGap; // the spaces before this token are not copied (a line break always is)
 			std::vector<uint8_t> m_ThrowAt; // a `throw` statement's keyword: its value follows
+			std::vector<uint8_t> m_TryToken; // the try statement's own syntax: `}` of its blocks, `catch (e: T) {`, `finally {`
 			struct ExprIf
 			{
 				size_t Depth = 0; // m_Stack's size at the `if`: its `else` is at the same depth
@@ -2611,6 +2700,9 @@ namespace cluau {
 					meta = "__call: " + members.CtorGenerics + "(unknown" + ctor + ") -> $Class";
 				if (derived)
 					meta += (meta.empty() ? "" : ", ") + std::string("__index: typeof(") + info.Base + ")";
+				// `for (name, value in Class)`: the class's own statics and
+				// methods, by name (the runtime's __iter).
+				meta += (meta.empty() ? "" : ", ") + std::string("__iter: (unknown) -> ((unknown, string?) -> (string?, unknown), unknown)");
 				h.TableInit = "setmetatable({ Fields = {}, __name = \"$Class\"" + (derived ? ", __base = " + info.Base : std::string()) +
 					(info.Abstract ? ", __abstract = true" : "") + (abstracts.empty() ? "" : ", __abstracts = { " + abstracts + " }") +
 					", __instance = (nil :: any) :: $Class }, __cluau_meta :: { " + meta + " })";

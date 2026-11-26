@@ -387,7 +387,10 @@ What it does:
   editor shows it unverified); on a blank or comment line it moves to the
   next line with code, and on a line that only closes a block (`}`) to the
   block's last line with code, so that one on a loop's closing brace
-  pauses on each pass. One past the file's last line, one with no code at
+  pauses on each pass. One on a `try`'s `} catch (e) {` line pauses in the
+  catch block, when it catches an error, and one on `} finally {` in the
+  finally block; steps go through the blocks' statements and never stop on
+  those lines. One past the file's last line, one with no code at
   or after it, and one whose condition or hit count does not compile (a
   hit count is at most 2147483647) are not verified, with the reason.
 - Pausing on an error that ends the script (on by default), or on every
@@ -531,6 +534,11 @@ print(v, Vec.Count)   // Vec(4, 6)    3
   `nil`.
 - Methods are called with `:` (`v:Length()`); a `static` member is the
   class's own (`Vec.Count`) and instances read it too.
+- `for (name, value in Vec)` goes over the class's own statics and methods
+  (not a base class's). `cluau check` types `name` as a string and `value`
+  as `unknown` when the loop names a class the file declares; over another
+  module's class, annotate them: `for (name: string, value: unknown in
+  shapes.Circle)` (Luau's checker otherwise types them `any`).
 - The class is its instances' metatable, so a method named `__tostring`,
   `__eq`, `__lt`, `__le`, `__add`, `__sub`, `__mul`, `__div`, `__unm`,
   `__concat`, `__len` or `__call` is that metamethod.

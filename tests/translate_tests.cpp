@@ -300,11 +300,11 @@ TEST("scripts: the script profile constructs instances and evaluates each defaul
 	options.Script = true;
 	options.Profile = &cluau::ScriptProfile();
 	const std::string luau = Luau("class P {\n\tTags: {string} = {}\n\tN: number\n}\n", options);
-	CHECK(luau.rfind("local P = setmetatable({ Fields = {}, __name = \"P\", __instance = (nil :: any) :: P }, __cluau_meta :: { __call: (unknown) -> P }); ", 0) == 0);
+	CHECK(luau.rfind("local P = setmetatable({ Fields = {}, __name = \"P\", __instance = (nil :: any) :: P }, __cluau_meta :: { __call: (unknown) -> P, __iter: (unknown) -> ((unknown, string?) -> (string?, unknown), unknown) }); ", 0) == 0);
 	CHECK(luau.find("export type P = typeof(setmetatable({} :: { Tags: {string}, N: number, }, {} :: { __index: typeof(P), }))") != std::string::npos);
 	// Init's parameters type the constructor; metamethods are the instances' metatable's.
 	const std::string vec = Luau("class V {\n\tfunction Init(x: number) { }\n\tfunction __add(o: V): V { return o }\n\tfunction Len(): number { return 1 }\n}\n", options);
-	CHECK(vec.find("__call: (unknown, x: number) -> V })") != std::string::npos);
+	CHECK(vec.find("__call: (unknown, x: number) -> V, __iter: ") != std::string::npos);
 	CHECK(vec.find("{} :: { __index: typeof(V), __add: (self: V, o: V) -> V, }") != std::string::npos);
 	CHECK_EQ(Lines(vec), 5);
 	CHECK(luau.find("P.Fields.Tags = function() return {} end") != std::string::npos);
@@ -343,11 +343,11 @@ TEST("scripts: a class extends another; super calls the base's methods")
 	CHECK_EQ(r.Classes[2].Base, std::string("lib.Base"));
 	CHECK_EQ(Lines(r.Luau), 8);
 	// B inherits A's constructor; its instances are A's and its own.
-	CHECK(r.Luau.find("__base = A, __instance = (nil :: any) :: B }, __cluau_meta :: { __call: (unknown, n: number) -> B, __index: typeof(A) })") != std::string::npos);
+	CHECK(r.Luau.find("__base = A, __instance = (nil :: any) :: B }, __cluau_meta :: { __call: (unknown, n: number) -> B, __index: typeof(A), __iter: ") != std::string::npos);
 	CHECK(r.Luau.find("export type B = typeof(A.__instance) & typeof(setmetatable(") != std::string::npos);
 	CHECK(r.Luau.find("return A.Get(self) + A.Count") != std::string::npos);
 	// Another module's base: its constructor's parameters are unknown.
-	CHECK(r.Luau.find("__call: (unknown, ...any) -> C, __index: typeof(lib.Base) }") != std::string::npos);
+	CHECK(r.Luau.find("__call: (unknown, ...any) -> C, __index: typeof(lib.Base), __iter: ") != std::string::npos);
 	// The `extends` clause is gone from the line.
 	CHECK(r.Luau.find("extends") == std::string::npos);
 
@@ -473,6 +473,28 @@ TEST("language: try / catch / finally keep every line on its line")
 	CHECK(ScriptTranslation("try {\n} catch (error: string) {\n}\n").Luau.find("(error: string): ...any") != std::string::npos);
 }
 
+TEST("language: the lines holding only a try's own syntax are listed, for a debugger")
+{
+	const std::string source = "try {\n"                                // 0
+							   "\ta()\n"                                // 1
+							   "} catch (e) { // what went wrong\n"     // 2
+							   "\tb()\n"                                // 3
+							   "} finally {\n"                          // 4
+							   "\tc()\n"                                // 5
+							   "}\n"                                    // 6
+							   "try { a() } catch (e: string) { b() }\n" // 7
+							   "try {\n"                                // 8
+							   "\ta()\n"                                // 9
+							   "}\n"                                    // 10
+							   "catch (e: { x: number,\n"               // 11
+							   "\ty: number }) {\n"                     // 12
+							   "}\n";                                   // 13
+	const cluau::TranslateResult r = ScriptTranslation(source);
+	CHECK(!r.HasErrors());
+	CHECK(r.TryLines == std::vector<int>({ 2, 4, 6, 10, 11, 12, 13 }));
+	CHECK(r.TryFunctionLines == std::vector<int>({ 0, 2, 7, 8, 11 }));
+}
+
 TEST("language: break and continue leave a try for the loop around it")
 {
 	const cluau::TranslateResult r = ScriptTranslation("for (i = 1, 3) {\n\ttry {\n\t\tbreak\n\t} catch (error) {\n\t\tcontinue\n\t}\n}\n");
@@ -523,7 +545,7 @@ TEST("language: abstract classes and methods")
 	CHECK(r.Luau.find("function Shape.Area(self: Shape): number return __cluau_abstract(\"Shape\", \"Area\") end") != std::string::npos);
 	CHECK(r.Luau.find("function Shape.Scale(self: Shape, by: number) __cluau_abstract(\"Shape\", \"Scale\") end") != std::string::npos);
 	// An abstract class is not callable to the checker.
-	CHECK(r.Luau.find("__cluau_meta :: {  })") != std::string::npos);
+	CHECK(r.Luau.find("__cluau_meta :: { __iter: (unknown) -> ((unknown, string?) -> (string?, unknown), unknown) })") != std::string::npos);
 
 	CHECK(HasError(ScriptTranslation("abstract class A {\n\tabstract function F()\n}\nclass B extends A {\n}\n"),
 		"B does not define F, which A declares abstract"));
@@ -754,6 +776,21 @@ TEST("classes: positions in a field's default map to the source")
 	};
 	CHECK_EQ(r.Map.FromLuau({ 1, luauColumn(1, "nope") }).Col, 15);
 	CHECK_EQ(r.Map.FromLuau({ 2, luauColumn(2, "nope3") }).Col, 13);
+}
+
+TEST("classes: a loop over a script's class names its members' types")
+{
+	const std::string loop = ScriptTranslation("class C {\n\tstatic N = 1\n}\nfor (k, v in C) {\n}\nfor (k in C) {\n}\n").Luau;
+	CHECK(loop.find("for  k: string, v: unknown in C") != std::string::npos);
+	CHECK(loop.find("for  k: string in C") != std::string::npos);
+	CHECK(loop.find("__iter: (unknown) -> ((unknown, string?) -> (string?, unknown), unknown)") != std::string::npos);
+	// The name may be another value's where the loop is: no annotations.
+	CHECK(ScriptTranslation("class C {\n}\nfunction F(C: { number }) {\n\tfor (i, v in C) {\n\t}\n}\n").Luau.find(": string") == std::string::npos);
+	CHECK(ScriptTranslation("class C {\n}\ndo {\n\tlet C = { 1 }\n\tfor (i, v in C) {\n\t}\n}\n").Luau.find(": string") == std::string::npos);
+	// Annotated variables, a call, a class declared later: left alone.
+	CHECK(ScriptTranslation("class C {\n}\nfor (k: string in C) {\n}\n").Luau.find("k: string: string") == std::string::npos);
+	CHECK(ScriptTranslation("class C {\n}\nfor (k in pairs(C)) {\n}\n").Luau.find("k: string") == std::string::npos);
+	CHECK(ScriptTranslation("for (k in C) {\n}\nclass C {\n}\n").Luau.find("k: string") == std::string::npos);
 }
 
 TEST("classes: a script class's `};` after a member's own `;`")
