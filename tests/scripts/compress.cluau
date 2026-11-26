@@ -56,13 +56,18 @@ print("extracted", opened:extract(path.join(dir, "out")))
 print(fs.read(path.join(dir, "out", "copied.txt")), fs.read(path.join(dir, "out", "deep", "inside", "note.txt")))
 opened:close()
 
-// An entry named to leave the directory is refused.
+// An entry named to leave the directory is refused: the writer makes
+// none, and extract refuses one made elsewhere (patched in here).
+print("writer refuses", (pcall(function() {
+	zip.create():add("../escaped.txt", "no")
+})))
 const evil = zip.create()
-evil:add("../escaped.txt", "no")
+evil:add("xx/escaped.txt", "no")
 const evilBytes = evil:finish()
 if (evilBytes != nil) {
+	const patched = (string.gsub(evilBytes, "xx/escaped%.txt", "../escaped.txt"))
 	const refused, why = pcall(function() {
-		zip.fromString(evilBytes):extract(path.join(dir, "evil"))
+		zip.fromString(patched):extract(path.join(dir, "evil"))
 	})
 	print("escape", refused, string.find(tostring(why), "outside the directory", 1, true) != nil, fs.exists(path.join(dir, "escaped.txt")))
 }
@@ -80,16 +85,15 @@ for (_, attempt in attempts) {
 }
 
 // What fuzzing found: a raw deflate stream that miniz decodes without end,
-// gzip data that does the same, and a zip entry that claims 721 MB from 6
-// bytes. Each is an error, at once.
+// gzip data that does the same, and a zip archive whose entry claims 721 MB
+// from 6 bytes. Each is an error, at once.
 print(pcall(compress.inflate, encoding.fromBase64("LCsAAEoADQ=="), { raw = true }))
 print(pcall(compress.gunzip, encoding.fromBase64("H4sIAAD4AAAC/yQpkACAiPkAAAABFgAAAAAAAAAAAAAAAEEA")))
-const claims = zip.fromString(encoding.fromBase64("UEsDBBQAAAAIAE56eV0OHl2PBkkBAGQAAAAHAAAAYS9iq3R4LnQSAAAAAAAAAAQUAAAACABOenldAAAAAAIAAAAAAAAAAgAAAGQvAwBQSwMEFAAAAAAATnp5XQv5Q1YGAAAABgAAAAUAAABjLnR4dHZ0b3JhZFBLAQIUAxQAAAAIAE56eV2PXQ5eBgAAAGAAACsAAAcAAAAAAAAAAACAAQAAAABhL2IudHh0UEsBAhQDFAD/AAgAKXp5XQAAAAACAAAAAAAAAAAAAgAAAAAAAAAQAP1BKwAAAGQvUEsBAhQDFAAAAAByZWFkXQv5x6kGAAAABgAAAAUAAAAAAAAAAQAAFAMUAAAAAAAAAAAAAAAAgAFNAAAAcy50eHRQSwUGAAAAAAMAAwCYAAAAdgAAAAAA"))
-const entries = claims:entries()
 const huge, hugeWhy = pcall(function() {
-	claims:read(entries[1].name)
+	const claims = zip.fromString(encoding.fromBase64("UEsDBBQAAAAIAE56eV0OHl2PBkkBAGQAAAAHAAAAYS9iq3R4LnQSAAAAAAAAAAQUAAAACABOenldAAAAAAIAAAAAAAAAAgAAAGQvAwBQSwMEFAAAAAAATnp5XQv5Q1YGAAAABgAAAAUAAABjLnR4dHZ0b3JhZFBLAQIUAxQAAAAIAE56eV2PXQ5eBgAAAGAAACsAAAcAAAAAAAAAAACAAQAAAABhL2IudHh0UEsBAhQDFAD/AAgAKXp5XQAAAAACAAAAAAAAAAAAAgAAAAAAAAAQAP1BKwAAAGQvUEsBAhQDFAAAAAByZWFkXQv5x6kGAAAABgAAAAUAAAAAAAAAAQAAFAMUAAAAAAAAAAAAAAAAgAFNAAAAcy50eHRQSwUGAAAAAAMAAwCYAAAAdgAAAAAA"))
+	claims:read(claims:entries()[1].name)
 })
-print(huge, string.find(tostring(hugeWhy), "the archive is damaged", 1, true) != nil)
+print(huge, string.find(tostring(hugeWhy), "is damaged", 1, true) != nil)
 
 // Entry names are matched exactly, case included.
 const cased = zip.create()

@@ -1,0 +1,17 @@
+commit failed	false	true
+outside a transaction	true
+child rows	0
+inner failed	false
+still inside	true
+parents	1
+rows	1	2	nil
+run inside its loop	false	1	true
+rows again	2
+missing name	1
+nul in exec	false	true
+nul in query	false	true
+second statement	false	true
+nul path	false
+changes	2	0	0
+write after close	true
+exit: 0

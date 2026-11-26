@@ -14,6 +14,7 @@ made	notes/a.txt:5 notes/b.txt:4600 empty/:0	true
 finish	true	true
 extracted	2
 from a file	nested
+writer refuses	false
 escape	false	true	false
 false	compress.gunzip: the data is not gzip
 false	compress.inflate: the data is not zlib 

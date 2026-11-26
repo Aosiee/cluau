@@ -8,6 +8,7 @@
 #include "Std.h"
 
 #include "Luau/CodeGen.h"
+#include "Luau/Common.h"
 #include "Luau/Compiler.h"
 #include "lua.h"
 #include "lualib.h"
@@ -38,6 +39,8 @@
 #endif
 
 namespace fs = std::filesystem;
+
+LUAU_DYNAMIC_FASTFLAG(LuauGcHeapShrinkFix)
 
 namespace cluau::runtime {
 
@@ -1143,6 +1146,11 @@ end
 		std::error_code ec;
 		rt.StartDir = fs::current_path(ec);
 		rt.MainDir = rt.StartDir;
+		// Luau's collector takes the heap's growth between collections as
+		// an unsigned difference, which a heap that shrank meanwhile turns
+		// into a huge number (and an out-of-range conversion); the fix Luau
+		// keeps behind this flag measures it properly.
+		DFFlag::LuauGcHeapShrinkFix.value = true;
 		lua_State* L = rt.L = luaL_newstate();
 		rt.Native = rt.Opts.Native && !rt.Opts.Coverage && Luau::CodeGen::isSupported();
 		if (rt.Native)

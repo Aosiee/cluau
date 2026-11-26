@@ -1,0 +1,102 @@
+// @std/sqlite at its edges: a commit that fails, rows() loops that end or
+// are cut short, SQL with a NUL byte, and what run() counts.
+const sqlite = require("@std/sqlite")
+const fs = require("@std/fs")
+const path = require("@std/path")
+
+// A commit that fails (a deferred foreign key) rolls the transaction back.
+const db = sqlite.open(":memory:")
+
+// Whether the connection is back outside any transaction (BEGIN fails
+// inside one).
+function outside(): boolean {
+	const ok = pcall(function() {
+		db:exec("BEGIN; COMMIT")
+	})
+	return ok
+}
+
+db:exec("CREATE TABLE parent (id INTEGER PRIMARY KEY); CREATE TABLE child (p INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")
+const committed, why = pcall(function() {
+	db:transaction(function() {
+		db:run("INSERT INTO child VALUES (99)")
+	})
+})
+print("commit failed", committed, string.find(tostring(why), "FOREIGN KEY constraint failed", 1, true) != nil)
+print("outside a transaction", outside())
+print("child rows", (db:first("SELECT count(*) AS n FROM child") :: any).n) // allow-any: a row's shape
+
+// A transaction begun by hand stays when one inside it fails.
+db:exec("BEGIN")
+db:run("INSERT INTO parent VALUES (1)")
+print("inner failed", (pcall(function() {
+	db:transaction(function() {
+		db:run("INSERT INTO parent VALUES (2)")
+		error("no")
+	})
+})))
+print("still inside", not outside())
+db:exec("COMMIT")
+print("parents", (db:first("SELECT group_concat(id) AS ids FROM parent") :: any).ids) // allow-any: a row's shape
+
+// An iterator that has ended stays ended.
+db:exec("CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (1), (2)")
+const it = db:rows("SELECT n FROM t ORDER BY n")
+print("rows", (it() :: any).n, (it() :: any).n, it(), it()) // allow-any: a row's shape
+
+// A statement run again inside its own rows() loop ends the loop.
+const select = db:prepare("SELECT n FROM t ORDER BY n")
+let seen = 0
+const looped, loopWhy = pcall(function() {
+	for (_ in select:rows()) {
+		seen += 1
+		select:first()
+	}
+})
+print("run inside its loop", looped, seen, string.find(tostring(loopWhy), "run again", 1, true) != nil)
+let again = 0
+for (_ in select:rows()) {
+	again += 1
+}
+print("rows again", again)
+select:close()
+
+// A name missing from the table of parameters is NULL.
+db:exec("CREATE TABLE people (name TEXT, email TEXT)")
+db:run("INSERT INTO people VALUES (:name, :email)", { name = "ada" })
+print("missing name", (db:first("SELECT email IS NULL AS missing FROM people") :: any).missing) // allow-any: a row's shape
+
+// SQL with a NUL byte, and a second statement that does not prepare.
+const nulExec, nulExecWhy = pcall(function() {
+	db:exec("CREATE TABLE a (x);\0CREATE TABLE b (x)")
+})
+print("nul in exec", nulExec, string.find(tostring(nulExecWhy), "NUL byte", 1, true) != nil)
+const nulQuery, nulQueryWhy = pcall(function() {
+	db:query("SELECT 1;\0 DROP TABLE t")
+})
+print("nul in query", nulQuery, string.find(tostring(nulQueryWhy), "NUL byte", 1, true) != nil)
+const two, twoWhy = pcall(function() {
+	db:query("SELECT 1; SELECT * FROM nowhere")
+})
+print("second statement", two, string.find(tostring(twoWhy), "more than one statement", 1, true) != nil)
+print("nul path", (pcall(sqlite.open, "nul\0.db")))
+
+// run() counts what this statement changed.
+print("changes", db:run("INSERT INTO t VALUES (3), (4)").changes, db:run("SELECT 1").changes, db:run("CREATE TABLE u (x)").changes)
+db:close()
+
+// Closing a database lets go of the read lock a rows() loop left early
+// holds, so another connection can write at once.
+const file = path.join(fs.tempDir(), `cluau-sqlite-edges-{math.floor(os.clock() * 1e6)}.db`)
+const reader = sqlite.open(file)
+reader:exec("CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (1), (2)")
+for (_ in reader:rows("SELECT n FROM t")) {
+	break
+}
+reader:close()
+const writer = sqlite.open(file)
+print("write after close", (pcall(function() {
+	writer:run("INSERT INTO t VALUES (3)")
+})))
+writer:close()
+fs.remove(file)

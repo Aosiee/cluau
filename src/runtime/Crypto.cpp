@@ -224,6 +224,10 @@ namespace cluau::runtime::detail {
 		// they first differ (for secrets: tokens, signatures).
 		int CryptoEqual(lua_State* L)
 		{
+			// Strings or buffers only: a number would be compared as its text.
+			for (int i = 1; i <= 2; i++)
+				if (lua_type(L, i) != LUA_TSTRING && lua_type(L, i) != LUA_TBUFFER)
+					luaL_typeerror(L, i, "string or buffer");
 			const std::string_view a = Bytes(L, 1);
 			const std::string_view b = Bytes(L, 2);
 			unsigned char difference = a.size() == b.size() ? 0 : 1;

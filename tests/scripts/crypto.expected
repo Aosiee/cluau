@@ -19,6 +19,7 @@ false	crypto.cluau:21: hasher:digest: the hasher has given its digest already
 32	true
 36	true	true
 true	false	false
+equal	true	false
 false	crypto.hash: no hash 'sha3' (the hashes: md5, sha1, sha224, sha256, sha384, sha512)
 false	encoding.fromBase64: '$' (at 2) is not base64
 false	encoding.fromHex: an odd number of digits (3)
