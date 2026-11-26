@@ -731,16 +731,18 @@ __cluau_meta = {
 				searchDirs.push_back(rt.StartDir / fs::u8path(dir));
 			std::vector<fs::path> looked;
 			const fs::path found = detail::ResolveRequire(name, from, rt.MainDir, searchDirs, &looked);
-			if (found.empty())
+			// In the sandbox a module outside it reads as one that isn't
+			// there, so a script cannot learn which files exist outside.
+			if (found.empty() || (rt.Opts.Sandbox && !rt.SandboxAllows(found, searchDirs)))
 			{
+				if (rt.Opts.Sandbox)
+					luaL_error(L, "module '%s' not found in the sandbox (it loads modules from the script's directory, cluau_modules and the search path)",
+						name.c_str());
 				std::string tried;
 				for (const fs::path& base : looked)
 					tried += (tried.empty() ? "" : ", ") + rt.Display(base) + "[.cluau|.luau]";
 				luaL_error(L, "module '%s' not found (looked for %s)", name.c_str(), tried.c_str());
 			}
-			if (rt.Opts.Sandbox && !rt.SandboxAllows(found, searchDirs))
-				luaL_error(L, "module '%s' is outside the sandbox (it loads modules from the script's directory, cluau_modules and the search path)",
-					rt.Display(found).c_str());
 			const std::string key = detail::ModuleKey(found);
 
 			lua_getfield(L, LUA_REGISTRYINDEX, kModulesRegistry);

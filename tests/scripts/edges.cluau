@@ -58,3 +58,31 @@ print("padding", compress.gunzip(compress.gzip("padded") .. string.rep("\0", 16)
 
 // A count of bytes is a whole number.
 print("random", (pcall(crypto.randomBytes, 2.5)), #crypto.randomBytes(3))
+
+// Base64: only the exact encoding of some bytes decodes.
+const encoding = require("@std/encoding")
+for (_, text in { "QQ==", "QQ", "QUI=", "QR==", "QQ=", "QUJ=" }) {
+	print("base64", text, (pcall(encoding.fromBase64, text)))
+}
+
+// JSON: two keys that would be the same JSON key are refused.
+print("same key", (pcall(json.encode, { [1] = "a", ["1"] = "b" })), json.encode({ [2] = "a", ["1"] = "b" }))
+
+// fs.glob: a pattern ending in / is directories only; a [ without its ] is
+// an ordinary character. fs.realpath follows links and resolves `..`.
+const globbed = path.join(fs.tempDir(), `cluau-edges-glob-{math.floor(time.now() * 1000)}`)
+fs.mkdir(path.join(globbed, "sub"))
+fs.write(path.join(globbed, "file"), "")
+fs.write(path.join(globbed, "[x"), "")
+const names = function(list: { string }): string {
+	const out: { string } = {}
+	for (_, item in list) {
+		table.insert(out, string.sub(item, #globbed + 2))
+	}
+	return table.concat(out, " ")
+}
+print("glob dirs", names(fs.glob(globbed .. "/*/")))
+print("glob [", names(fs.glob(globbed .. "/[x")))
+print("realpath", fs.realpath(path.join(globbed, "sub", "..", "file")) == fs.realpath(path.join(globbed, "file")),
+	(pcall(fs.realpath, path.join(globbed, "none"))))
+fs.remove(globbed, true)

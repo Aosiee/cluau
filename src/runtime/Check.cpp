@@ -76,6 +76,7 @@ return m :: {
 	readBuffer: (path: string) -> buffer,
 	writeBuffer: (path: string, bytes: buffer) -> (),
 	tempFile: (prefix: string?) -> string,
+	realpath: (path: string) -> string,
 }
 )LUAU" },
 				{ "path", R"LUAU(

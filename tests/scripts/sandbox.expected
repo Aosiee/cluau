@@ -3,6 +3,6 @@ true	true	true	true
 false	@std/fs is not available in the sandbox
 false	@std/http is not available in the sandbox
 hello, sandbox
-false
+false	true
 {"ran":true}
 exit: 0

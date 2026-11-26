@@ -598,9 +598,24 @@ const kTypes: { [string]: string } = {
 	zip = "application/zip", gz = "application/gzip", mp3 = "audio/mpeg", mp4 = "video/mp4", woff2 = "font/woff2",
 }
 
+// Whether `file` really is under `directory` once symbolic links are
+// followed: a link inside the directory may lead out of it.
+const Inside = function(file: string, directory: string): boolean {
+	const rootFound, root = pcall(fs.realpath, directory)
+	const fileFound, real = pcall(fs.realpath, file)
+	if (!rootFound || !fileFound) {
+		return false
+	}
+	const last = string.sub(root, -1)
+	const prefix = if (last == "/" || last == "\\") root else root .. "/"
+	const winPrefix = if (last == "/" || last == "\\") root else root .. "\\"
+	return string.sub(real, 1, #prefix) == prefix || string.sub(real, 1, #winPrefix) == winPrefix
+}
+
 // A handler serving the files under `directory` (index.html for a
-// directory); a path that would leave the directory is refused, and hidden
-// files (a part starting with .) are not found.
+// directory); a path that would leave the directory is refused, a link
+// leading out of it is not followed, and hidden files (a part starting with
+// .) are not found.
 const files = function(directory: string): Handler {
 	return function(request: Request): Answer {
 		if (request.method != "GET" && request.method != "HEAD") {
@@ -623,7 +638,7 @@ const files = function(directory: string): Handler {
 		if (fs.isDir(file)) {
 			file = path.join(file, "index.html")
 		}
-		if (!fs.isFile(file)) {
+		if (!fs.isFile(file) || !Inside(file, directory)) {
 			return nil
 		}
 		const extension = string.lower(string.match(file, "%.([^./\\]+)$") or "")

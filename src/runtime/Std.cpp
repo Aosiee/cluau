@@ -289,6 +289,19 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// fs.realpath(path): the absolute path with every symbolic link and
+		// `.`/`..` resolved; the path must exist.
+		int FsRealpath(lua_State* L)
+		{
+			const fs::path path = P(L, 1);
+			std::error_code ec;
+			const fs::path real = fs::canonical(path, ec);
+			if (ec)
+				Fail(L, "fs.realpath", "cannot resolve", path, Reason(path, ec));
+			PushPath(L, real);
+			return 1;
+		}
+
 		int FsModified(lua_State* L)
 		{
 			const fs::path path = P(L, 1);
@@ -345,7 +358,17 @@ namespace cluau::runtime::detail {
 						else
 							matched = matched || name[n] == pattern[close];
 					}
-					if (close < pattern.size() && matched != negate)
+					if (close >= pattern.size())
+					{
+						// No closing `]`: the `[` is an ordinary character.
+						if (name[n] == '[')
+						{
+							p++;
+							n++;
+							continue;
+						}
+					}
+					else if (matched != negate)
 					{
 						p = close + 1;
 						n++;
@@ -445,6 +468,19 @@ namespace cluau::runtime::detail {
 			std::vector<std::string> out;
 			if (!parts.empty())
 				GlobFrom(dir, shown == "/" ? "/" : shown, parts, 0, out);
+			// A pattern ending in `/` matches only directories, shown with
+			// the `/`.
+			if (pattern.size() > 1 && pattern.back() == '/')
+			{
+				std::vector<std::string> dirs;
+				for (const std::string& found : out)
+				{
+					std::error_code ec;
+					if (fs::is_directory(fs::u8path(found), ec))
+						dirs.push_back(found == "/" ? found : found + "/");
+				}
+				out = std::move(dirs);
+			}
 			std::sort(out.begin(), out.end());
 			out.erase(std::unique(out.begin(), out.end()), out.end());
 			PushStrings(L, out);
@@ -751,7 +787,7 @@ namespace cluau::runtime::detail {
 			{ "isDir", FsIsDir }, { "list", FsList }, { "walk", FsWalk }, { "mkdir", FsMkdir }, { "remove", FsRemove },
 			{ "rename", FsRename }, { "copy", FsCopy }, { "size", FsSize }, { "modified", FsModified }, { "tempDir", FsTempDir },
 			{ "glob", FsGlob }, { "open", FsOpen }, { "lines", FsLines }, { "readBuffer", FsReadBuffer }, { "writeBuffer", FsWriteBuffer },
-			{ "tempFile", FsTempFile }, { nullptr, nullptr },
+			{ "tempFile", FsTempFile }, { "realpath", FsRealpath }, { nullptr, nullptr },
 		};
 
 		// ---- @std/path ------------------------------------------------------
@@ -1795,6 +1831,9 @@ namespace cluau::runtime::detail {
 						luaL_error(L, "json.encode: an object key is a %s (keys are strings or numbers)", luaL_typename(L, -1));
 				}
 				std::sort(keys.begin(), keys.end());
+				for (size_t k = 1; k < keys.size(); k++)
+					if (keys[k].first == keys[k - 1].first)
+						luaL_error(L, "json.encode: the keys %s and \"%s\" are the same JSON key", keys[k].first.c_str(), keys[k].first.c_str());
 				out += '{';
 				for (size_t k = 0; k < keys.size(); k++)
 				{

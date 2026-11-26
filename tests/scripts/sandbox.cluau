@@ -7,9 +7,11 @@ print(process.run == nil, process.env == nil, process.spawn == nil, process.chdi
 print(pcall(require, "@std/fs"))
 print(pcall(require, "@std/http"))
 
-// Modules from the script's directory load; those outside it do not.
+// Modules from the script's directory load; those outside it do not, and
+// one outside that exists reads the same as one that doesn't.
 print(require("./lib/greet").Hello("sandbox"))
-const outside = pcall(require, "../check/lib/greet")
-print(outside)
+const outside, outsideWhy = pcall(require, "../check/lib/greet")
+const missing, missingWhy = pcall(require, "../check/lib/none")
+print(outside, string.gsub(tostring(outsideWhy), "greet", "?") == string.gsub(tostring(missingWhy), "none", "?")) // allow-any: pcall's error values
 
 print(require("@std/json").encode({ ran = true }))

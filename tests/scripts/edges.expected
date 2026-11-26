@@ -20,4 +20,14 @@ escape	true
 split 0	false
 padding	padded
 random	false	3
+base64	QQ==	true
+base64	QQ	true
+base64	QUI=	true
+base64	QR==	false
+base64	QQ=	false
+base64	QUJ=	false
+same key	false	{"1":"b","2":"a"}
+glob dirs	sub/
+glob [	[x
+realpath	true	false
 exit: 0

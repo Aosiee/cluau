@@ -82,6 +82,7 @@ namespace cluau::runtime::detail {
 			unsigned v = 0;
 			int bits = 0;
 			bool ended = false;
+			size_t digits = 0, padding = 0;
 			for (size_t i = 0; i < text.size(); i++)
 			{
 				const char c = text[i];
@@ -99,6 +100,7 @@ namespace cluau::runtime::detail {
 				else if (c == '=')
 				{
 					ended = true;
+					padding++;
 					continue;
 				}
 				else if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
@@ -107,6 +109,7 @@ namespace cluau::runtime::detail {
 					luaL_error(L, "encoding.fromBase64: '%c' (at %d) is not base64", c, (int)i + 1);
 				if (ended)
 					luaL_error(L, "encoding.fromBase64: text after the padding (at %d)", (int)i + 1);
+				digits++;
 				v = (v << 6) | (unsigned)n;
 				bits += 6;
 				if (bits >= 8)
@@ -117,6 +120,13 @@ namespace cluau::runtime::detail {
 			}
 			if (bits >= 6)
 				luaL_error(L, "encoding.fromBase64: the text ends in the middle of a byte");
+			// Only one text decodes to each value: the bits left over in the
+			// last character are zero, and padding, if any, fills the last
+			// group of four exactly.
+			if ((v & ((1u << bits) - 1)) != 0)
+				luaL_error(L, "encoding.fromBase64: the last character has bits that belong to no byte");
+			if (padding > 0 && (digits + padding) % 4 != 0)
+				luaL_error(L, "encoding.fromBase64: the padding doesn't fill the last group of four");
 			lua_pushlstring(L, out.data(), out.size());
 			return 1;
 		}

@@ -695,7 +695,8 @@ standard input, `nil` at its end), and these modules:
 | `size(path): number`, `modified(path): number` | the size in bytes; the last change, in seconds since 1970 |
 | `tempDir(): string` | the system's temporary directory |
 | `tempFile(prefix?): string` | a new, empty file of the script's own in the temporary directory |
-| `glob(pattern): {string}` | the paths matching a pattern, sorted: `*`, `?` and `[a-z]` within a name, `**` for any number of directories (`fs.glob("src/**/*.cluau")`); names starting with `.` match only a pattern that does |
+| `realpath(path): string` | the absolute path with symbolic links, `.` and `..` resolved; the path must exist |
+| `glob(pattern): {string}` | the paths matching a pattern, sorted: `*`, `?` and `[a-z]` within a name, `**` for any number of directories (`fs.glob("src/**/*.cluau")`); names starting with `.` match only a pattern that does; a pattern ending in `/` matches only directories, and a `[` with no closing `]` is an ordinary character |
 | `lines(path)` | the file's lines one by one, for a `for` loop (`for (line in fs.lines("log.txt")) { }`) |
 | `open(path, mode?): File` | a file to read (`"r"`, the default), write from empty (`"w"`) or add to (`"a"`) |
 | `readBuffer(path): buffer`, `writeBuffer(path, bytes)` | the file's bytes as a Luau `buffer`, and back |
@@ -810,7 +811,8 @@ string?` reads a line (without its newline; `nil` at the end of input);
 `pretty` is `true` (two spaces), a number of spaces, or an indent string. Objects' keys are
 written sorted, so the output is the same every run; a table whose keys are
 `1..n` is an array, and an empty table is `[]`. A value with no JSON form
-(a function, a table that contains itself, NaN) is an error.
+(a function, a table that contains itself, NaN) is an error, and so is a
+table with two keys that would be the same JSON key (`[1]` and `["1"]`).
 
 - `null` decodes to `nil`, so a key whose value is `null` is absent and an
   array's `null` leaves a gap. `decode(text, { null = json.null })` decodes
@@ -1081,7 +1083,7 @@ answers each request.
 |---|---|
 | `serve(options, handler): Server` | serves `handler` and returns at once; `options.host` (`"127.0.0.1"` by default: this machine only), `options.port` (8080; 0 for any free one), `options.tls` (`{ certFile, keyFile }`), `options.maxBody` (16 MiB), `options.idle` (seconds a connection may wait between requests, 60). The `Server` has `host`, `port` and `close()` (which stops taking connections and closes those waiting for a request; a request under way is finished) |
 | `router(): Router` | routes by method and path: `get`, `post`, `put`, `delete` and `route(method, pattern, handler)` (each returns the router, to chain), and `handler()` for `serve`. A pattern's parts are literal, `:name` (in `request.params.name`) or `*` (the rest, in `request.params["*"]`). The path is split at its `/`s before it is decoded, so `/users/a%2Fb` has the one part `a/b` |
-| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension); a path that would leave the directory, or holds a NUL, is refused, and hidden files (a part starting with `.`: `.git`, `.env`) are not found. A symbolic link inside `directory` is followed |
+| `files(directory): Handler` | serves the files under `directory` (`index.html` for a directory, the content type by extension); a path that would leave the directory, or holds a NUL, is refused, and hidden files (a part starting with `.`: `.git`, `.env`) are not found. A symbolic link inside `directory` is followed only to a file that is itself inside `directory` |
 | `upgrade(request, fn): Answer` | answers a WebSocket request: `fn` gets the connection (a `@std/websocket` `WebSocket`), and the connection ends when `fn` returns |
 
 A `Request` has `method`, `path` (decoded, without the query), `query`
@@ -1231,7 +1233,7 @@ is a string of the bytes.
 | function | is |
 |---|---|
 | `toBase64(data, options?): string` | base64; `options.url` for the URL-safe alphabet (`-` and `_`, unpadded unless `options.padding`) |
-| `fromBase64(text): string` | the bytes, from either alphabet, padded or not (spaces and line breaks are skipped) |
+| `fromBase64(text): string` | the bytes, from either alphabet, padded or not (spaces and line breaks are skipped); text that isn't the exact encoding of its bytes (bits left over in the last character, padding that doesn't fill the last group of four) is an error |
 | `toHex(data): string` | lowercase hex |
 | `fromHex(text): string` | the bytes, from hex in either case |
 
