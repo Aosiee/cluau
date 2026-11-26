@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_set>
 
 namespace cluau::runtime::detail {
 
@@ -141,6 +142,9 @@ namespace cluau::runtime::detail {
 				{
 					At++;
 					Json object = Json::Object();
+					// The names so far: a repeated one replaces its value (the
+					// last wins), and the others need no search.
+					std::unordered_set<std::string> names;
 					Space();
 					if (At < Text.size() && Text[At] == '}')
 					{
@@ -159,7 +163,10 @@ namespace cluau::runtime::detail {
 						std::optional<Json> value = Value();
 						if (!value)
 							return std::nullopt;
-						object.Set(std::move(key), std::move(*value));
+						if (names.insert(key).second)
+							object.Append(std::move(key), std::move(*value));
+						else
+							object.Set(std::move(key), std::move(*value));
 						Space();
 						if (At < Text.size() && Text[At] == ',')
 						{
@@ -313,6 +320,13 @@ namespace cluau::runtime::detail {
 				member.second = std::move(value);
 				return *this;
 			}
+		m_Members.emplace_back(std::move(key), std::move(value));
+		return *this;
+	}
+
+	Json& Json::Append(std::string key, Json value)
+	{
+		m_Kind = Kind::Object;
 		m_Members.emplace_back(std::move(key), std::move(value));
 		return *this;
 	}

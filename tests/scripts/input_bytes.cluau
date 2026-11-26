@@ -1,0 +1,12 @@
+// Standard input's bytes go through as they are: a CR before the newline
+// is dropped from a line, and NUL, 0x1A (Ctrl-Z) and 0xFF stay.
+const io = require("@std/io")
+const encoding = require("@std/encoding")
+
+print(repr(io.readLine()))
+print(encoding.toHex(io.readLine() or ""))
+const rest = io.readAll()
+print(#rest, encoding.toHex(rest))
+print(io.readLine(), repr(io.readAll()))
+io.write("written", "\n")
+io.flush()

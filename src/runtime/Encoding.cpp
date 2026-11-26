@@ -7,12 +7,25 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include <cstdio>
 #include <string>
 #include <string_view>
 
 namespace cluau::runtime::detail {
 
 	namespace {
+
+		// A byte for an error message: 'x', or 0xNN when it is not printable.
+		std::string Shown(char c)
+		{
+			char buf[16];
+			const unsigned char b = (unsigned char)c;
+			if (b >= 0x20 && b < 0x7f)
+				std::snprintf(buf, sizeof(buf), "'%c'", c);
+			else
+				std::snprintf(buf, sizeof(buf), "0x%02X", b);
+			return buf;
+		}
 
 		std::string_view Bytes(lua_State* L, int index)
 		{
@@ -106,7 +119,7 @@ namespace cluau::runtime::detail {
 				else if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
 					continue;
 				else
-					luaL_error(L, "encoding.fromBase64: '%c' (at %d) is not base64", c, (int)i + 1);
+					luaL_error(L, "encoding.fromBase64: %s (at %d) is not base64", Shown(c).c_str(), (int)i + 1);
 				if (ended)
 					luaL_error(L, "encoding.fromBase64: text after the padding (at %d)", (int)i + 1);
 				digits++;
@@ -158,7 +171,7 @@ namespace cluau::runtime::detail {
 			{
 				const int hi = digit(text[2 * i]), lo = digit(text[2 * i + 1]);
 				if (hi < 0 || lo < 0)
-					luaL_error(L, "encoding.fromHex: '%c' (at %d) is not a hex digit", hi < 0 ? text[2 * i] : text[2 * i + 1],
+					luaL_error(L, "encoding.fromHex: %s (at %d) is not a hex digit", Shown(hi < 0 ? text[2 * i] : text[2 * i + 1]).c_str(),
 						(int)(hi < 0 ? 2 * i : 2 * i + 1) + 1);
 				out[i] = (char)(hi * 16 + lo);
 			}

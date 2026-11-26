@@ -333,6 +333,31 @@ TEST("json: values read back as they were written")
 	CHECK(!Json::Parse("[1, 2").has_value());
 }
 
+TEST("json: an object's repeated key keeps its last value, and a large object reads in linear time")
+{
+	std::optional<Json> v = Json::Parse(R"({"a": 1, "b": 2, "a": 3})");
+	CHECK(v.has_value());
+	if (!v)
+		return;
+	CHECK_EQ(v->Size(), size_t(2));
+	CHECK_EQ((*v)["a"].Int(), 3);
+	CHECK_EQ(v->Dump(), std::string(R"({"a":3,"b":2})"));
+	// 200,000 keys: a search of the members for each one would take minutes.
+	std::string text = "{";
+	for (int i = 0; i < 200000; i++)
+		text += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":" + std::to_string(i);
+	text += "}";
+	const auto start = std::chrono::steady_clock::now();
+	std::optional<Json> big = Json::Parse(text);
+	CHECK(big.has_value());
+	CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+	if (big)
+	{
+		CHECK_EQ(big->Size(), size_t(200000));
+		CHECK_EQ((*big)["k199999"].Int(), 199999);
+	}
+}
+
 TEST("lsp: an opened script's problems are published at their lines")
 {
 	Project project;

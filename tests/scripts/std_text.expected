@@ -1,0 +1,66 @@
+true	true
+a	a	a/b	.	.	/
+..	.	b	..
+true
+"..x"	"..x"	""
+"..."	"..."	""
+"a/..rc"	"..rc"	""
+".bashrc"	".bashrc"	""
+"a.tar.gz"	"a.tar"	".gz"
+"a."	"a"	"."
+"a/b.c/"	""	""
+".."	".."	""
+"."	"."	""
+false	invalid argument #1 to 'normalize' (the path holds a NUL byte)
+{"1":1,"3":3,"4":4,"name":"n"}
+{"3":3,"x":1,"y":2}	{"1.5":1}	[1,2,3]
+false	json.encode: a table json.array marks has keys other than 1..n
+false	json.encode: a string is not UTF-8 (byte 1 is 0xFF); encode bytes first (encoding.toBase64)
+false	json.encode: a string is not UTF-8 (byte 1 is 0xC0); encode bytes first (encoding.toBase64)
+false	json.encode: a string is not UTF-8 (byte 1 is 0xED); encode bytes first (encoding.toBase64)
+"é中😀"	efbfbd	efbfbdf09f9880
+"\b\f\n\r\t\"\\\u0001\u001f/"
+2000
+false	json.decode: nesting too deep (more than 1000 arrays and objects) at line 1 column 1001
+6001
+false	json.decode: nesting too deep (more than 1000 arrays and objects) at line 1 column 5001
+"\"\\x\""	false	json.decode: bad escape at line 1 column 4
+"\"\\u12\""	false	json.decode: short \u escape at line 1 column 4
+"\"\\u12g4\""	false	json.decode: bad \u escape at line 1 column 7
+"\"a\nb\""	false	json.decode: a control character in a string at line 2 column 1
+"\"abc"	false	json.decode: unterminated string at line 1 column 5
+"{\"a\" 1}"	false	json.decode: expected ':' at line 1 column 6
+"[1 2]"	false	json.decode: expected ',' or ']' at line 1 column 4
+"{\"a\":1 \"b\":2}"	false	json.decode: expected ',' or '}' at line 1 column 8
+"{1:2}"	false	json.decode: expected a string key at line 1 column 2
+"[1,]"	false	json.decode: unexpected character at line 1 column 4
+"01"	false	json.decode: malformed number at line 1 column 1
+"1."	false	json.decode: malformed number at line 1 column 1
+"-"	false	json.decode: malformed number at line 1 column 1
+"[] x"	false	json.decode: unexpected text after the value at line 1 column 4
+""	false	json.decode: unexpected end of input at line 1 column 1
+false	true
+false	encoding.fromBase64: 0x00 (at 3) is not base64
+false	encoding.fromBase64: 0xFF (at 3) is not base64
+false	encoding.fromBase64: '*' (at 3) is not base64
+false	encoding.fromHex: 0x00 (at 1) is not a hex digit
+false	encoding.fromHex: 'z' (at 1) is not a hex digit
+"red"
+"reset"
+"save"
+"x"
+"y"
+"z"
+"link"
+"reset"
+"\27"
+"a\27"
+1
+false	process.setEnv: 'A=B' is not a variable name (a name is not empty and has no '=')
+false	process.setEnv: '' is not a variable name (a name is not empty and has no '=')
+false	invalid argument #2 to 'setEnv' (the value holds a NUL byte)
+false	invalid argument #1 to 'env' (the name holds a NUL byte)
+""	""
+nil
+é中	é中
+exit: 0

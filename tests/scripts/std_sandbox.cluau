@@ -1,0 +1,10 @@
+// cluau --sandbox
+// In the sandbox @std/path is text only: nothing reads the working directory.
+const path = require("@std/path")
+const process = require("@std/process")
+
+const root = if (process.platform == "windows") "C:/" else "/"
+print(pcall(path.absolute, "."))
+print(pcall(path.relative, "a"))
+print(pcall(path.relative, `{root}a/b`, "c"))
+print(path.absolute(`{root}a/./b/..`) == `{root}a`, path.relative(`{root}a/b/c`, `{root}a`), path.normalize("a/../b/"), path.join("a", "b"))

@@ -76,7 +76,8 @@ only computes.
 - `require` loads `.cluau` and `.luau` modules only from under the script's
   directory, its `cluau_modules` and the search path (`CLUAU_PATH`).
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
-  `@std/path` (text only), `@std/regex`, `@std/task`, `@std/crypto`,
+  `@std/path` (text only: `absolute` and `relative` take absolute paths,
+  there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
   `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
   `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
@@ -720,40 +721,47 @@ standard input, `nil` at its end), and these modules:
 | `append(path, text)` | adds to the end of the file |
 | `exists(path)`, `isFile(path)`, `isDir(path)`: `boolean` | what is at `path` |
 | `list(dir): {string}` | the names in a directory, sorted |
-| `walk(dir): {string}` | every file under a directory (paths), sorted |
+| `walk(dir): {string}` | every file under a directory (paths), sorted, names starting with `.` included |
 | `mkdir(path)` | creates a directory and its parents |
-| `remove(path, all?)` | removes a file or an empty directory; `all` removes a directory's contents too |
-| `rename(from, to)`, `copy(from, to)` | moves, or copies (directories recursively) |
+| `remove(path, all?)` | removes a file or an empty directory; `all` removes a directory's contents too (a symbolic link inside is removed, not followed); a path that is not there is no error |
+| `rename(from, to)` | moves; to another file system, a file (or a directory, to a path that is free) is copied there, then removed |
+| `copy(from, to)` | copies; a directory recursively, a file onto a directory into it; a directory into itself is an error |
 | `size(path): number`, `modified(path): number` | the size in bytes; the last change, in seconds since 1970 |
-| `tempDir(): string` | the system's temporary directory |
-| `tempFile(prefix?): string` | a new, empty file of the script's own in the temporary directory |
+| `tempDir(): string` | the system's temporary directory (`/tmp` when `TMPDIR` names none) |
+| `tempFile(prefix?): string` | a new, empty file of the script's own in the temporary directory (`prefix` is a name, without `/`) |
 | `realpath(path): string` | the absolute path with symbolic links, `.` and `..` resolved; the path must exist |
-| `glob(pattern): {string}` | the paths matching a pattern, sorted: `*`, `?` and `[a-z]` within a name, `**` for any number of directories (`fs.glob("src/**/*.cluau")`); names starting with `.` match only a pattern that does; a pattern ending in `/` matches only directories, and a `[` with no closing `]` is an ordinary character |
+| `glob(pattern): {string}` | the paths matching a pattern, sorted: `*`, `?` and `[a-z]` within a name (`?` is one character, UTF-8 included; Windows compares without case), `**` for any number of directories (`fs.glob("src/**/*.cluau")`); names starting with `.` match only a pattern that does; a pattern ending in `/` matches only directories, and a `[` with no closing `]` is an ordinary character |
 | `lines(path)` | the file's lines one by one, for a `for` loop (`for (line in fs.lines("log.txt")) { }`) |
-| `open(path, mode?): File` | a file to read (`"r"`, the default), write from empty (`"w"`) or add to (`"a"`) |
+| `open(path, mode?): File` | a file to read (`"r"`, the default), write from empty (`"w"`) or add to (`"a"`); a directory is an error, as for `read` and `lines` |
 | `readBuffer(path): buffer`, `writeBuffer(path, bytes)` | the file's bytes as a Luau `buffer`, and back |
 
 A `File` reads and writes as it goes, bytes unchanged:
 
 | method | does |
 |---|---|
-| `read(count?): string?` | `count` bytes (`nil` at the end), or without a count everything left |
+| `read(count?): string?` | `count` bytes (`nil` at the end; `read(0)` is `""` before it), or without a count everything left |
 | `readLine(): string?`, `lines()` | a line without its line break (`nil` at the end); every line, for a `for` loop |
 | `write(...)` | writes its arguments (text or numbers) |
 | `seek(offset?, from?): number` | moves to `offset` from `"set"` (the start, the default), `"current"` or `"end"`; the position |
 | `flush()`, `close()` | a file closes by itself once nothing refers to it; `close` does it now |
 
-A failure is an error naming the call, the path and why
-(`fs.read: cannot read 'x.txt': no such file or directory`); `pcall` it to
-handle it.
+A failure is an error naming the call, the path and why, in the system's
+words (`fs.read: cannot read 'x.txt': no such file or directory`); `pcall`
+it to handle it. A write the system refuses (a full disk) is an error too:
+at the call for `write`, `append` and `writeBuffer`, and at `flush` or
+`close` for a `File`, which keeps what it writes until then. A path holding
+a NUL byte is an error, in `@std/fs` and `@std/path` alike.
 
 ### `@std/path`
 
 `join(...)`, `dirname(p)`, `basename(p)`, `stem(p)` (the name without its
-extension), `extension(p)` (with its dot: `".txt"`), `normalize(p)`
-(`a/./b/../c` is `a/c`), `absolute(p)`, `relative(p, base?)` (from the
-current directory by default), `isAbsolute(p)`. Paths come back with `/` on
-every platform, Windows included (which accepts them).
+extension), `extension(p)` (with its dot: `".txt"`; the dots a name starts
+with are the name's, so `.bashrc` has none), `normalize(p)` (`a/./b/../c`
+is `a/c`), `absolute(p)`, `relative(p, base?)` (from the current directory
+by default), `isAbsolute(p)`. `normalize`, `absolute` and `relative` leave
+no `/` at the end (but for a root's), and a path with nothing left is `.`,
+so `basename(absolute("."))` is the current directory's name. Paths come
+back with `/` on every platform, Windows included (which accepts them).
 
 ### `@std/process`
 
@@ -763,7 +771,7 @@ every platform, Windows included (which accepts them).
 | `script: string` | the script's path (`"-e"`, `"stdin"`; `""` at the prompt) |
 | `platform: string` | `"linux"`, `"macos"`, `"windows"` or `"other"` |
 | `executable: string` | the path of the running `cluau` (to start another script with the same one) |
-| `env(name): string?`, `setEnv(name, value?)` | an environment variable (`nil` unsets it) |
+| `env(name): string?`, `setEnv(name, value?)` | an environment variable (`nil` unsets it; `""` is a value); a name is not empty and has no `=` |
 | `environment(): { [string]: string }` | every environment variable |
 | `cwd(): string`, `chdir(dir)` | the working directory |
 | `run(command, options?): { code: number, output: string, error: string, timedOut: boolean }` | runs a command to its end, capturing its standard output |
@@ -834,40 +842,50 @@ print("make exited with", build:wait())
 
 `write(...)` writes its arguments to standard output with no separator and
 no newline; `writeError(...)` writes to standard error; `readLine():
-string?` reads a line (without its newline; `nil` at the end of input);
-`readAll(): string` reads the rest; `flush()`.
+string?` reads a line (without its newline, or the CR before it; `nil` at
+the end of input); `readAll(): string` reads the rest; `flush()`. Bytes go
+through unchanged, on Windows too when the input or output is a file or a
+pipe. A write the system refuses (a full disk, a closed pipe) is an error,
+at `write` or at `flush`.
 
 ### `@std/json`
 
 `encode(value, pretty?): string` and `decode(text, options?): unknown`.
 `pretty` is `true` (two spaces), a number of spaces, or an indent string. Objects' keys are
 written sorted, so the output is the same every run; a table whose keys are
-`1..n` is an array, and an empty table is `[]`. A value with no JSON form
-(a function, a table that contains itself, NaN) is an error, and so is a
-table with two keys that would be the same JSON key (`[1]` and `["1"]`).
+exactly `1..n` is an array (a table with gaps, or other keys too, is an
+object), and an empty table is `[]`. A value with no JSON form (a function,
+a table that contains itself, NaN) is an error, and so is a table with two
+keys that would be the same JSON key (`[1]` and `["1"]`), and a string that
+is not UTF-8 (JSON text is: bytes go through `encoding.toBase64` first).
+`decode` reads arrays and objects up to 1000 inside one another, and reads
+a `\u` escape of a lone surrogate (half a pair) as U+FFFD.
 
 - `null` decodes to `nil`, so a key whose value is `null` is absent and an
-  array's `null` leaves a gap. `decode(text, { null = json.null })` decodes
-  it to `json.null` instead, which encodes as `null` again.
+  array's `null` leaves a gap: `[1,null,3]` encodes again as the object
+  `{"1":1,"3":3}`. `decode(text, { null = json.null })` decodes it to
+  `json.null` instead, which encodes as `null` again, so the array stays one.
 - `json.object(t?)` and `json.array(t?)` mark a table (or a new one) to
   encode as an object or an array: `json.object()` is `{}`, not `[]`. An
   empty object decodes marked, so it encodes as `{}` again.
 
 ### `@std/time`
 
-A time is a number: seconds since 1970-01-01 UTC, with a fraction. The
+A time is a number: seconds since 1970-01-01 UTC, with a fraction, from the
+year 0 to the year 9999 (a time outside them, or NaN, is an error). The
 functions that read or write calendar fields take `{ utc = true }`;
-without it they use the system's local time zone.
+without it they use the system's local time zone. They round a time to the
+millisecond.
 
 | function | is |
 |---|---|
 | `now(): number` | the current time |
 | `monotonic(): number` | seconds on a clock that only moves forward, for measuring how long something takes |
-| `parse(text): number` | an ISO 8601 date or date and time: `2026-11-24`, `2026-11-24T21:05`, `2026-11-24 21:05:09.25+01:00`, `...Z`. A date alone is UTC midnight; a time without an offset is local |
-| `iso(t?, options?): string` | `2026-11-24T21:05:09.250+01:00` (`...Z` in UTC) |
-| `format(t, pattern, options?): string` | `strftime`'s patterns: `%Y-%m-%d %H:%M:%S`, `%A`, `%B`, ... |
+| `parse(text): number` | an ISO 8601 date or date and time: `2026-11-24`, `2026-11-24T21:05`, `2026-11-24 21:05:09.25+01:00`, `...Z`. A date alone is UTC midnight; a time without an offset is local. An offset is `+hh`, `+hhmm`, `+hh:mm` or `+hh:mm:ss`, under 24 hours; second 60 only ends a day (`23:59:60`) |
+| `iso(t?, options?): string` | `2026-11-24T21:05:09.250+01:00` (`...Z` in UTC); an offset with seconds keeps them (`+00:19:32`, local mean time before about 1900), so `parse` reads back the same time |
+| `format(t, pattern, options?): string` | `strftime`'s conversions, those C defines and every platform has: `%Y-%m-%d %H:%M:%S`, `%A`, `%B`, `%a %b %c %C %D %e %F %g %G %h %I %j %n %p %r %R %t %T %u %U %V %w %W %x %X %y %z %Z %%`; another (`%-d`, `%k`, `%s`) is an error. In UTC `%z` is `+0000` and `%Z` is `UTC` |
 | `parts(t?, options?)` | `{ year, month, day, hour, minute, second, millisecond, weekday, yearday, offset }`: `weekday` 1 is Monday, `offset` is seconds east of UTC |
-| `fromParts(parts, options?): number` | the time those fields name (all but `year` optional); a field past its range carries over, so day 32 is the next month's first |
+| `fromParts(parts, options?): number` | the time those fields name (all but `year` optional); a field past its range carries over, so day 32 is the next month's first. `second` and `millisecond` may have a fraction; the others are whole numbers |
 
 ```
 const time = require("@std/time")
@@ -1207,7 +1225,7 @@ used.
 | `colors(stream?): boolean` | whether colours go to the stream |
 | `size(): { columns, rows }?` | the terminal's size (`nil` when there is no terminal) |
 | `style(text, ...): string` | the text in each style named |
-| `strip(text): string` | the text without its escape sequences |
+| `strip(text): string` | the text without its escape sequences: CSI (`ESC [`, colours), OSC (`ESC ]`, links), DCS, SOS, PM and APC strings, and the short ones (`ESC ( B`, `ESC 7`, `ESC c`) |
 | `bold`, `dim`, `italic`, `underline`, `inverse`, `strike`; `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, the `bright` ones (`brightRed`, ...), the backgrounds (`bgRed`, ...) | `term.red(text)`: the text in that style |
 
 ```

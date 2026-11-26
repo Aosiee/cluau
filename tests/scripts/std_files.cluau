@@ -1,0 +1,138 @@
+// @std/fs at its edges: errors with the system's reason, directories where
+// files are expected, writes the system refuses, and names in UTF-8.
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const time = require("@std/time")
+
+const dir = path.join(fs.tempDir(), `cluau-std-files-{process.platform}-{math.floor(time.now() * 1000)}`)
+fs.mkdir(dir)
+const file = path.join(dir, "a.txt")
+fs.write(file, "abc")
+
+// The part of an error message after the path.
+function Why(ok: boolean, message: unknown?): string {
+	return if (ok) "no error" else (string.gsub(tostring(message), "^.*': ", ""))
+}
+
+// A directory is refused by everything that reads or writes a file.
+print("read dir:", Why(pcall(fs.read, dir)))
+print("open dir:", Why(pcall(fs.open, dir)))
+print("lines dir:", Why(pcall(fs.lines, dir)))
+print("readBuffer dir:", Why(pcall(fs.readBuffer, dir)))
+print("write dir:", Why(pcall(fs.write, dir, "x")))
+print("missing:", Why(pcall(fs.read, path.join(dir, "missing.txt"))))
+print("no directory:", Why(pcall(fs.write, path.join(dir, "missing", "x.txt"), "x")))
+
+// A path holding a NUL byte is refused, not cut short at the NUL.
+print(pcall(fs.read, file .. "\0.png"))
+print(pcall(fs.exists, "a\0b"))
+print(pcall(path.join, "a", "b\0c"))
+
+// A write the system refuses is an error at the call (/dev/full fails
+// every write on Linux).
+if (process.platform == "linux") {
+	print("full:", Why(pcall(fs.write, "/dev/full", "x")), Why(pcall(fs.append, "/dev/full", "x")))
+	const full = fs.open("/dev/full", "w")
+	full:write("x")
+	const flushed = { pcall(full.flush, full) }
+	print("full flush:", flushed[1], string.find(tostring(flushed[2]), "file:flush: no space left on device", 1, true) != nil)
+	const r = process.run({ "sh", "-c", `"$0" -e 'require("@std/io").write("x"); require("@std/io").flush()' > /dev/full`, process.executable }, { stderr = "capture" })
+	print("io.flush full:", r.code != 0 and string.find(r.error, "io.flush: no space left on device", 1, true) != nil)
+} else {
+	print("full:", "no space left on device", "no space left on device")
+	print("full flush:", false, true)
+	print("io.flush full:", true)
+}
+
+// file:read(0) is "" before the end and nil at it; seek takes 64-bit offsets.
+const f = fs.open(file)
+print(repr(f:read(0)), f:read(3), repr(f:read(0)), f:seek(3e9), f:seek(0, "end"))
+print(pcall(f.seek, f, 1.5))
+f:close()
+print(pcall(f.close, f))
+
+// A directory copied into itself is refused before anything is copied.
+fs.mkdir(path.join(dir, "tree", "sub"))
+fs.write(path.join(dir, "tree", "sub", "x.txt"), "x")
+print(Why(pcall(fs.copy, path.join(dir, "tree"), path.join(dir, "tree", "sub", "copy"))))
+print(fs.exists(path.join(dir, "tree", "sub", "copy")))
+fs.copy(path.join(dir, "tree"), path.join(dir, "tree2"))
+print(fs.read(path.join(dir, "tree2", "sub", "x.txt")))
+
+// fs.remove(dir, true) of a tree with a read-only directory holding a link
+// to a read-only file outside it: the tree goes, the file stays read-only.
+if (process.platform != "windows") {
+	const outside = path.join(dir, "precious.txt")
+	fs.write(outside, "keep")
+	const locked = path.join(dir, "doomed", "locked")
+	fs.mkdir(locked)
+	process.run({ "ln", "-s", outside, path.join(locked, "link") })
+	process.run({ "chmod", "444", outside })
+	process.run({ "chmod", "555", locked })
+	fs.remove(path.join(dir, "doomed"), true)
+	print(fs.exists(path.join(dir, "doomed")), string.sub(process.run({ "ls", "-l", outside }).output, 1, 10))
+	// The directory removed may be read-only itself.
+	fs.mkdir(locked)
+	process.run({ "chmod", "555", locked })
+	fs.write(path.join(dir, "doomed", "x.txt"), "")
+	process.run({ "chmod", "555", path.join(dir, "doomed") })
+	fs.remove(path.join(dir, "doomed"), true)
+	print(fs.exists(path.join(dir, "doomed")))
+	process.run({ "chmod", "644", outside })
+} else {
+	print(false, "-r--r--r--")
+	print(false)
+}
+
+// A rename to another file system copies, then removes (on Linux, /dev/shm
+// is one when it exists).
+const shm = "/dev/shm"
+if (process.platform == "linux" and fs.isDir(shm)) {
+	const moved = path.join(shm, path.basename(dir) .. "-moved.txt")
+	fs.write(path.join(dir, "move.txt"), "moved")
+	fs.rename(path.join(dir, "move.txt"), moved)
+	print(fs.exists(path.join(dir, "move.txt")), fs.read(moved))
+	fs.remove(moved)
+} else {
+	print(false, "moved")
+}
+
+// fs.modified is right past 2262 (touch -t takes local time on every Unix).
+if (process.platform != "windows") {
+	const future = path.join(dir, "future.txt")
+	fs.write(future, "")
+	process.run({ "touch", "-t", "230001010000", future })
+	print(fs.modified(future) == time.fromParts({ year = 2300 }))
+} else {
+	print(true)
+}
+
+// fs.tempFile's prefix is a name, and fs.tempDir falls back to /tmp.
+print(pcall(fs.tempFile, "../x"))
+if (process.platform != "windows") {
+	const r = process.run({ process.executable, "-e", `print(require("@std/fs").tempDir())` }, { env = { TMPDIR = path.join(dir, "missing") } })
+	print(r.output)
+} else {
+	print("/tmp\n")
+}
+
+// glob's `?` and `[...]` match a character, not a byte; Windows compares
+// names without case.
+fs.mkdir(path.join(dir, "names"))
+for (_, name in { "a.txt", "中.txt", "日x", "B.txt" }) {
+	fs.write(path.join(dir, "names", name), "")
+}
+const names = path.join(dir, "names")
+function Names(pattern: string): string {
+	let out = {}
+	for (_, found in fs.glob(path.join(names, pattern))) {
+		table.insert(out, path.basename(found))
+	}
+	return table.concat(out, " ")
+}
+print(Names("?.txt"), "|", Names("[!a].txt"), "|", Names("?x"), "|", Names("[中-日]*"))
+print(if (process.platform == "windows") Names("b.TX?") == "B.txt" else Names("b.TX?") == "")
+
+fs.remove(dir, true)
+print(fs.exists(dir))

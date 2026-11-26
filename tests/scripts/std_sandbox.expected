@@ -1,0 +1,5 @@
+false	path.absolute: the sandbox has no working directory to read '.' against
+false	path.relative: the sandbox has no working directory, so both paths are absolute
+false	path.relative: the sandbox has no working directory, so both paths are absolute
+true	b/c	b	a/b
+exit: 0

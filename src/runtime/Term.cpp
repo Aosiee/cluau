@@ -42,9 +42,20 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+#ifdef _WIN32
+		HANDLE Handle(int fd) { return GetStdHandle(fd == 0 ? STD_INPUT_HANDLE : fd == 2 ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE); }
+#endif
+
 		bool Terminal(int fd)
 		{
+#ifdef _WIN32
+			// A console has a console mode; _isatty is also true for other
+			// character devices, such as NUL.
+			DWORD mode = 0;
+			return CLUAU_ISATTY(fd) != 0 && GetConsoleMode(Handle(fd), &mode) != 0;
+#else
 			return CLUAU_ISATTY(fd) != 0;
+#endif
 		}
 
 		// Escape sequences on (Windows' console takes them once told).
@@ -59,7 +70,11 @@ namespace cluau::runtime::detail {
 			if (const char* term = std::getenv("TERM"); term && std::strcmp(term, "dumb") == 0)
 				return false;
 #ifdef _WIN32
-			HANDLE handle = GetStdHandle(fd == 2 ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
+			// Standard input's console reads; escape sequences are an
+			// output console's mode.
+			if (fd == 0)
+				return true;
+			HANDLE handle = Handle(fd);
 			DWORD mode = 0;
 			if (!GetConsoleMode(handle, &mode))
 				return false;
@@ -106,7 +121,10 @@ namespace cluau::runtime::detail {
 				}
 #endif
 			if (columns <= 0)
-				return 0;
+			{
+				lua_pushnil(L);
+				return 1;
+			}
 			lua_createtable(L, 0, 2);
 			lua_pushinteger(L, columns);
 			lua_setfield(L, -2, "columns");
@@ -188,8 +206,11 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
-		// The text without its escape sequences: CSI (ESC [ ... a final
-		// byte) and OSC (ESC ] ... BEL or ESC and a backslash, such as a link).
+		// The text without its escape sequences (ECMA-48): CSI (ESC [ ... a
+		// final byte), the strings OSC, DCS, SOS, PM and APC (ESC ], P, X, ^
+		// or _ ... up to ESC \, or BEL for OSC, such as a link), and the
+		// short ones (ESC, bytes 0x20-0x2F, a final byte: ESC ( B, ESC 7,
+		// ESC c).
 		int TermStrip(lua_State* L)
 		{
 			size_t len = 0;
@@ -197,20 +218,34 @@ namespace cluau::runtime::detail {
 			std::string out;
 			for (size_t i = 0; i < len; i++)
 			{
-				if (text[i] == '\x1b' && i + 1 < len && text[i + 1] == '[')
+				if (text[i] != '\x1b' || i + 1 >= len)
+				{
+					out += text[i];
+					continue;
+				}
+				const char kind = text[i + 1];
+				if (kind == '[')
 				{
 					i += 2;
 					while (i < len && !((unsigned char)text[i] >= 0x40 && (unsigned char)text[i] <= 0x7e))
 						i++;
 					continue;
 				}
-				if (text[i] == '\x1b' && i + 1 < len && text[i + 1] == ']')
+				if (kind == ']' || kind == 'P' || kind == 'X' || kind == '^' || kind == '_')
 				{
 					i += 2;
-					while (i < len && text[i] != '\a' && !(text[i] == '\x1b' && i + 1 < len && text[i + 1] == '\\'))
+					while (i < len && !(kind == ']' && text[i] == '\a') && !(text[i] == '\x1b' && i + 1 < len && text[i + 1] == '\\'))
 						i++;
 					if (i < len && text[i] == '\x1b')
 						i++; // past the ESC; the loop's i++ takes the backslash
+					continue;
+				}
+				size_t j = i + 1;
+				while (j < len && (unsigned char)text[j] >= 0x20 && (unsigned char)text[j] <= 0x2f)
+					j++;
+				if (j < len && (unsigned char)text[j] >= 0x30 && (unsigned char)text[j] <= 0x7e)
+				{
+					i = j;
 					continue;
 				}
 				out += text[i];
