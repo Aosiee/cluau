@@ -5,4 +5,5 @@ false	@std/http is not available in the sandbox
 hello, sandbox
 false	true
 {"ran":true}
+INFO  [sandbox] logged ran=true
 exit: 0

@@ -86,7 +86,8 @@ only computes.
   `@std/path` (text only: `absolute` and `relative` take absolute paths,
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
   `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
-  `@std/csv` and `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
+  `@std/csv`, `@std/log` (which has no `CLUAU_LOG` to read there) and
+  `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1105,6 +1106,75 @@ separator, a quote or a line break is quoted, with `""` for a quote):
 | `encodeRecords(records, columns, options?): string` | a header row of `columns`, then each record's values in that order (`""` for a missing one) |
 
 `options.separator` is another one-character separator (`";"`, `"\t"`).
+
+### `@std/log`
+
+Structured logging: a record is a level, a message and fields (names with
+values), written as one line. By default records go to standard error as
+text, from `info` up:
+
+```
+const log = require("@std/log")
+
+log.info("started", { port = 8080, root = "/srv/my site" })
+// 2026-11-26T21:00:00.123Z INFO  started port=8080 root="/srv/my site"
+
+const db = log.logger("db")
+const query = db:with({ file = "app.db" })
+query:warn("slow query", { ms = 812 })
+// 2026-11-26T21:00:00.125Z WARN  [db] slow query file=app.db ms=812
+
+log.configure({ level = "debug", format = "json" })
+query:debug("opened")
+// {"time":"2026-11-26T21:00:00.126Z","level":"debug","logger":"db","message":"opened","file":"app.db"}
+```
+
+| function | is |
+|---|---|
+| `debug(message, fields?)`, `info`, `warn`, `error` | writes a record at that level with the default logger (when the level is enabled) |
+| `enabled(level): boolean` | whether a record at `level` would be written (to skip working out fields nobody sees) |
+| `configure(options)` | sets how records are written; an option left out keeps its setting |
+| `logger(name, options?): Logger` | the logger of that name (the same one each time); `options.level` gives it a level of its own |
+| `with(fields): Logger` | the default logger with fields added to every record |
+
+The options:
+
+| option | is |
+|---|---|
+| `level` | `"debug"`, `"info"` (the default), `"warn"`, `"error"` or `"off"`: records below it are left out |
+| `format` | `"text"` (the default) or `"json"`: JSON lines, each an object of `time`, `level`, `logger` (for a named logger), `message`, then the fields |
+| `time: boolean` | whether records start with the time (true by default; false for output that must be the same every run) |
+| `output` | `"stderr"` (the default), `"stdout"`, or a function given each line, without its line break: `function(line: string) { file:write(line, "\n") }` |
+
+A `Logger` has the same `debug`, `info`, `warn`, `error`, `enabled` and
+`with` as methods (`db:info("ready")`), and `setLevel(level?)`. A named
+logger follows the configured level until it has one of its own (from
+`options.level` or `setLevel`; `setLevel(nil)` goes back to following);
+one made by `with` has its parent's name and follows the parent's level.
+The format, time and output are the same for every logger.
+
+- A text record is the time (UTC, to the millisecond), the level padded to
+  five characters, `[name]` for a named logger, the message, and the
+  fields as `name=value` in the order of their names. A value is quoted
+  when it is empty or holds a space, a quote, `=` or a control character,
+  with `\\`, `\"`, `\n`, `\r`, `\t` and `\x1b` escapes inside the quotes; a
+  table is shown as `repr` shows it. Control characters in the message
+  and the name are escaped too (`\n`), so each record is one line.
+- In JSON, a field named like one of the record's own keys (`level`,
+  `time`, ...) gets a `_` in front (`_level`). A value with no JSON form (a
+  table that contains itself, a function, NaN) is written as its text, and
+  bytes that are not UTF-8 as U+FFFD.
+- A log call does not fail on its fields: a value that cannot be shown
+  (its `__tostring` raises) is written as its type (`<table>`), and fields
+  whose iteration raises give the fields read before it. An error the
+  `output` function raises is raised from the call.
+- `CLUAU_LOG` sets the level a script starts with (`CLUAU_LOG=debug cluau
+  script.cluau`; any case, empty is unset); a level given to `configure`
+  wins over it. A value that is not a level is reported on standard error
+  once, and `info` is used.
+- The levels are types: `log.configure({ level = "verbose" })` and
+  `db:setLevel("trace")` are errors for `cluau check`, as are fields that
+  are not a table (`log.Level`, `log.Threshold` and `log.Fields` name them).
 
 ### `@std/regex`
 
