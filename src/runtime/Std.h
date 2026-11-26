@@ -3,6 +3,7 @@
 // The standard modules `require("@std/<name>")` returns, and the globals
 // scripts get beyond Luau's own libraries (`input`, `repr`).
 
+#include <cstddef>
 #include <map>
 #include <string>
 #include <vector>
@@ -64,6 +65,13 @@ namespace cluau::runtime::detail {
 
 	// Pushes @std/term's table (the terminal, colours).
 	void OpenTerm(lua_State* L);
+
+	// Pushes @std/random's table (seeded random numbers).
+	void OpenRandom(lua_State* L);
+
+	// Fills `out` with `size` bytes from the operating system's random
+	// source (false when it gave none).
+	bool SystemRandom(void* out, size_t size);
 
 	// Pushes @std/compress's and @std/zip's tables (when the runtime is built with them).
 	void OpenCompress(lua_State* L);

@@ -85,7 +85,7 @@ only computes.
 - `@std/io` (standard input and output), `@std/json`, `@std/time`,
   `@std/path` (text only: `absolute` and `relative` take absolute paths,
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
-  `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
+  `@std/random`, `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`, `@std/args`,
   `@std/csv`, `@std/collections`, `@std/log` (which has no `CLUAU_LOG` to read there) and
   `@std/test` work as usual, as do Luau's own libraries, which have no file or process access.
 
@@ -1528,6 +1528,67 @@ Web addresses (RFC 3986).
 | `decode(text, plus?): string` | `%XX` back to its byte (and `+` to a space, with `plus`) |
 | `parseQuery(text): {[string]: string}` | a query string's names and values, decoded; pairs are split at `&` only (a `;` is part of a value, as browsers have it) |
 | `encodeQuery(values): string` | a query string from a table, its names in order (as text) |
+
+### `@std/random`
+
+Random numbers from a seed, for simulations, games, tests and sampling.
+The generator is xoshiro256\*\* (Blackman and Vigna), its state filled from
+the seed by splitmix64: a seed gives the same numbers on every platform and
+every run. The numbers are not for secrets (keys, tokens, passwords), since
+a few of them give away the rest: `crypto.randomBytes` and `crypto.uuid`
+(see [`@std/crypto`](#stdcrypto)) are for those.
+
+The module's functions share one generator, seeded from the operating
+system when it is first used. `new` makes a generator of the script's own
+(a `random.Random`), which has the same functions as methods
+(`rng:integer(1, 6)`):
+
+| function | is |
+|---|---|
+| `new(seed?): Random` | a generator of its own, seeded with `seed` (without one, from the system) |
+| `seed(seed?)` | starts the generator over from `seed` (without one, from the system) |
+| `random(): number` | a number from 0 up to 1, never 1: one of the 2^53 multiples of 2^-53 there, each as likely |
+| `integer(min, max): number` | a whole number from `min` to `max`, both included, each as likely |
+| `uniform(a, b): number` | a number between `a` and `b` (`b` itself only through rounding) |
+| `normal(mean?, deviation?): number` | a number from the normal distribution with that mean (0) and standard deviation (1) |
+| `choice(list): T` | one of the list's items |
+| `shuffle(list)` | the list's items put in a random order, in place (Fisher-Yates: every order as likely) |
+| `sample(list, count): {T}` | `count` items from different places in the list, in the order drawn |
+| `weighted(list, weights): T` | one of the list's items, each as likely as its weight (`weights[i]` for `list[i]`) |
+
+```
+const random = require("@std/random")
+
+print(random.integer(1, 6), random.choice({ "rock", "paper", "scissors" }))
+
+const rng = random.new(17) // level 17 is the same every time it is played
+const enemies = rng:integer(3, 8)
+const loot: string = rng:weighted({ "coin", "gem", "key" }, { 80, 15, 5 })
+const order = { "north", "east", "south", "west" }
+rng:shuffle(order)
+```
+
+- A seed is a whole number from -2^63 to 2^63 (a time such as
+  `time.now()` has a fraction: `math.floor` it). What a seed gives is part
+  of the cluau version: the same on every platform and every run with that
+  version, which is what a test or a saved game relies on; another version
+  may change it.
+- To repeat a run, seed the shared generator (`random.seed(42)`) or give
+  each part of the program its own `new(seed)`: then one part's draws do
+  not change another's numbers.
+- `integer` takes whole numbers from -2^53 to 2^53 (past them a double does
+  not hold every whole number), `min` no greater than `max`, and a range of
+  at most 2^53 numbers. It draws as many bits as the range needs and draws
+  again when they fall past it, so no number is more likely than another
+  (as a remainder would make them).
+- `uniform` and `normal` take finite numbers, and the deviation is 0 or
+  more (0 gives the mean). `normal` is Kinderman and Monahan's ratio of
+  uniforms, as Python's `random.normalvariate`.
+- `choice` of an empty list is an error. `sample` takes a count from 0 to
+  the list's length. `weighted` takes one weight for each item, each a
+  finite number, 0 or more, not all 0; an item of weight 0 never comes up.
+- A list is the table's items from 1 to `#list`, read and written without
+  metamethods.
 
 ### `@std/crypto`
 

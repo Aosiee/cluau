@@ -247,6 +247,32 @@ return m :: {
 	fromHex: (text: string | buffer) -> string,
 }
 )LUAU" },
+				{ "random", R"LUAU(
+export type Random = {
+	seed: (self: Random, seed: number?) -> (),
+	random: (self: Random) -> number,
+	integer: (self: Random, min: number, max: number) -> number,
+	uniform: (self: Random, a: number, b: number) -> number,
+	normal: (self: Random, mean: number?, deviation: number?) -> number,
+	choice: <T>(self: Random, list: { T }) -> T,
+	shuffle: <T>(self: Random, list: { T }) -> (),
+	sample: <T>(self: Random, list: { T }, count: number) -> { T },
+	weighted: <T>(self: Random, list: { T }, weights: { number }) -> T,
+}
+local m: any = nil
+return m :: {
+	new: (seed: number?) -> Random,
+	seed: (seed: number?) -> (),
+	random: () -> number,
+	integer: (min: number, max: number) -> number,
+	uniform: (a: number, b: number) -> number,
+	normal: (mean: number?, deviation: number?) -> number,
+	choice: <T>(list: { T }) -> T,
+	shuffle: <T>(list: { T }) -> (),
+	sample: <T>(list: { T }, count: number) -> { T },
+	weighted: <T>(list: { T }, weights: { number }) -> T,
+}
+)LUAU" },
 				{ "compress", R"LUAU(
 local m: any = nil
 return m :: {

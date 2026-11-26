@@ -1,0 +1,13 @@
+// @std/random's functions are typed by the list they are given.
+const random = require("@std/random")
+
+const rng = random.new(1)
+const name: number = rng:choice({ "ann", "bo" })            // a string from a list of strings
+const hand: { string } = random.sample({ 1, 2, 3 }, 2)     // a list of what the list holds
+const prize: boolean = rng:weighted({ "a", "b" }, { 1, 2 }) // a string
+rng:weighted({ "a", "b" }, { "1", "2" })                    // weights are numbers
+random.shuffle("abc")                                       // a list, not a string
+rng:integer("1", 6)                                         // numbers
+random.seed("x")
+const count: number = rng:shuffle({ 1, 2 })                 // shuffles in place: no value
+print(name, hand, prize, count)

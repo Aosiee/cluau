@@ -1,0 +1,17 @@
+random.cluau:5:1: Expected this to be 'number', but got 'string'
+random.cluau:6:1: Expected this to be exactly '{string}', but got '{number}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'string', but got 'number'
+random.cluau:7:1: Expected this to be 'boolean', but got 'string'
+random.cluau:8:30: Expected this to be 'number', but got 'string'
+random.cluau:8:35: Expected this to be 'number', but got 'string'
+random.cluau:9:16: Expected this to be '{'a}', but got 'string'
+random.cluau:10:13: Expected this to be 'number', but got 'string'
+random.cluau:11:13: Expected this to be 'number?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be 'number', but got 'string'
+random.cluau:12:1: Function only returns 0 values, but 1 is required here
+cluau check: 9 error(s), 0 warning(s)
+exit: 1

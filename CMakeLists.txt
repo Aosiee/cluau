@@ -242,11 +242,11 @@ if(CLUAU_BUILD_RUNTIME)
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
         src/runtime/Check.cpp src/runtime/Json.cpp src/runtime/LanguageService.cpp src/runtime/LspServer.cpp
         src/runtime/Debugger.cpp src/runtime/DapServer.cpp src/runtime/Profile.cpp src/runtime/Jobs.cpp src/runtime/Net.cpp src/runtime/Encoding.cpp src/runtime/Term.cpp
-        ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
+        src/runtime/Random.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
     if(WIN32)
-        target_link_libraries(cluau_runtime PRIVATE ws2_32) # @std/net
+        target_link_libraries(cluau_runtime PRIVATE ws2_32 bcrypt) # @std/net; the system's random numbers (@std/random, @std/crypto)
     endif()
     if(CLUAU_COMPRESS)
         target_sources(cluau_runtime PRIVATE src/runtime/Compress.cpp)
