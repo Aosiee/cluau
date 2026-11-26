@@ -163,7 +163,7 @@ namespace cluau::runtime::detail {
 			if (scheme == std::string::npos)
 				return url;
 			const size_t start = scheme + 3;
-			const size_t end = std::min(url.find_first_of("/?#", start), url.size());
+			const size_t end = (std::min)(url.find_first_of("/?#", start), url.size());
 			const size_t at = url.rfind('@', end - 1);
 			if (at == std::string::npos || at < start || end == start)
 				return url;
@@ -467,8 +467,8 @@ namespace cluau::runtime::detail {
 				if (first.Timeout > 0)
 				{
 					const double left = first.Timeout - std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-					const double ms = std::min(std::ceil(std::max(left, 0.0) * 1000), (double)INT_MAX);
-					curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, std::max(1L, (long)ms));
+					const double ms = (std::min)(std::ceil((std::max)(left, 0.0) * 1000), (double)INT_MAX);
+					curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (std::max)(1L, (long)ms));
 				}
 				outcome->Code = curl_easy_perform(curl);
 				curl_slist_free_all(headers);

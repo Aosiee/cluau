@@ -1339,7 +1339,8 @@ TEST("lsp: each standard module used without its require has the quick fix that 
 			cluau_test::Fail(__FILE__, __LINE__, module);
 		s.Notify("textDocument/didClose", Json::Object().Set("textDocument", Json::Object().Set("uri", project.Main)));
 	}
-	CHECK(modules >= 20);
+	// Every build has at least the modules no optional library is needed for.
+	CHECK(modules >= 14);
 }
 
 TEST("lsp: hover on a declaration's name shows what a use of it shows; no hints on class and enum names")

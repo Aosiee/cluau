@@ -101,12 +101,13 @@ if (process.platform == "linux" and fs.isDir(shm)) {
 	print(false, "moved")
 }
 
-// fs.modified is right past 2262 (touch -t takes local time on every Unix).
+// fs.modified is right past 2262 (touch -t takes local time: in UTC here,
+// so the systems' rules for local time that far ahead play no part).
 if (process.platform != "windows") {
 	const future = path.join(dir, "future.txt")
 	fs.write(future, "")
-	process.run({ "touch", "-t", "230001010000", future })
-	print(fs.modified(future) == time.fromParts({ year = 2300 }))
+	process.run({ "touch", "-t", "230001010000", future }, { env = { TZ = "UTC" } })
+	print(fs.modified(future) == time.fromParts({ year = 2300 }, { utc = true }))
 } else {
 	print(true)
 }
