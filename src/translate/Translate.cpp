@@ -27,7 +27,8 @@ namespace cluau {
 		// line, before a local named `error` can hide it.
 		constexpr std::string_view kRaiseHead = "local __cluau_error = error; ";
 
-		enum class Frame : uint8_t { Paren, Bracket, Table, Block, Class };
+		// Interp: an interpolated string's segment (its tokens are an expression).
+		enum class Frame : uint8_t { Paren, Bracket, Table, Block, Class, Interp };
 		enum class BlockKind : uint8_t { Plain, If, Else, Loop, Function, Repeat, Method, Try, Catch, Finally };
 
 		struct Open
@@ -63,11 +64,16 @@ namespace cluau {
 			case TokenKind::Number:
 			case TokenKind::String:
 			case TokenKind::Interpolated:
+			case TokenKind::InterpEnd:
 			case TokenKind::LongString: return true;
 			case TokenKind::Op: return t.Text == ")" || t.Text == "]" || t.Text == "}";
 			default: return false;
 			}
 		}
+
+		// Brackets, and an interpolated string around its segments.
+		bool OpensGroup(const Token& t) { return t.Is("(") || t.Is("[") || t.Is("{") || t.Kind == TokenKind::InterpBegin; }
+		bool ClosesGroup(const Token& t) { return t.Is(")") || t.Is("]") || t.Is("}") || t.Kind == TokenKind::InterpEnd; }
 
 		std::string Trim(std::string_view s)
 		{
@@ -96,179 +102,6 @@ namespace cluau {
 			return nullptr;
 		}
 
-		std::string TranslateInterpolated(std::string_view text, int nesting = 0);
-
-		// An expression's text with cluau's operators and if-expressions
-		// rewritten (interpolation segments).
-		std::string TranslateExpressionText(std::string_view text, int nesting)
-		{
-			std::vector<Diagnostic> ignored;
-			std::vector<Token> tokens = detail::Lex(text, ignored);
-			// An if-expression's condition is `if (` ... `)`: its `)` gains `then`.
-			std::vector<uint8_t> conditionClose(tokens.size(), 0);
-			for (size_t k = 0; k + 1 < tokens.size(); k++)
-			{
-				if (!tokens[k].Is("if") || !tokens[k + 1].Is("("))
-					continue;
-				int depth = 0;
-				for (size_t m = k + 1; m < tokens.size(); m++)
-				{
-					if (tokens[m].Is("(") || tokens[m].Is("[") || tokens[m].Is("{"))
-						depth++;
-					else if ((tokens[m].Is(")") || tokens[m].Is("]") || tokens[m].Is("}")) && --depth == 0)
-					{
-						conditionClose[m] = 1;
-						break;
-					}
-				}
-			}
-			std::string out;
-			size_t pos = 0;
-			for (size_t k = 0; k < tokens.size(); k++)
-			{
-				const Token& t = tokens[k];
-				if (t.Kind == TokenKind::Eof)
-					break;
-				out.append(text.substr(pos, t.Begin - pos));
-				pos = t.End;
-				if (conditionClose[k])
-				{
-					out += ") then";
-					continue;
-				}
-				if (t.Is("else") && k + 1 < tokens.size() && tokens[k + 1].Is("if"))
-				{
-					out += "elseif";
-					pos = tokens[k + 1].End;
-					k++;
-					continue;
-				}
-				if (t.Kind == TokenKind::Op)
-				{
-					if (const char* r = OperatorReplacement(t.Text))
-					{
-						out += r;
-						continue;
-					}
-					if (t.Text == "!")
-					{
-						out += "not ";
-						continue;
-					}
-				}
-				if (t.Kind == TokenKind::Interpolated)
-				{
-					out += TranslateInterpolated(t.Text, nesting + 1);
-					continue;
-				}
-				out.append(t.Text);
-			}
-			out.append(text.substr(pos));
-			return out;
-		}
-
-		// The end (one past the closing backtick) of the interpolated string
-		// at `at`, its segments' braces and strings skipped.
-		size_t SkipInterpolatedText(std::string_view text, size_t at, int nesting = 0)
-		{
-			size_t j = at + 1;
-			int depth = 0;
-			while (j < text.size())
-			{
-				const char c = text[j];
-				if (depth == 0)
-				{
-					if (c == '\\')
-						j += 2;
-					else if (c == '`')
-						return j + 1;
-					else
-					{
-						depth = c == '{' ? 1 : 0;
-						j++;
-					}
-					continue;
-				}
-				if (c == '"' || c == '\'')
-				{
-					j++;
-					while (j < text.size() && text[j] != c && text[j] != '\n')
-						j += text[j] == '\\' ? 2 : 1;
-					j++;
-					continue;
-				}
-				if (c == '`' && nesting < detail::kMaxInterpolationNesting)
-				{
-					j = SkipInterpolatedText(text, j, nesting + 1);
-					continue;
-				}
-				if (c == '{')
-					depth++;
-				else if (c == '}')
-					depth--;
-				j++;
-			}
-			return text.size();
-		}
-
-		// `...{expr}...` with each segment's operators rewritten.
-		// (Nested deeper than the lexer reads, which reported it: as written.)
-		std::string TranslateInterpolated(std::string_view text, int nesting)
-		{
-			if (nesting >= detail::kMaxInterpolationNesting)
-				return std::string(text);
-			std::string out;
-			size_t i = 0;
-			while (i < text.size())
-			{
-				const char c = text[i];
-				if (c == '\\' && i + 1 < text.size())
-				{
-					out += text.substr(i, 2);
-					i += 2;
-					continue;
-				}
-				if (c != '{')
-				{
-					out += c;
-					i++;
-					continue;
-				}
-				// The matching brace, skipping quoted strings and interpolated
-				// strings inside the segment.
-				size_t j = i + 1;
-				int depth = 1;
-				while (j < text.size() && depth > 0)
-				{
-					const char d = text[j];
-					if (d == '"' || d == '\'')
-					{
-						const char q = d;
-						j++;
-						while (j < text.size() && text[j] != q)
-							j += text[j] == '\\' ? 2 : 1;
-					}
-					else if (d == '`')
-					{
-						j = SkipInterpolatedText(text, j, nesting + 1);
-						continue;
-					}
-					else if (d == '{')
-						depth++;
-					else if (d == '}')
-						depth--;
-					j++;
-				}
-				const size_t innerEnd = depth == 0 ? j - 1 : j;
-				out += '{';
-				out += TranslateExpressionText(text.substr(i + 1, innerEnd - i - 1), nesting);
-				if (depth == 0)
-					out += '}';
-				i = j;
-			}
-			return out;
-		}
-
 		std::string ExpandClass(std::string text, const std::string& className)
 		{
 			ReplaceAll(text, "$Class", className);
@@ -288,7 +121,7 @@ namespace cluau {
 
 			TranslateResult Run()
 			{
-				m_Toks = detail::Lex(m_Src, m_R.Diagnostics);
+				m_Toks = detail::Lex(m_Src, m_R.Diagnostics, true);
 				const size_t n = m_Toks.size();
 				m_Repl.assign(n, std::nullopt);
 				m_After.assign(n, std::string());
@@ -304,11 +137,30 @@ namespace cluau {
 				m_Skip.assign(n, 0);
 				Classify();
 				Emit();
+				LimitDiagnostics();
 				return std::move(m_R);
 			}
 
 		private:
 			// ---- helpers -------------------------------------------------
+
+			// The first diagnostics in the file, and how many more there are
+			// (a file of stray brackets would otherwise report every one).
+			void LimitDiagnostics()
+			{
+				constexpr size_t kMaxDiagnostics = 50;
+				std::vector<Diagnostic>& all = m_R.Diagnostics;
+				if (all.size() <= kMaxDiagnostics)
+					return;
+				std::stable_sort(all.begin(), all.end(), [](const Diagnostic& a, const Diagnostic& b) {
+					return std::tie(a.At.Begin.Line, a.At.Begin.Col) < std::tie(b.At.Begin.Line, b.At.Begin.Col);
+				});
+				Diagnostic more = all[kMaxDiagnostics];
+				more.Warning = std::all_of(all.begin() + kMaxDiagnostics, all.end(), [](const Diagnostic& d) { return d.Warning; });
+				more.Message = std::to_string(all.size() - kMaxDiagnostics) + " more " + (more.Warning ? "warnings" : "errors") + " from here on are not shown";
+				all.resize(kMaxDiagnostics);
+				all.push_back(std::move(more));
+			}
 
 			size_t Sig(size_t j) const
 			{
@@ -420,13 +272,11 @@ namespace cluau {
 					const Token& t = m_Toks[k];
 					if (t.Kind == TokenKind::Eof)
 						return npos;
-					if (t.Kind != TokenKind::Op)
-						continue;
-					if (t.Text == "{" && depth == 0)
+					if (t.Is("{") && depth == 0)
 						return k;
-					if (t.Text == "(" || t.Text == "[" || t.Text == "{")
+					if (OpensGroup(t))
 						depth++;
-					else if (t.Text == ")" || t.Text == "]" || t.Text == "}")
+					else if (ClosesGroup(t))
 					{
 						if (--depth < 0)
 							return npos;
@@ -515,13 +365,14 @@ namespace cluau {
 
 			// The last token of the expression (or list) a statement keyword at
 			// `keyword` takes: to the end of its line unless brackets stay open or
-			// the line goes on; npos when there is none.
-			size_t ExpressionEnd(size_t keyword) const
+			// the line goes on; npos when there is none. With `nextLine`, as Luau
+			// reads a `return`, the expression may start on a later line.
+			size_t ExpressionEnd(size_t keyword, bool nextLine = false) const
 			{
 				size_t k = Sig(keyword + 1);
 				const Token& first = m_Toks[k];
 				if (first.Kind == TokenKind::Eof || first.Is("}") || first.Is(";") ||
-					(first.Line > m_Toks[keyword].EndLine && !ContinuesLine(first)))
+					(first.Line > m_Toks[keyword].EndLine && !ContinuesLine(first) && !nextLine))
 					return npos;
 				int depth = 0;
 				size_t last = npos;
@@ -558,9 +409,9 @@ namespace cluau {
 					}
 					else if (depth == 0 && t.Is("else") && ifs > 0 && !m_Toks[Sig(k + 1)].Is("if"))
 						ifs--;
-					if (t.Is("(") || t.Is("[") || t.Is("{"))
+					if (OpensGroup(t))
 						depth++;
-					else if (t.Is(")") || t.Is("]") || t.Is("}"))
+					else if (ClosesGroup(t))
 						depth--;
 					last = k;
 				}
@@ -620,8 +471,10 @@ namespace cluau {
 						Name(i);
 					else if (t.Kind == TokenKind::Op)
 						Operator(i);
-					else if (t.Kind == TokenKind::Interpolated)
-						m_Repl[i] = TranslateInterpolated(t.Text);
+					else if (t.Kind == TokenKind::InterpBegin)
+						m_Stack.push_back({ Frame::Interp, BlockKind::Plain, i });
+					else if (t.Kind == TokenKind::InterpMid || t.Kind == TokenKind::InterpEnd)
+						CloseSegment(i);
 					m_PrevSig = i;
 				}
 				CloseAtEnd();
@@ -1129,7 +982,7 @@ namespace cluau {
 					return;
 				m_Tries[(size_t)index].Returns = true;
 				m_Tries[(size_t)index].ReturnAt = std::min(m_Tries[(size_t)index].ReturnAt, i);
-				const size_t last = ExpressionEnd(i);
+				const size_t last = ExpressionEnd(i, true);
 				if (last == npos)
 					Generate(i, "return 1, table.pack()");
 				else
@@ -1226,7 +1079,8 @@ namespace cluau {
 					// block (which a `{` further on must not be taken for).
 					const Token& after = m_Toks[Sig(MatchClose(c) + 1)];
 					if ((after.Kind == TokenKind::Name && !after.Is("and") && !after.Is("or")) || after.Kind == TokenKind::Number ||
-						after.Kind == TokenKind::String || after.Kind == TokenKind::LongString || after.Kind == TokenKind::Interpolated)
+						after.Kind == TokenKind::String || after.Kind == TokenKind::LongString || after.Kind == TokenKind::Interpolated ||
+						after.Kind == TokenKind::InterpBegin)
 					{
 						Error(t, std::string(t.Text) + " needs a { } block: " + std::string(t.Text) + " (...) { ... }");
 						return;
@@ -1237,6 +1091,27 @@ namespace cluau {
 				{
 					Error(t, std::string(t.Text) + " needs a { } block");
 					return;
+				}
+				if (parenthesised && m_Toks[c].Is("("))
+				{
+					// `if (x) (f)()` and a table on a later line: a statement ends
+					// between the condition and that `{`, which is not the block.
+					size_t prev = MatchClose(c);
+					int depth = 0;
+					for (size_t k = Sig(prev + 1); k < brace; k = Sig(k + 1))
+					{
+						const Token& next = m_Toks[k];
+						if (depth == 0 && next.Line > m_Toks[prev].EndLine && !AwaitsOperand(m_Toks[prev]) && !ContinuesLine(next))
+						{
+							Error(t, std::string(t.Text) + " needs a { } block: " + std::string(t.Text) + " (...) { ... }");
+							return;
+						}
+						if (OpensGroup(next))
+							depth++;
+						else if (ClosesGroup(next))
+							depth--;
+						prev = k;
+					}
 				}
 				MarkBlock(brace, kind, opener);
 			}
@@ -1262,10 +1137,7 @@ namespace cluau {
 				m_Repl[p] = " ";
 				m_Repl[q] = " ";
 				if (const size_t let = Sig(p + 1); m_Toks[let].Is("let") || m_Toks[let].Is("local"))
-				{
-					m_Repl[let] = "";
-					m_Skip[let] = 1;
-				}
+					Blank(let);
 				MarkBlock(brace, BlockKind::Loop, "do");
 			}
 
@@ -1313,6 +1185,10 @@ namespace cluau {
 				if (m_ExprIfClose[m_PrevSig] || m_ThrowAt[m_PrevSig])
 					return true; // if (a) if (b) 1 else 2 else 3; throw if (c) a else b
 				const Token& p = m_Toks[m_PrevSig];
+				if (p.Kind == TokenKind::InterpBegin || p.Kind == TokenKind::InterpMid)
+					return true; // a segment's start
+				if (p.Is(";") && !m_Stack.empty() && m_Stack.back().Kind == Frame::Table)
+					return true; // a table's `;` separates its fields
 				if (p.Kind == TokenKind::Op)
 					return !(p.Is(";") || EndsStatement(m_PrevSig));
 				if (p.Kind == TokenKind::Name)
@@ -1457,11 +1333,15 @@ namespace cluau {
 			// `local function f` -> `function f`.
 			void ReplDeclaration(size_t i)
 			{
-				m_Repl[i] = "";
 				MarkDeclarationTypes(i);
 				size_t j = Sig(i + 1);
 				if (m_Toks[j].Is("function"))
+				{
+					m_Repl[i] = "";
 					return;
+				}
+				// The annotations' tokens, which the assignment leaves out.
+				std::vector<std::pair<size_t, size_t>> types;
 				size_t last = npos;
 				while (m_Toks[j].Kind == TokenKind::Name)
 				{
@@ -1470,20 +1350,36 @@ namespace cluau {
 					if (m_Toks[j].Is(":"))
 					{
 						const size_t typeEnd = SkipType(j + 1);
-						for (size_t k = j; k < typeEnd; k++)
-							if (!m_Toks[k].IsComment())
-							{
-								m_Repl[k] = "";
-								m_Skip[k] = 1;
-							}
+						// A type that does not end (an unclosed bracket) or runs into
+						// the value: the declaration stays a local, for Luau to report.
+						if (typeEnd >= m_Toks.size() || std::any_of(m_Toks.begin() + (std::ptrdiff_t)j, m_Toks.begin() + (std::ptrdiff_t)typeEnd,
+															 [](const Token& t) { return t.Is("=") || t.Is(";"); }))
+						{
+							m_Repl[i] = "local";
+							return;
+						}
+						types.push_back({ j, typeEnd });
 						j = Sig(typeEnd);
 					}
 					if (!m_Toks[j].Is(","))
 						break;
 					j = Sig(j + 1);
 				}
+				m_Repl[i] = "";
+				for (const auto& [from, to] : types)
+					for (size_t k = from; k < to; k++)
+						if (!m_Toks[k].IsComment())
+							Blank(k);
 				if (last != npos && !m_Toks[j].Is("="))
 					m_Repl[last] = std::string(m_Toks[last].Text) + " = nil";
+			}
+
+			// Leaves token k out of the Luau (its line breaks stay, so every line
+			// stays on its line).
+			void Blank(size_t k)
+			{
+				m_Repl[k] = std::string((size_t)(m_Toks[k].EndLine - m_Toks[k].Line), '\n');
+				m_Skip[k] = 1;
 			}
 
 			// ---- classes -------------------------------------------------
@@ -1607,10 +1503,7 @@ namespace cluau {
 						Error(m_Toks[extendsTok], "this host's classes do not extend other classes");
 					for (size_t j = extendsTok; j < k; j++)
 						if (!m_Toks[j].IsComment())
-						{
-							m_Repl[j] = "";
-							m_Skip[j] = 1;
-						}
+							Blank(j);
 					brace = k;
 				}
 				if (!m_Toks[brace].Is("{"))
@@ -1860,9 +1753,9 @@ namespace cluau {
 								break;
 							if (depth == 0 && vt.Is(";"))
 								break;
-							if (vt.Is("(") || vt.Is("[") || vt.Is("{"))
+							if (OpensGroup(vt))
 								depth++;
-							else if (vt.Is(")") || vt.Is("]") || vt.Is("}"))
+							else if (ClosesGroup(vt))
 								depth--;
 							v++;
 						}
@@ -1906,9 +1799,9 @@ namespace cluau {
 						break;
 					if (depth == 0 && vt.Is(";"))
 						break;
-					if (vt.Is("(") || vt.Is("[") || vt.Is("{"))
+					if (OpensGroup(vt))
 						depth++;
-					else if (vt.Is(")") || vt.Is("]") || vt.Is("}"))
+					else if (ClosesGroup(vt))
 						depth--;
 					v++;
 				}
@@ -2106,10 +1999,7 @@ namespace cluau {
 						continue;
 					for (size_t k = i; k < span.End; k++)
 						if (!m_Toks[k].IsComment())
-						{
-							m_Repl[k] = "";
-							m_Skip[k] = 1;
-						}
+							Blank(k);
 					m_PrevSig = span.End > 0 ? span.End - 1 : i;
 					return;
 				}
@@ -2128,32 +2018,46 @@ namespace cluau {
 				{
 					if (span.Begin != i)
 						continue;
+					auto lower = [&](const std::string& value, std::string& error) {
+						ClassField field = span.Field;
+						field.Default = value;
+						if (m_Profile->LowerField)
+							return m_Profile->LowerField(field, m_ClassName, error);
+						return value.empty() ? std::string() : m_ClassName + ".Fields." + field.Name + " = " + value;
+					};
 					std::string error;
-					std::string lowered;
-					if (m_Profile->LowerField)
-						lowered = m_Profile->LowerField(span.Field, m_ClassName, error);
-					else if (!span.Field.Default.empty())
-						lowered = m_ClassName + ".Fields." + span.Field.Name + " = " + span.Field.Default;
+					const std::string lowered = lower(span.Field.Default, error);
 					if (!error.empty())
 						Error(m_Toks[i], error);
-					// A lowering that contains the default as it is: the default's
-					// own tokens stay in place and the main pass translates them
-					// (so its lines stay on their lines), with the lowering's text
-					// before and after them.
-					const size_t at = span.Field.Default.empty() ? std::string::npos : lowered.find(span.Field.Default);
-					if (at != std::string::npos && span.ValueBegin != npos)
+					// A lowering that holds the default as it is (where a stand-in for
+					// it lands, the rest unchanged): the default's own tokens stay in
+					// place and the main pass translates them (so its lines stay on
+					// their lines), with the lowering's text before and after them.
+					size_t at = std::string::npos;
+					std::string after;
+					if (!span.Field.Default.empty() && span.ValueBegin != npos)
+					{
+						static constexpr std::string_view kStandIn = "\x01" "default" "\x01";
+						std::string ignored;
+						const std::string shape = lower(std::string(kStandIn), ignored);
+						at = shape.find(kStandIn);
+						if (at != std::string::npos)
+						{
+							after = shape.substr(at + kStandIn.size());
+							if (shape.substr(0, at) + span.Field.Default + after != lowered)
+								at = std::string::npos;
+						}
+					}
+					if (at != std::string::npos)
 					{
 						m_Repl[i] = lowered.substr(0, at);
 						for (size_t k = i + 1; k <= span.ValueBegin; k++)
 						{
 							m_DropGap[k] = 1;
 							if (!m_Toks[k].IsComment() && k < span.ValueBegin)
-							{
-								m_Repl[k] = "";
-								m_Skip[k] = 1;
-							}
+								Blank(k);
 						}
-						AddAfter(PrevSig(span.ValueEnd), lowered.substr(at + span.Field.Default.size()));
+						AddAfter(PrevSig(span.ValueEnd), after);
 						m_ValueEnd = span.ValueEnd;
 						m_PrevSig = PrevSig(span.ValueBegin);
 						return;
@@ -2163,10 +2067,7 @@ namespace cluau {
 					m_Repl[i] = lowered;
 					for (size_t k = i + 1; k < span.End; k++)
 						if (!m_Toks[k].IsComment())
-						{
-							m_Repl[k] = "";
-							m_Skip[k] = 1;
-						}
+							Blank(k);
 					m_PrevSig = span.End > 0 ? span.End - 1 : i;
 					return;
 				}
@@ -2240,7 +2141,7 @@ namespace cluau {
 				// Inside brackets or a table constructor nothing starts a
 				// statement (`f(g\n{ a = 1 })` is a call with a table).
 				if (!m_Stack.empty() && (m_Stack.back().Kind == Frame::Paren || m_Stack.back().Kind == Frame::Bracket ||
-					m_Stack.back().Kind == Frame::Table))
+					m_Stack.back().Kind == Frame::Table || m_Stack.back().Kind == Frame::Interp))
 					return false;
 				if (m_PrevSig == npos)
 					return true;
@@ -2344,9 +2245,12 @@ namespace cluau {
 					if (m_Options.Script)
 					{
 						// A local the code after it uses; CloseAtEnd returns it when
-						// it is the file's last statement.
+						// it is the file's last statement. A `;` after it that would
+						// follow the last member's own goes (Luau has no empty statement).
 						m_Repl[i] = "";
 						m_LastClassEnd = i;
+						if (const size_t semi = Sig(i + 1); m_Toks[semi].Is(";") && m_Toks[PrevSig(i)].Is(";"))
+							Blank(semi);
 						return;
 					}
 					m_Repl[i] = "return " + m_ClassName;
@@ -2405,6 +2309,23 @@ namespace cluau {
 				}
 			}
 
+			// The `}` that ends an interpolated string's segment (an InterpMid
+			// opens the next one): what the segment left open is reported.
+			void CloseSegment(size_t i)
+			{
+				if (std::none_of(m_Stack.begin(), m_Stack.end(), [](const Open& o) { return o.Kind == Frame::Interp; }))
+					return;
+				while (m_Stack.back().Kind != Frame::Interp)
+				{
+					Error(m_Toks[m_Stack.back().Token], "unclosed '" + std::string(m_Toks[m_Stack.back().Token].Text) + "'");
+					m_Stack.pop_back();
+				}
+				m_Stack.pop_back();
+				EndExpressionIfsAbove(m_Stack.size());
+				if (m_Toks[i].Kind == TokenKind::InterpMid)
+					m_Stack.push_back({ Frame::Interp, BlockKind::Plain, i });
+			}
+
 			void CloseAtEnd()
 			{
 				if (m_LastClassEnd != npos && !m_Options.Repl)
@@ -2415,9 +2336,10 @@ namespace cluau {
 					if (m_Toks[k].Kind == TokenKind::Eof)
 						m_Repl[m_LastClassEnd] = "return " + m_ClassName;
 				}
+				// An if-expression still waiting for its else goes on in more input too.
+				m_R.Unfinished = !m_ExprIfs.empty() || !m_Stack.empty() || std::any_of(m_Toks.begin(), m_Toks.end(), [](const Token& t) { return t.Open; });
 				while (!m_ExprIfs.empty())
 					MissingElse();
-				m_R.Unfinished = !m_Stack.empty() || std::any_of(m_Toks.begin(), m_Toks.end(), [](const Token& t) { return t.Open; });
 				while (!m_Stack.empty())
 				{
 					const Open open = m_Stack.back();
@@ -2429,6 +2351,7 @@ namespace cluau {
 					case Frame::Bracket: m_Tail += "]"; Error(at, "unclosed '['"); break;
 					case Frame::Table: m_Tail += "}"; Error(at, "unclosed '{'"); break;
 					case Frame::Class: m_Tail += m_Options.Script ? std::string() : " return " + m_ClassName; Error(at, "the class's '{' has no closing '}'"); break;
+					case Frame::Interp: break; // the lexer reported the string
 					case Frame::Block:
 						m_Tail += open.Block == BlockKind::Repeat ? " until false" : " end";
 						Error(at, "this '{' has no closing '}'");
@@ -2461,9 +2384,17 @@ namespace cluau {
 				for (size_t i = 0; i < m_Toks.size(); i++)
 				{
 					const Token& t = m_Toks[i];
-					const std::string_view gap = m_Src.substr(pos, t.Begin - pos);
+					std::string_view gap = m_Src.substr(pos, t.Begin - pos);
+					if (pos == 0 && gap.substr(0, 3) == "\xEF\xBB\xBF")
+					{
+						// A byte order mark is not Luau.
+						gap.remove_prefix(3);
+						m_R.Map.AddAnchor(0, 3, outCol);
+					}
 					if (!m_DropGap[i] || gap.find('\n') != std::string_view::npos)
 						append(gap);
+					else if (!gap.empty())
+						m_R.Map.AddAnchor(t.Line, t.Col, outCol); // the token moved left
 					pos = t.Begin;
 					if (t.Kind == TokenKind::Eof)
 						break;
@@ -2474,6 +2405,10 @@ namespace cluau {
 						continue;
 					}
 					const std::string& text = *m_Repl[i];
+					// A `-` before a comment's `--` would make `---`, a comment from the
+					// minus on.
+					if (!text.empty() && text.front() == '-' && !out.empty() && out.back() == '-')
+						append(" ");
 					if (t.Kind == TokenKind::BlockComment)
 					{
 						// The opener and the closer move; the body is copied.

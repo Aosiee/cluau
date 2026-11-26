@@ -94,3 +94,41 @@ print(c.S, c.L, #c.Items, c.Cb(), Corner.Make(4), c:Line())
 print("after //[[")
 /* see t[1]*/ print("after ]")
 print(`nested {`inner {n != 1 && true}`}`)
+
+// A comment right after a minus is a comment, not part of the operator.
+let m = 5
+m = m -/* one */1
+print("m", m, 10 -// and the rest on the next line
+	3)
+
+// An interpolation segment is an expression like any other: functions,
+// comments, glued `!`, long strings, if-expressions and `~/`.
+let items = { 3, 1, 2 }
+print(`sorted: {(function(): string { table.sort(items); return table.concat(items, ",") })()}`)
+print(`{m /* the count */ + 1} {true and!false} {string.len([==[a`b]==])} {if (m > 1) "big" else "small"} {7 ~/ 2}`)
+
+// In a try, the `...` a segment uses, and a return's value on the next line.
+function Count(...: number): string {
+	try {
+		return `{select("#", ...)} arguments`
+	} catch (e) {
+		return "failed"
+	}
+}
+function Later(): number {
+	try {
+		return
+		42
+	} catch (e) {
+		return 0
+	}
+}
+function Table(): {number} {
+	try {
+		return
+		{ 1, 2 }
+	} catch (e) {
+		return {}
+	}
+}
+print(Count(1, 2, 3), Later(), #Table())

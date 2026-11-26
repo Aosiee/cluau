@@ -17,7 +17,10 @@ namespace cluau::detail {
 		Name,
 		Number,
 		String,        // "..." / '...'
-		Interpolated,  // `...` (its {} segments are part of the token)
+		Interpolated,  // `...` (its {} segments are part of the token, unless split)
+		InterpBegin,   // split: `...{ (the text before the first segment)
+		InterpMid,     // split: }...{ (the text between two segments)
+		InterpEnd,     // split: }...` (the text after the last segment)
 		LongString,    // [[...]] / [==[...]==]
 		LineComment,   // // ... (and a `#!` first line)
 		BlockComment,  // /* ... */
@@ -35,7 +38,7 @@ namespace cluau::detail {
 		int Col = 0;
 		int EndLine = 0;
 		int EndCol = 0;
-		bool Open = false; // a comment, long string or interpolated string the source ends inside
+		bool Open = false; // a comment, long string or interpolated string the source ends inside, or a string it ends while continuing (`\` at a line's end)
 
 		bool Is(std::string_view text) const { return (Kind == TokenKind::Op || Kind == TokenKind::Name) && Text == text; }
 		bool IsComment() const { return Kind == TokenKind::LineComment || Kind == TokenKind::BlockComment; }
@@ -47,6 +50,11 @@ namespace cluau::detail {
 
 	// The tokens, ending with one Eof token. Lexical errors (an unterminated
 	// string or comment, a stray character) are reported and lexed through.
-	std::vector<Token> Lex(std::string_view source, std::vector<Diagnostic>& diagnostics);
+	// A UTF-8 byte order mark at the start is whitespace. With
+	// `splitInterpolation`, an interpolated string with segments is its
+	// text pieces (InterpBegin, InterpMid, InterpEnd) with each segment's
+	// own tokens between them, as Luau reads it; otherwise it is one
+	// Interpolated token.
+	std::vector<Token> Lex(std::string_view source, std::vector<Diagnostic>& diagnostics, bool splitInterpolation = false);
 
 } // namespace cluau::detail

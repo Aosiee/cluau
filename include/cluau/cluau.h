@@ -210,15 +210,16 @@ namespace cluau {
 	{
 		std::string Luau;
 		SourceMap Map;
-		std::vector<Diagnostic> Diagnostics;
+		std::vector<Diagnostic> Diagnostics; // in source order when there are many: the first 50, then one saying how many more
 		std::vector<Exemption> Exemptions;
 		std::vector<Range> ConstNames;      // each `const` local's name (source positions)
 		std::vector<Range> Generated;       // Luau-text ranges the translator generated (type aliases, ...)
 		std::optional<ClassInfo> Class;     // the file's class (the first, in script mode)
 		std::vector<ClassInfo> Classes;     // every class, in order (script mode may declare several)
-		// The source ends inside a block, a bracket, a comment or a long
-		// string: an interactive prompt reads another line rather than
-		// reporting the errors.
+		// The source ends inside a block, a bracket, a comment, a long
+		// string, a string continued on the next line, or an if-expression
+		// still waiting for its else: an interactive prompt reads another
+		// line rather than reporting the errors.
 		bool Unfinished = false;
 		bool HasErrors() const;
 	};

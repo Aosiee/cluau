@@ -51,3 +51,15 @@ first:Add("apple")
 print(#first.Items, #second.Items, second.Label)
 print(repr(first))
 print(tostring(Vec))
+
+// A default whose text also appears in the class's name or in the lowering
+// (`3` in Vector3, `d` in Fields); a member's `;` and the class's `};`.
+class Vector3 {
+	X: number = 0
+	Z: number = 3
+}
+const d = 5
+class Box {
+	Width: number = d;
+};
+print(Vector3().Z, Box().Width)

@@ -433,8 +433,10 @@ args = { program = "{0}" }
 `cluau` with no arguments reads one input at a time. An expression prints
 its value (`repr`'s form: strings quoted, tables with their contents), and
 the last value is `_`. An input whose braces, brackets, comment or long
-string are still open continues on the next line (`>>`); an empty line
-ends it early. A pasted block arrives whole.
+string are still open continues on the next line (`>>`), as does one that
+ends inside an if-expression still waiting for its `else`, or in a string
+continued with `\` at the end of the line; an empty line ends it early. A
+pasted block arrives whole.
 
 ```
 > let words = { "a", "b" }
