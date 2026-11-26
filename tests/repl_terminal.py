@@ -7,9 +7,8 @@
 #
 #   python3 repl_terminal.py <cluau>
 #
-# Each step waits for the prompt's own output (no fixed delays but a short
-# one letting code start before a Ctrl-C stops it), so a slow
-# machine only makes it slower.
+# Each step waits for the prompt's own output (code a Ctrl-C stops says
+# first that it is running), so a slow machine only makes it slower.
 
 import os
 import pty
@@ -123,13 +122,13 @@ def main():
     p.ready("the prompt")
 
     # A Ctrl-C the code caught, then another: the second stops the code too.
-    p.send("pcall(function() { while (true) { } })\r")
-    time.sleep(0.3)
+    p.send("pcall(function() { print('loop' .. 'ing') while (true) { } })\r")
+    p.expect(r"\nlooping\r?\n", "the code running")
     p.send("\x03")
     p.expect(r'false\s+"interrupted"', "a caught Ctrl-C")
     p.ready("the prompt after a caught Ctrl-C")
-    p.send("while (true) { }\r")
-    time.sleep(0.3)
+    p.send("print('loop' .. 'ing again') while (true) { }\r")
+    p.expect(r"\nlooping again\r?\n", "the code running again")
     p.send("\x03")
     p.expect(r"interrupted", "a second Ctrl-C stopping the code")
     p.ready("the prompt after the second Ctrl-C")
