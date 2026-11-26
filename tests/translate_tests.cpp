@@ -857,3 +857,11 @@ TEST("statements: a brace-less if does not take a later line's table for its blo
 	CHECK(HasError(cluau::Translate("while (x) (f)()\nlet t = { 1 }\n"), "while needs a { } block"));
 	CHECK(!cluau::Translate("if (a &&\n\tb) {\n}\nif (a)\n{\n}\nwhile (a) // why\n{\n}\nif (a)\n\t&& (b) {\n}\n").HasErrors());
 }
+
+TEST("tables: an if-expression after a `;` separator; form feeds are whitespace")
+{
+	CHECK_EQ(Luau("let t = { 1; if (a) 2 else 3 }"), std::string("local t = { 1; if (a) then 2 else 3 }"));
+	CHECK(!cluau::Translate("let t = { 1; if (a) 2 else 3 }\n").HasErrors());
+	CHECK_EQ(Luau("let x =\f1\v+ 2"), std::string("local x =\f1\v+ 2"));
+	CHECK(!cluau::Translate("let x =\f1\v+ 2\n").HasErrors());
+}

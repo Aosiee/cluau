@@ -99,7 +99,9 @@ namespace cluau::detail {
 
 			void SkipWhitespace()
 			{
-				while (m_Pos < m_Src.size() && (m_Src[m_Pos] == ' ' || m_Src[m_Pos] == '\t' || m_Src[m_Pos] == '\r' || m_Src[m_Pos] == '\n'))
+				// Luau's whitespace, form feed and vertical tab included.
+				while (m_Pos < m_Src.size() && (m_Src[m_Pos] == ' ' || m_Src[m_Pos] == '\t' || m_Src[m_Pos] == '\r' || m_Src[m_Pos] == '\n' ||
+						   m_Src[m_Pos] == '\f' || m_Src[m_Pos] == '\v'))
 					Advance();
 			}
 

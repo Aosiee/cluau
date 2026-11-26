@@ -1187,6 +1187,8 @@ namespace cluau {
 				const Token& p = m_Toks[m_PrevSig];
 				if (p.Kind == TokenKind::InterpBegin || p.Kind == TokenKind::InterpMid)
 					return true; // a segment's start
+				if (p.Is(";") && !m_Stack.empty() && m_Stack.back().Kind == Frame::Table)
+					return true; // a table's `;` separates its fields
 				if (p.Kind == TokenKind::Op)
 					return !(p.Is(";") || EndsStatement(m_PrevSig));
 				if (p.Kind == TokenKind::Name)
