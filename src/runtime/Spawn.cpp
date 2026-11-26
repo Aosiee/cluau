@@ -636,7 +636,7 @@ namespace cluau::runtime::detail {
 			if (!inherited.Name({ startup.hStdInput, startup.hStdOutput, startup.hStdError }))
 				return fail();
 			startupEx.lpAttributeList = inherited.Attributes();
-			const bool inherit = startupEx.lpAttributeList != nullptr;
+			const bool handing = startupEx.lpAttributeList != nullptr; // any handles to the child
 			std::wstring env;
 			if (!request.Env.empty())
 			{
@@ -646,8 +646,8 @@ namespace cluau::runtime::detail {
 			const std::wstring cwd = Wide(request.Cwd);
 			std::fflush(stdout);
 			std::fflush(stderr);
-			const DWORD flags = CREATE_SUSPENDED | (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT) | (inherit ? EXTENDED_STARTUPINFO_PRESENT : 0);
-			if (!CreateProcessW(application.empty() ? nullptr : application.c_str(), line.data(), nullptr, nullptr, inherit, flags,
+			const DWORD flags = CREATE_SUSPENDED | (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT) | (handing ? EXTENDED_STARTUPINFO_PRESENT : 0);
+			if (!CreateProcessW(application.empty() ? nullptr : application.c_str(), line.data(), nullptr, nullptr, handing, flags,
 					env.empty() ? nullptr : env.data(), cwd.empty() ? nullptr : cwd.c_str(), &startup, &started.Process))
 				return fail();
 			// The job holds it and what it starts; where it cannot be put in
