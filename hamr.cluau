@@ -1,4 +1,4 @@
-// cluau's suite for hamr (github.com/Aosiee/hamr): `hamr run` here.
+// cluau's suite for hamr (github.com/odd-fish-society/hamr): `hamr run` here.
 //
 // The translator's tests, the script tests and the checker's tests in a
 // release and a debug build (the builds fetch Luau for the runtime and the

@@ -68,7 +68,7 @@ async function start() {
 				"It needs cluau 0.17.0 or later on PATH, or the cluau.path setting.",
 			install
 		);
-		if (choice === install) vscode.env.openExternal(vscode.Uri.parse("https://github.com/Aosiee/cluau#installing"));
+		if (choice === install) vscode.env.openExternal(vscode.Uri.parse("https://github.com/odd-fish-society/cluau#installing"));
 	}
 }
 

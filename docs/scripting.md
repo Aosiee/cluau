@@ -1225,7 +1225,7 @@ HTTP and HTTPS requests:
 const http = require("@std/http")
 const json = require("@std/json")
 
-const release = http.get("https://api.github.com/repos/Aosiee/cluau/releases/latest", {
+const release = http.get("https://api.github.com/repos/odd-fish-society/cluau/releases/latest", {
 	headers = { Accept = "application/vnd.github+json" },
 	timeout = 30,
 })

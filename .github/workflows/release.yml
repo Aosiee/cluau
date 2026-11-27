@@ -446,13 +446,13 @@ jobs:
             echo "Install on Linux or macOS:"
             echo
             echo '```'
-            echo "curl -fsSL https://github.com/Aosiee/cluau/releases/latest/download/install.sh | sh"
+            echo "curl -fsSL https://github.com/odd-fish-society/cluau/releases/latest/download/install.sh | sh"
             echo '```'
             echo
             echo "Install on Windows (PowerShell):"
             echo
             echo '```'
-            echo "irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex"
+            echo "irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1 | iex"
             echo '```'
             echo
             echo "Downloads: the \`cluau\` command line (run, check, test and profile scripts, the REPL, the language server, the debugger, translate, convert) for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), with the licence, the README, the syntax guide and the scripting guide; Debian and RPM packages for Linux (\`.deb\`, \`.rpm\`); the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`$stores). To embed the translator, build from source (no dependencies)."

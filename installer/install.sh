@@ -3,7 +3,7 @@
 # against the release's SHA256SUMS, installs the `cluau` command and puts it
 # on PATH.
 #
-#   curl -fsSL https://github.com/Aosiee/cluau/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/odd-fish-society/cluau/releases/latest/download/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --version v0.7.0
 #   sh install.sh [--version vX.Y.Z] [--prefix DIR] [--no-modify-path] [--uninstall]
 #
@@ -15,7 +15,7 @@
 #
 # The environment can stand in for the options: CLUAU_VERSION,
 # CLUAU_PREFIX. CLUAU_REPOSITORY is the repository the releases come from
-# (its web address: https://github.com/Aosiee/cluau unless it names
+# (its web address: https://github.com/odd-fish-society/cluau unless it names
 # another, such as a Forgejo or Gitea server's), whose API gives the latest
 # release. CLUAU_DOWNLOAD_URL replaces a release's download address (a URL
 # or a local directory holding the release's files), for mirrors and for
@@ -23,7 +23,7 @@
 
 set -eu
 
-repository="${CLUAU_REPOSITORY:-https://github.com/Aosiee/cluau}"
+repository="${CLUAU_REPOSITORY:-https://github.com/odd-fish-society/cluau}"
 repository="${repository%/}"
 # owner/name are the address's last two parts; the server is what comes
 # before them (a Forgejo or Gitea server may live under a path of its own).

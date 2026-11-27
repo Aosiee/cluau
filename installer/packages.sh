@@ -64,12 +64,12 @@ size="$(du -sk "$root/usr" | cut -f 1)"
 	echo "Package: cluau"
 	echo "Version: $version"
 	echo "Architecture: $deb_arch"
-	echo "Maintainer: cluau <https://github.com/Aosiee/cluau/issues>"
+	echo "Maintainer: cluau <https://github.com/odd-fish-society/cluau/issues>"
 	echo "Installed-Size: $size"
 	echo "Depends: libc6 (>= 2.28)" # the release builds' glibc
 	echo "Section: interpreters"
 	echo "Priority: optional"
-	echo "Homepage: https://github.com/Aosiee/cluau"
+	echo "Homepage: https://github.com/odd-fish-society/cluau"
 	echo "Description: $summary"
 	echo "$description" | sed 's/^/ /'
 } > "$root/DEBIAN/control"
@@ -85,7 +85,7 @@ Version: $version
 Release: 1
 Summary: $summary
 License: LicenseRef-cluau
-URL: https://github.com/Aosiee/cluau
+URL: https://github.com/odd-fish-society/cluau
 # A release build, packaged as it is: no debug package, nothing stripped.
 %global debug_package %{nil}
 %global __strip /bin/true

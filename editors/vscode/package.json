@@ -3,15 +3,15 @@
 	"displayName": "cluau",
 	"description": "cluau, C-syntax-flavoured Luau: highlighting, the checker's errors, completion, hover and navigation as you type, and the debugger.",
 	"version": "0.33.0",
-	"publisher": "aosiee",
+	"publisher": "odd-fish-society",
 	"license": "SEE LICENSE IN LICENSE",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/Aosiee/cluau"
+		"url": "https://github.com/odd-fish-society/cluau"
 	},
-	"homepage": "https://github.com/Aosiee/cluau/tree/main/editors/vscode",
+	"homepage": "https://github.com/odd-fish-society/cluau/tree/main/editors/vscode",
 	"bugs": {
-		"url": "https://github.com/Aosiee/cluau/issues"
+		"url": "https://github.com/odd-fish-society/cluau/issues"
 	},
 	"engines": {
 		"vscode": "^1.82.0"

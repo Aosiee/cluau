@@ -1,6 +1,6 @@
 # cluau for Visual Studio Code
 
-[cluau](https://github.com/Aosiee/cluau) is C-syntax-flavoured Luau: braces,
+[cluau](https://github.com/odd-fish-society/cluau) is C-syntax-flavoured Luau: braces,
 C operators, `let` / `const`, classes, `try` / `catch` and enums, translated
 to standard Luau with every line on its line. This extension gives `.cluau`
 files:
@@ -36,11 +36,11 @@ The `cluau` program, 0.17.0 or later, on `PATH`; the extension starts
 `cluau lsp` and `cluau debug`. To install it:
 
 ```sh
-curl -fsSL https://github.com/Aosiee/cluau/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/odd-fish-society/cluau/releases/latest/download/install.sh | sh
 ```
 
 ```powershell
-irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
+irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1 | iex
 ```
 
 ## Settings

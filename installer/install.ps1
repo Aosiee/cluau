@@ -2,8 +2,8 @@
 # release's SHA256SUMS, installs `cluau` for the current user and puts it on
 # the user's PATH. No administrator rights are needed.
 #
-#   irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
-#   & ([scriptblock]::Create((irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1))) -Uninstall
+#   irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1 | iex
+#   & ([scriptblock]::Create((irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1))) -Uninstall
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-Version vX.Y.Z] [-InstallDir <dir>] [-NoModifyPath] [-AssociateFiles] [-AddToPathExt] [-Uninstall]
 #
 # (Windows runs a downloaded script file only when the execution policy
@@ -18,7 +18,7 @@
 #
 # The environment can stand in for the options when the script is piped to
 # iex: CLUAU_VERSION, CLUAU_INSTALL_DIR. CLUAU_REPOSITORY is the repository
-# the releases come from (its web address: https://github.com/Aosiee/cluau
+# the releases come from (its web address: https://github.com/odd-fish-society/cluau
 # unless it names another, such as a Forgejo or Gitea server's), whose API
 # gives the latest release. CLUAU_DOWNLOAD_URL replaces a release's
 # download address (a URL or a local directory holding the release's
@@ -35,7 +35,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest is far slower drawing its progress bar
-$Repository = if ($env:CLUAU_REPOSITORY) { $env:CLUAU_REPOSITORY.TrimEnd('/') } else { 'https://github.com/Aosiee/cluau' }
+$Repository = if ($env:CLUAU_REPOSITORY) { $env:CLUAU_REPOSITORY.TrimEnd('/') } else { 'https://github.com/odd-fish-society/cluau' }
 # owner/name are the address's last two parts; the server is what comes
 # before them (a Forgejo or Gitea server may live under a path of its own).
 $NameAt = $Repository.LastIndexOf('/')

@@ -1,9 +1,9 @@
 # cluau
 
-[![Linux](https://github.com/Aosiee/cluau/actions/workflows/linux.yml/badge.svg?branch=main)](https://github.com/Aosiee/cluau/actions/workflows/linux.yml)
-[![macOS](https://github.com/Aosiee/cluau/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/Aosiee/cluau/actions/workflows/macos.yml)
-[![Windows](https://github.com/Aosiee/cluau/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Aosiee/cluau/actions/workflows/windows.yml)
-[![Release](https://img.shields.io/github/v/release/Aosiee/cluau)](https://github.com/Aosiee/cluau/releases/latest)
+[![Linux](https://github.com/odd-fish-society/cluau/actions/workflows/linux.yml/badge.svg?branch=main)](https://github.com/odd-fish-society/cluau/actions/workflows/linux.yml)
+[![macOS](https://github.com/odd-fish-society/cluau/actions/workflows/macos.yml/badge.svg?branch=main)](https://github.com/odd-fish-society/cluau/actions/workflows/macos.yml)
+[![Windows](https://github.com/odd-fish-society/cluau/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/odd-fish-society/cluau/actions/workflows/windows.yml)
+[![Release](https://img.shields.io/github/v/release/odd-fish-society/cluau)](https://github.com/odd-fish-society/cluau/releases/latest)
 
 **C-syntax-flavoured Luau.** cluau is a Luau dialect: braces, C operators,
 `let` / `const`, classes, `try` / `catch`, enums, `switch`, generators,
@@ -80,13 +80,13 @@ for (_, file in fs.walk(process.args[1] or ".")) {
 On Linux or macOS:
 
 ```sh
-curl -fsSL https://github.com/Aosiee/cluau/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/odd-fish-society/cluau/releases/latest/download/install.sh | sh
 ```
 
 On Windows (PowerShell):
 
 ```powershell
-irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex
+irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1 | iex
 ```
 
 Each installer downloads the latest release, checks it against the
@@ -109,7 +109,7 @@ directory. Neither needs administrator rights.
   bypassed for that run:
 
   ```powershell
-  & ([scriptblock]::Create((irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1))) -Uninstall
+  & ([scriptblock]::Create((irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1))) -Uninstall
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version vX.Y.Z
   ```
 
@@ -143,7 +143,7 @@ release's `SHA256SUMS` lists their checksums.
 ## Releases
 
 Each version is a tag (`vX.Y.Z`), and each tag is a
-[release](https://github.com/Aosiee/cluau/releases) with the `cluau` tool
+[release](https://github.com/odd-fish-society/cluau/releases) with the `cluau` tool
 (scripts, the REPL, check, translate, convert) built for Linux (x86-64 and arm64),
 macOS (arm64 and x86-64) and Windows (x86-64), its tests run on each, both installers
 tried against the release's own packages on each, and a `SHA256SUMS` file.
@@ -206,7 +206,7 @@ output, and `cluau check` on each) and the checker's tests
 against a local HTTP and HTTPS server (`tests/http/run.py`), and on Linux
 and macOS the prompt driven in a pseudo-terminal (`tests/repl_terminal.py`).
 
-`hamr run` runs the same checks as a [hamr](https://github.com/Aosiee/hamr)
+`hamr run` runs the same checks as a [hamr](https://github.com/odd-fish-society/hamr)
 suite (`hamr.cluau`): the tests, the script tests and the checker's tests in
 a release and a debug build, the guides' and the README's examples through
 the tool (and the scripts that show their output, run), and cluau in a
