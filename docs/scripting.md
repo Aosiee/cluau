@@ -275,7 +275,9 @@ It samples the stack about once a millisecond, at Luau's safepoints
 (calls and loops), each sample weighted by the time measured since the
 last; time inside a long C call (a sleep, a read, a download)
 goes to the line that made the call, and so does time in the standard
-modules written in cluau (a `task.wait`). A module's top level is
+modules written in cluau (a `task.wait`). The wait at the script's end
+for tasks still running counts in the total time but in no function. A
+module's top level is
 `(top level)`, as the script's is; a coroutine's or a task's function is
 `(anonymous)` with its line, unless it has a name. `--top n` shows `n`
 functions (20 by default). `--folded file` writes the samples as folded

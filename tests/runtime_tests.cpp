@@ -1127,6 +1127,26 @@ TEST("profile: a module's top level by its name; a wait in @std/task goes to the
 	CHECK(text.str().find("@std/task") == std::string::npos);            // the wait is the script's line's
 }
 
+TEST("profile: the script's end waiting for its tasks is in no function")
+{
+	const std::string file = Temp("ends.cluau", "const task = require(\"@std/task\")\n"
+												"task.spawn(function() {\n"
+												"\ttask.wait(0.2)\n"
+												"})\n");
+	const std::filesystem::path folded = TempDir() / "ends.folded";
+	{
+		cluau::runtime::Options options;
+		options.Profile = true;
+		options.ProfileFolded = folded.u8string();
+		cluau::runtime::Runtime runtime(options);
+		CHECK_EQ(runtime.RunFile(file), 0);
+	}
+	std::ifstream in(folded, std::ios::binary);
+	std::stringstream text;
+	text << in.rdbuf();
+	CHECK(text.str().find("@std/task") == std::string::npos);
+}
+
 TEST("lsp: quick fixes for a misspelt name, a missing standard module, and any")
 {
 	Project project;

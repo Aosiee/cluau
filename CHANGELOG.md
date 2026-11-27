@@ -9,6 +9,9 @@ Each release's notes. A release's tag message is its section here.
   extension was not published there, because it named a publisher the
   Marketplace does not have; its `.vsix` on the release page still
   installs by hand.
+- `cluau --profile` no longer shows @std/task's own functions when the
+  script's end waits for its tasks; that wait counts in the total time
+  but in no function, as the scripting guide now says.
 
 ## 0.33.0: workers, file watching, YAML, UUIDs and semantic versions
 

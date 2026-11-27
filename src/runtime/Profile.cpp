@@ -90,8 +90,13 @@ namespace cluau::runtime::detail {
 		}
 		// So do the standard modules written in cluau (@std/task's wait),
 		// as a C function does, under the script's code.
-		if (script)
-			raw.erase(std::remove_if(raw.begin(), raw.end(), [](const Raw& f) { return f.Std; }), raw.end());
+		// Without the script's code on the stack, they run for the runtime
+		// itself (the tasks the script's end waits for): that time is in
+		// the total but in no function.
+		const auto stdFrame = [](const Raw& f) { return f.Std; };
+		if (!script && std::any_of(raw.begin(), raw.end(), stdFrame))
+			return;
+		raw.erase(std::remove_if(raw.begin(), raw.end(), stdFrame), raw.end());
 		std::vector<Frame> frames; // innermost first
 		for (size_t i = 0; i < raw.size(); i++)
 		{
