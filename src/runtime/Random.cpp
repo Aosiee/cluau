@@ -415,6 +415,20 @@ namespace cluau::runtime::detail {
 			return 1;
 		}
 
+		// _entropy.bytes(count): `count` bytes from the operating system's
+		// random source.
+		int EntropyBytes(lua_State* L)
+		{
+			const double count = luaL_checknumber(L, 1);
+			if (!(count >= 0 && count <= 64.0 * 1024 * 1024) || count != std::floor(count))
+				luaL_argerror(L, 1, "a number of bytes from 0 to 64 MiB");
+			std::string bytes((size_t)count, '\0');
+			if (!bytes.empty() && !SystemRandom(bytes.data(), bytes.size()))
+				luaL_error(L, "the system gave no random bytes");
+			lua_pushlstring(L, bytes.data(), bytes.size());
+			return 1;
+		}
+
 		const luaL_Reg kRandom[] = {
 			{ "seed", RandomSeed },
 			{ "random", RandomRandom },
@@ -458,6 +472,13 @@ namespace cluau::runtime::detail {
 		lua_pop(L, 1);
 		lua_pushcfunction(L, RandomNew, "new");
 		lua_setfield(L, -2, "new");
+	}
+
+	void OpenEntropy(lua_State* L)
+	{
+		lua_newtable(L);
+		lua_pushcfunction(L, EntropyBytes, "bytes");
+		lua_setfield(L, -2, "bytes");
 	}
 
 } // namespace cluau::runtime::detail

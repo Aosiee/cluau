@@ -16,6 +16,7 @@ print(outside, string.gsub(tostring(outsideWhy), "greet", "?") == string.gsub(to
 
 print(require("@std/json").encode({ ran = true }))
 print(require("@std/toml").decode("ran = true").ran)
+print(require("@std/uuid").version(require("@std/uuid").v7()))
 
 // @std/log works without an environment to read CLUAU_LOG from.
 const log = require("@std/log")

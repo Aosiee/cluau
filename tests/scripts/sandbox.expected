@@ -6,6 +6,7 @@ hello, sandbox
 false	true
 {"ran":true}
 true
+7
 INFO  [sandbox] logged ran=true
 42
 exit: 0

@@ -1,0 +1,189 @@
+// @std/uuid: UUIDs (RFC 9562), made from the operating system's random
+// source, and read back.
+//
+//   const uuid = require("@std/uuid")
+//   const id = uuid.v4()                       // "0f8fad5b-d9cb-469f-a165-70867728950e"
+//   const key = uuid.v7()                      // sorts after every v7 made before it
+//   print(uuid.version(key), uuid.time(key))   // 7, and when it was made (seconds)
+//   print(uuid.parse("{0F8FAD5B-D9CB-469F-A165-70867728950E}"))  // its canonical form
+//
+// A UUID is a string: 32 lowercase hex digits in groups of 8, 4, 4, 4 and
+// 12, joined by hyphens.
+
+const clock = require("@std/time")
+const entropy = require("@std/_entropy")
+
+const kNil = "00000000-0000-0000-0000-000000000000"
+const kMax = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+// The hex digits spelled out, as %x follows the C library's locale.
+const kHex = "[0-9A-Fa-f]"
+const kShape = "^" .. string.rep(kHex, 8) .. "%-" .. string.rep(kHex, 4) .. "%-" .. string.rep(kHex, 4) .. "%-" .. string.rep(kHex, 4) .. "%-" .. string.rep(kHex, 12) .. "$"
+
+// Random bytes are taken from the system a few thousand at a time and
+// handed out four at a time.
+const kPoolSize = 4096
+let pool = buffer.create(0)
+let used = 0
+
+// 32 random bits, as a whole number from 0 to 2^32 - 1.
+function Word(): number {
+	if (used + 4 > buffer.len(pool)) {
+		pool = buffer.fromstring(entropy.bytes(kPoolSize))
+		used = 0
+	}
+	const word = buffer.readu32(pool, used)
+	used += 4
+	return word
+}
+
+// A random UUID (version 4): 122 random bits.
+function v4(): string {
+	const a = Word()
+	const b = Word()
+	const c = Word()
+	const d = Word()
+	return string.format(
+		"%08x-%04x-%04x-%04x-%04x%08x",
+		a,
+		b ~/ 0x10000,
+		0x4000 + b % 0x1000,
+		0x8000 + (c ~/ 0x10000) % 0x4000,
+		c % 0x10000,
+		d
+	)
+}
+
+// Version 7 keeps the last time it used (Unix milliseconds) and a 42-bit
+// counter (RFC 9562, section 6.2, method 1): the 12 bits after the version
+// and the 30 after the variant. The counter starts at a random number below
+// 2^41 in each new millisecond and goes up by 1 for each UUID made in the
+// same one (or while the clock reads earlier than the last time), so the
+// UUIDs one runtime makes sort in the order they were made. Should the
+// counter pass 2^42 - 1 the time moves on by a millisecond. The last 32
+// bits are random in every UUID.
+const kCounterEnd = 2 ^ 42
+let lastTime = -1
+let counter = 0
+
+function FreshCounter(): number {
+	return (Word() % 0x200) * 0x100000000 + Word()
+}
+
+// A UUID ordered by time (version 7): the Unix time in milliseconds, then
+// the counter and random bits.
+function v7(): string {
+	const now = math.floor(clock.now() * 1000)
+	if (now > lastTime) {
+		lastTime = now
+		counter = FreshCounter()
+	} else {
+		counter += 1
+		if (counter >= kCounterEnd) {
+			lastTime += 1
+			counter = FreshCounter()
+		}
+	}
+	return string.format(
+		"%08x-%04x-%04x-%04x-%04x%08x",
+		lastTime ~/ 0x10000,
+		lastTime % 0x10000,
+		0x7000 + counter ~/ 0x40000000,
+		0x8000 + (counter ~/ 0x10000) % 0x4000,
+		counter % 0x10000,
+		Word()
+	)
+}
+
+function Text(name: string, text: string) {
+	if (type(text) != "string") {
+		error(`uuid.{name}: expected a string, not a {type(text)}`, 3)
+	}
+}
+
+// The canonical form of `text` (lowercase, without braces or a prefix), or
+// nil when it is not a UUID.
+function Canonical(text: string): string? {
+	let inner = text
+	if (#text == 45 && string.lower(string.sub(text, 1, 9)) == "urn:uuid:") {
+		inner = string.sub(text, 10)
+	} else if (#text == 38 && string.sub(text, 1, 1) == "{" && string.sub(text, 38) == "}") {
+		inner = string.sub(text, 2, 37)
+	}
+	if (#inner != 36 || string.find(inner, kShape) == nil) {
+		return nil
+	}
+	return string.lower(inner)
+}
+
+// `text` as a UUID in its canonical form: in any case, in braces or after
+// `urn:uuid:` (nil when it is not a UUID).
+function parse(text: string): string? {
+	Text("parse", text)
+	return Canonical(text)
+}
+
+function isValid(text: string): boolean {
+	Text("isValid", text)
+	return Canonical(text) != nil
+}
+
+function VersionOf(id: string): number? {
+	if (id == kNil) {
+		return 0
+	}
+	if (id == kMax) {
+		return 15
+	}
+	// The variant is RFC 9562's when its first two bits are 10 (8 to b);
+	// in UUIDs of the other variants these bits are not a version.
+	const variant = string.sub(id, 20, 20)
+	if (variant != "8" && variant != "9" && variant != "a" && variant != "b") {
+		return nil
+	}
+	return tonumber(string.sub(id, 15, 15), 16)
+}
+
+// A UUID's version (1 to 8; 0 for the nil UUID and 15 for the max one), or
+// nil when it is not a UUID of RFC 9562's variant.
+function version(text: string): number? {
+	Text("version", text)
+	const id = Canonical(text)
+	return if (id == nil) nil else VersionOf(id)
+}
+
+// When a UUID of version 7 (or 1 or 6, which hold a time too) was made, in
+// seconds since 1970-01-01 UTC as @std/time has times; nil for another
+// version, or for text that is not a UUID.
+function time(text: string): number? {
+	Text("time", text)
+	const id = Canonical(text)
+	if (id == nil) {
+		return nil
+	}
+	const v = VersionOf(id)
+	const hex = string.gsub(id, "-", "")
+	if (v == 7) {
+		return (tonumber(string.sub(hex, 1, 12), 16) :: number) / 1000
+	}
+	if (v != 1 && v != 6) {
+		return nil
+	}
+	// 100-nanosecond intervals since 1582-10-15 in 60 bits: for version 6
+	// from the most significant, for version 1 in the order low, mid, high.
+	const first = tonumber(string.sub(hex, 1, 8), 16) :: number
+	const mid = tonumber(string.sub(hex, 9, 12), 16) :: number
+	const high = tonumber(string.sub(hex, 14, 16), 16) :: number
+	const ticks = if (v == 6) (first * 0x10000 + mid) * 0x1000 + high else (high * 0x10000 + mid) * 0x100000000 + first
+	return ticks / 1e7 - 12219292800
+}
+
+return {
+	v4 = v4,
+	v7 = v7,
+	NIL = kNil,
+	MAX = kMax,
+	parse = parse,
+	isValid = isValid,
+	version = version,
+	time = time,
+}

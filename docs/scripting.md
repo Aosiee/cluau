@@ -86,9 +86,10 @@ only computes.
   `@std/path` (text only: `absolute` and `relative` take absolute paths,
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
   `@std/random`, `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`,
-  `@std/args`, `@std/csv`, `@std/toml`, `@std/collections`, `@std/log`
-  (which has no `CLUAU_LOG` to read there) and `@std/test` work as usual,
-  as do Luau's own libraries, which have no file or process access.
+  `@std/args`, `@std/csv`, `@std/toml`, `@std/collections`, `@std/uuid`,
+  `@std/log` (which has no `CLUAU_LOG` to read there) and `@std/test` work
+  as usual, as do Luau's own libraries, which have no file or process
+  access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1587,6 +1588,51 @@ Web addresses (RFC 3986).
 | `parseQuery(text): {[string]: string}` | a query string's names and values, decoded; pairs are split at `&` only (a `;` is part of a value, as browsers have it) |
 | `encodeQuery(values): string` | a query string from a table, its names in order (as text) |
 
+### `@std/uuid`
+
+UUIDs (RFC 9562): identifiers made from the operating system's random
+source, which no one can guess and which in practice never come out the
+same twice, and read back. A UUID is text: 32 lowercase hex digits in
+groups of 8, 4, 4, 4 and 12, joined by hyphens
+(`0f8fad5b-d9cb-469f-a165-70867728950e`).
+
+| function | is |
+|---|---|
+| `v4(): string` | a random UUID (version 4): 122 random bits |
+| `v7(): string` | a UUID ordered by time (version 7): the Unix time in milliseconds, then a counter and random bits. Those a script makes sort in the order it made them, as text, even many in the same millisecond, so they suit database keys |
+| `parse(text): string?` | the UUID in its canonical form (lowercase): from any case, in braces (`{...}`) or after `urn:uuid:`; `nil` when the text is not a UUID |
+| `isValid(text): boolean` | whether `parse` reads it |
+| `version(text): number?` | its version, 1 to 8 (0 for `NIL`, 15 for `MAX`); `nil` when the text is not a UUID, or is one of another variant than RFC 9562's, whose bits there are not a version |
+| `time(text): number?` | when a version 7 UUID (or a version 1 or 6, which hold a time too) was made, in seconds since 1970-01-01 UTC, as `@std/time` has times; `nil` for other versions |
+| `NIL`, `MAX` | `00000000-0000-0000-0000-000000000000` and `ffffffff-ffff-ffff-ffff-ffffffffffff` (upper case, as Python and npm name them: `nil` is a Luau keyword, so `uuid.nil` could not be written) |
+
+```
+const uuid = require("@std/uuid")
+const time = require("@std/time")
+
+const id = uuid.v7()
+print(id, uuid.version(id), time.iso(uuid.time(id) :: number))
+const given = uuid.parse("{0F8FAD5B-D9CB-469F-A165-70867728950E}")
+if (given == nil) {
+	error("not a UUID")
+}
+```
+
+- `v7` follows RFC 9562's first method for order (section 6.2): a 42-bit
+  counter after the time starts at a random number below 2^41 in each new
+  millisecond and goes up by 1 for each UUID made in the same one, or
+  while the system clock reads earlier than the last time used; the last
+  32 bits are random in every UUID. The order holds within one runtime;
+  UUIDs from different processes made in the same millisecond have no
+  order among them.
+- `parse` takes the hyphenated form only: 32 hex digits without hyphens,
+  spaces around the text, or braces and `urn:uuid:` together are not a
+  UUID.
+- Every function but `v4` and `v7` takes text, and other values are an
+  error. The random bytes come from the system a few thousand at a time
+  (`getrandom` on Linux, `arc4random_buf` on macOS, `BCryptGenRandom` on
+  Windows), as `crypto.randomBytes` has them, in every build.
+
 ### `@std/random`
 
 Random numbers from a seed, for simulations, games, tests and sampling.
@@ -1660,7 +1706,7 @@ a `buffer`; a digest is lowercase hex, or its bytes (a string) with
 | `hmac(algorithm, key, data, options?): string` | the HMAC of `data` with `key` |
 | `hasher(algorithm): Hasher` | a hash fed in parts: `update(data)` (which returns the hasher, to chain), then `digest(options?)` once |
 | `randomBytes(count): string` | `count` random bytes from the operating system (for keys, tokens, salts) |
-| `uuid(): string` | a random (version 4) UUID: `"9f1c...-....-4...-....-............"` |
+| `uuid(): string` | a random (version 4) UUID: `"9f1c...-....-4...-....-............"` (as `uuid.v4()` makes, which [`@std/uuid`](#stduuid) has in every build, with time-ordered ones) |
 | `equal(a, b): boolean` | whether two secrets (strings or buffers) are equal, compared in a time that does not depend on where they differ |
 
 ```

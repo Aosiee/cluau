@@ -69,6 +69,11 @@ namespace cluau::runtime::detail {
 	// Pushes @std/random's table (seeded random numbers).
 	void OpenRandom(lua_State* L);
 
+	// Pushes @std/_entropy's table: `bytes(count)`, the operating system's
+	// random bytes, for the standard modules written in cluau (@std/uuid),
+	// in every build (@std/crypto has them only when it is built).
+	void OpenEntropy(lua_State* L);
+
 	// Fills `out` with `size` bytes from the operating system's random
 	// source (false when it gave none).
 	bool SystemRandom(void* out, size_t size);
