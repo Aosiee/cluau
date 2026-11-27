@@ -1,0 +1,29 @@
+watch.cluau:4:28: Expected this to be
+	'{ recursive: boolean? }?'
+but got
+	'{| recursive: string |}'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly
+	'{ recursive: boolean? }'
+but got
+	'{| recursive: string |}'
+caused by:
+  Property 'recursive' is not compatible.
+Expected this to be exactly 'boolean?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly 'boolean', but got 'string'
+watch.cluau:6:23: Value of type 'Event?' could be nil
+watch.cluau:8:2: Expected this to be 'number', but got '"created" | "modified" | "overflow" | "removed" | "renamed"'
+caused by:
+  Not all union options are compatible.
+Expected this to be 'number', but got '"created"'
+watch.cluau:9:2: Expected this to be 'string', but got 'string?'
+watch.cluau:12:8: Expected this to be 'number?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be 'number', but got 'string'
+watch.cluau:17:1: Expected this to be 'string', but got 'boolean'
+cluau check: 6 error(s), 0 warning(s)
+exit: 1

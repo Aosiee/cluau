@@ -1,0 +1,18 @@
+// @std/watch's watchers and events are typed.
+const watch = require("@std/watch")
+
+const w = watch.new("src", { recursive = "yes" })  // a boolean
+const event = w:next(1)
+const where: string = event.path                   // nil when the wait ends with nothing
+if (event) {
+	const kind: number = event.kind                // a kind is a string
+	const from: string = event.from                // only a rename has one
+	print(kind, from)
+}
+w:next("1")                                        // seconds
+for (change in w:events()) {
+	const p: string = change.path
+	print(p)
+}
+const done: string = w.closed                      // a boolean
+print(where, done)

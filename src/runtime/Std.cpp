@@ -3126,7 +3126,8 @@ namespace cluau::runtime::detail {
 
 	bool SandboxLeavesOut(const std::string& name)
 	{
-		return name == "fs" || name == "http" || name == "net" || name == "sqlite" || name == "zip" || name == "tar" || name == "_packages";
+		return name == "fs" || name == "http" || name == "net" || name == "sqlite" || name == "zip" || name == "tar" || name == "watch" ||
+			   name == "_packages";
 	}
 
 	void OpenStd(lua_State* L, const std::vector<std::string>& args, bool sandbox)
@@ -3206,6 +3207,8 @@ namespace cluau::runtime::detail {
 		{
 			OpenNet(L);
 			lua_setfield(L, -2, "net");
+			OpenWatch(L);
+			lua_setfield(L, -2, "watch");
 		}
 #ifdef CLUAU_HAS_SQLITE
 		if (!sandbox)
@@ -3269,7 +3272,7 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_REGEX
 										 + ", @std/regex"
 #endif
-										 + ", @std/net"
+										 + ", @std/net, @std/watch"
 #ifdef CLUAU_HAS_SQLITE
 										 + ", @std/sqlite"
 #endif

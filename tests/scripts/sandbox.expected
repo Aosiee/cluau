@@ -2,6 +2,7 @@ alpha	true
 true	true	true	true
 false	@std/fs is not available in the sandbox
 false	@std/http is not available in the sandbox
+false	@std/watch is not available in the sandbox
 hello, sandbox
 false	true
 {"ran":true}

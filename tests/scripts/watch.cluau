@@ -1,0 +1,352 @@
+// @std/watch: what changes under a watched path comes back as events, from
+// inotify, FSEvents or ReadDirectoryChangesW. The systems differ in how
+// many notifications tell of one change and in what order, so the test
+// prints only what each of them agrees on: whether a change was seen, the
+// path it names, whether a watcher has ended.
+const watch = require("@std/watch")
+const fs = require("@std/fs")
+const path = require("@std/path")
+const task = require("@std/task")
+const jobs = require("@std/_jobs")
+
+// A directory of the test's own (two runs at once do not share it).
+const root = fs.tempFile("cluau-watch")
+fs.remove(root)
+fs.mkdir(root)
+
+// The text with the scratch directory written as <root>.
+function Short(text: string): string {
+	const at = string.find(text, root, 1, true)
+	return if (at) string.sub(text, 1, at - 1) .. "<root>" .. string.sub(text, at + #root) else text
+}
+
+// Takes the watcher's events until `wanted` says yes to one (true) or none
+// comes for 10 seconds, or the watcher ends (false). Each event taken goes
+// into `seen` when it is given.
+function WaitFor(w: watch.Watcher, wanted: (event: watch.Event) -> boolean, seen: { watch.Event }?): boolean {
+	let event = w:next(10)
+	while (event != nil) {
+		if (seen) {
+			table.insert(seen, event)
+		}
+		if (wanted(event)) {
+			return true
+		}
+		event = w:next(10)
+	}
+	return false
+}
+
+function Is(file: string, ...: string): (event: watch.Event) -> boolean {
+	const kinds = { ... }
+	return function(event: watch.Event): boolean {
+		return event.path == file and (#kinds == 0 or table.find(kinds, event.kind) != nil)
+	}
+}
+
+// ---- errors ----
+const missing, missingWhy = pcall(watch.new, path.join(root, "missing"))
+print("missing:", missing, Short(tostring(missingWhy)))
+print("NUL:", pcall(watch.new, "a\0b"))
+
+// ---- a directory and everything under it ----
+const tree = path.join(root, "tree")
+fs.mkdir(tree)
+fs.write(path.join(tree, "old.txt"), "before")
+const w = watch.new(tree)
+print("watching:", Short(w.path), w.closed)
+
+const added = path.join(tree, "new.txt")
+fs.write(added, "new")
+print("created:", WaitFor(w, Is(added, "created")))
+
+// A change to a file is "modified"; FSEvents may still call a file made a
+// moment ago "created".
+const old = path.join(tree, "old.txt")
+fs.append(old, " and after")
+print("modified:", WaitFor(w, Is(old, "modified", "created")))
+
+// Directories made after the watch began are watched too.
+fs.mkdir(path.join(tree, "a/b/c"))
+const deep = path.join(tree, "a/b/c/deep.txt")
+fs.write(deep, "deep")
+const nested: { watch.Event } = {}
+print("nested:", WaitFor(w, Is(deep, "created"), nested), Short(deep))
+const dirs: { string } = {}
+for (_, event in nested) {
+	if (event.kind == "created" and event.path != deep and string.find(event.path, path.join(tree, "a"), 1, true) == 1) {
+		table.insert(dirs, Short(event.path))
+	}
+}
+table.sort(dirs)
+print("directories made:", table.concat(dirs, " "))
+
+// A rename is one "renamed" event, the old path in `from`; a system that
+// cannot pair the two names gives the old one as removed and the new one as
+// created.
+const moved = path.join(tree, "moved.txt")
+fs.rename(added, moved)
+let gotNew = false
+let gotOld = false
+WaitFor(w, function(event: watch.Event): boolean {
+	if (event.kind == "renamed" and event.path == moved and event.from == added) {
+		gotNew = true
+		gotOld = true
+	} else if (event.path == moved and event.kind == "created") {
+		gotNew = true
+	} else if (event.path == added and event.kind == "removed") {
+		gotOld = true
+	}
+	return gotNew and gotOld
+})
+print("renamed:", gotNew and gotOld)
+
+fs.remove(moved)
+print("removed:", WaitFor(w, Is(moved, "removed")))
+
+// A directory renamed within the tree: what changes in it is named by its
+// new path.
+fs.rename(path.join(tree, "a"), path.join(tree, "z"))
+const after = path.join(tree, "z/b/c/after.txt")
+fs.write(after, "after")
+print("in a renamed directory:", WaitFor(w, Is(after, "created", "modified")), Short(after))
+
+w:close()
+print("closed:", w.closed, w:next() == nil, w:next(0) == nil)
+
+// ---- a directory without what is under it ----
+const flat = path.join(root, "flat")
+fs.mkdir(path.join(flat, "inner"))
+const top = path.join(flat, "top.txt")
+const shallow = watch.new(flat, { recursive = false })
+fs.write(path.join(flat, "inner/hidden.txt"), "x")
+fs.write(top, "x")
+const flatSeen: { watch.Event } = {}
+print("top level:", WaitFor(shallow, Is(top), flatSeen))
+// A while longer, for a late report of the inner file.
+while (true) {
+	const event = shallow:next(0.3)
+	if (event == nil) {
+		break
+	}
+	table.insert(flatSeen, event)
+}
+let inner = false
+for (_, event in flatSeen) {
+	if (string.find(event.path, path.join(flat, "inner") .. "/", 1, true) == 1) {
+		inner = true
+	}
+}
+print("below the top level:", inner)
+shallow:close()
+
+// ---- one file ----
+const single = path.join(root, "single")
+fs.mkdir(single)
+const file = path.join(single, "watched.txt")
+fs.write(file, "1")
+const one = watch.new(file)
+print("file:", Short(one.path))
+fs.write(path.join(single, "other.txt"), "another file: not reported")
+fs.write(file, "2")
+const first = one:next(10)
+print("first event:", if (first) Short(first.path) else "none")
+
+// An editor's save: a new file renamed over the old one.
+const swap = path.join(single, "watched.txt.swp")
+fs.write(swap, "3")
+fs.rename(swap, file)
+print("saved by a rename:", WaitFor(one, Is(file, "renamed", "created")))
+
+// Removed and written again: the watcher goes on.
+fs.remove(file)
+print("file removed:", WaitFor(one, Is(file, "removed")))
+fs.write(file, "4")
+print("file back:", WaitFor(one, Is(file, "created", "modified")), one.closed)
+
+// Its directory removed: the watcher ends, the file's removal its last event.
+fs.remove(single, true)
+let lastOfFile: watch.Event? = nil
+while (true) {
+	const event = one:next(10)
+	if (event == nil) {
+		break
+	}
+	lastOfFile = event
+}
+print("directory of the file removed:", one.closed, if (lastOfFile) `{lastOfFile.kind} {Short(lastOfFile.path)}` else "none")
+
+// ---- a watched directory removed ----
+const gone = path.join(root, "gone")
+fs.mkdir(path.join(gone, "sub"))
+fs.write(path.join(gone, "sub/f.txt"), "x")
+const ending = watch.new(gone)
+fs.remove(gone, true)
+let lastOfDir: watch.Event? = nil
+while (true) {
+	const event = ending:next(10)
+	if (event == nil) {
+		break
+	}
+	lastOfDir = event
+}
+print("directory removed:", ending.closed, if (lastOfDir) `{lastOfDir.kind} {Short(lastOfDir.path)}` else "none")
+print("after the end:", ending:next() == nil)
+ending:close()
+
+// ---- tasks ----
+// Each wait below is on a directory of its own, made empty: no event of
+// another part can reach it.
+let fresh = 0
+function Fresh(): string {
+	fresh += 1
+	const dir = path.join(root, `tasks{fresh}`)
+	fs.mkdir(dir)
+	return dir
+}
+
+// A task waits on its own; the script's code goes on meanwhile.
+let dir = Fresh()
+const tw = watch.new(dir)
+const waiter = task.spawn(function(): string {
+	const event = tw:next(10)
+	return if (event) Short(event.path) else "nothing"
+})
+fs.write(path.join(dir, "t.txt"), "x")
+print("a task saw:", task.join(waiter))
+
+// The script's own wait runs the tasks: the file is written by one.
+const later = path.join(dir, "later.txt")
+task.delay(0.2, function() {
+	fs.write(later, "x")
+})
+print("the script saw what a task did:", WaitFor(tw, Is(later)))
+tw:close()
+
+// Closed while a task waits: the wait ends with nil.
+dir = Fresh()
+const cw = watch.new(dir)
+const blocked = task.spawn(function(): boolean {
+	return cw:next() == nil
+})
+task.wait(0.1)
+cw:close()
+print("closed while a task waits:", task.join(blocked))
+
+// events() in a task, ended by a close from the script.
+dir = Fresh()
+const ew = watch.new(dir)
+const target = path.join(dir, "one.txt")
+let saw = false
+const loop = task.spawn(function(): number {
+	let count = 0
+	for (event in ew:events()) {
+		count += 1
+		if (event.path == target) {
+			saw = true
+		}
+	}
+	return count
+})
+fs.write(target, "1")
+const started = os.clock()
+while (!saw and os.clock() - started < 10) {
+	task.wait(0.02)
+}
+ew:close()
+print("events() until closed:", saw, task.join(loop) >= 1)
+
+// A task cancelled while it waits takes nothing: the change goes to the
+// next wait, whether the cancel came before the change or after its wait
+// got it.
+dir = Fresh()
+const kw = watch.new(dir)
+let cancelled = task.spawn(function() {
+	kw:next()
+})
+task.wait(0.05)
+task.cancel(cancelled)
+const kept = path.join(dir, "kept.txt")
+fs.write(kept, "x")
+print("cancelled before the change:", WaitFor(kw, Is(kept)))
+
+dir = Fresh()
+const gw = watch.new(dir)
+const since = jobs.completed()
+cancelled = task.spawn(function() {
+	gw:next()
+})
+const back = path.join(dir, "back.txt")
+fs.write(back, "x")
+// Until the wait's job has its event, without letting the task take it.
+const start = os.clock()
+while (jobs.completed() == since and os.clock() - start < 10) {
+}
+task.cancel(cancelled)
+const returned = gw:next(0)
+print("cancelled after its wait got the change:", if (returned) Short(returned.path) == Short(back) else false)
+kw:close()
+gw:close()
+
+// ---- many changes, many watchers ----
+// Thousands of files made and removed at once in a directory made after
+// the watch began: each is seen made and removed, or the watcher says it
+// had to let changes go ("overflow").
+const many = path.join(root, "many")
+fs.mkdir(many)
+const mw = watch.new(many)
+const busy = path.join(many, "x/y")
+fs.mkdir(busy)
+print("busy directory watched:", WaitFor(mw, Is(busy, "created")))
+const count = 2000
+for (i = 1, count) {
+	fs.write(path.join(busy, `f{i}.txt`), "x")
+}
+for (i = 1, count) {
+	fs.remove(path.join(busy, `f{i}.txt`))
+}
+const done = path.join(many, "done.txt")
+fs.write(done, "x")
+const made: { [string]: boolean } = {}
+const unmade: { [string]: boolean } = {}
+let overflow = false
+WaitFor(mw, function(event: watch.Event): boolean {
+	if (event.kind == "overflow") {
+		overflow = true
+	} else if (event.kind == "created") {
+		made[event.path] = true
+	} else if (event.kind == "removed") {
+		unmade[event.path] = true
+	}
+	return event.path == done
+})
+let all = true
+for (i = 1, count) {
+	const name = path.join(busy, `f{i}.txt`)
+	if (!made[name] or !unmade[name]) {
+		all = false
+	}
+}
+print(`{count} files made and removed:`, all or overflow)
+mw:close()
+
+const crowd = path.join(root, "crowd")
+const watchers: { watch.Watcher } = {}
+for (i = 1, 16) {
+	const d = path.join(crowd, `d{i}`)
+	fs.mkdir(d)
+	table.insert(watchers, watch.new(d))
+}
+for (i = 1, 16) {
+	fs.write(path.join(crowd, `d{i}`, "f.txt"), "x")
+}
+let right = 0
+for (i, each in watchers) {
+	if (WaitFor(each, Is(path.join(crowd, `d{i}`, "f.txt")))) {
+		right += 1
+	}
+	each:close()
+}
+print("watchers at once, each with its own change:", right)
+
+fs.remove(root, true)

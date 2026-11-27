@@ -200,6 +200,21 @@ return m :: {
 	listen: (host: string, port: number, options: { backlog: number?, tls: { certFile: string, keyFile: string }? }?) -> Server,
 }
 )LUAU" },
+				{ "watch", R"LUAU(
+export type Kind = "created" | "modified" | "removed" | "renamed" | "overflow"
+export type Event = { path: string, kind: Kind, from: string? }
+export type Watcher = {
+	path: string,
+	closed: boolean,
+	next: (self: Watcher, seconds: number?) -> Event?,
+	events: (self: Watcher) -> () -> Event?,
+	close: (self: Watcher) -> (),
+}
+local m: any = nil
+return m :: {
+	new: (path: string, options: { recursive: boolean? }?) -> Watcher,
+}
+)LUAU" },
 				{ "sqlite", R"LUAU(
 export type Value = nil | boolean | number | string | buffer
 export type Changes = { changes: number, lastId: number }
