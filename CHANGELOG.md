@@ -2,6 +2,48 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.33.0: workers, file watching, YAML, UUIDs and semantic versions
+
+Five new standard modules:
+- @std/worker: scripts that run in parallel, each in a Luau VM of its own
+  on a thread of its own, so CPU-bound work uses more than one core.
+  `worker.start(path, ...)` starts a script; the parent and the worker
+  send each other copied values (nil, booleans, numbers, strings, buffers
+  and plain tables of them; anything else is refused with where it is in
+  the value), and `join` gives back what the worker's script returned, or
+  raises its error with the worker's stack. `receive` and `join` wait on
+  their own in @std/task tasks. The script's end waits for the workers
+  still running. Not in the sandbox.
+- @std/watch: file system changes from inotify (Linux), FSEvents (macOS)
+  and ReadDirectoryChangesW (Windows): `watch.new(path)` for a directory
+  (recursively) or a file, then `next` or `for (event in w:events())`,
+  each change created, modified, removed or renamed (with its old path),
+  and an overflow when the system lost track. A file watched through an
+  editor's save by rename is still followed. `next` waits on its own in
+  tasks. Not in the sandbox.
+- @std/yaml: YAML 1.2 read into tables and written back: every block and
+  flow form and scalar style, anchors and aliases (limited, so an alias
+  bomb is refused), tags of the core schema, several documents
+  (`decodeAll`), null as `yaml.null` (`json.null`), and errors with their
+  line and column. `yaml.encode` writes block style with sorted keys,
+  quoting what a 1.1 reader would take for something else. Compared with
+  PyYAML on 500,000 generated documents with no difference outside the
+  points where YAML 1.1 and 1.2 disagree.
+- @std/uuid: random (v4) and time-ordered (v7, increasing within a
+  runtime) UUIDs from the system's random source in every build, and
+  `parse`, `isValid`, `version` and `time`.
+- @std/semver: Semantic Versioning 2.0.0 versions, precedence, sorting
+  and increments, and npm's ranges (`^`, `~`, x-ranges, hyphen ranges,
+  `||`) with `satisfies`, `maxSatisfying` and `minSatisfying`.
+
+Fixes:
+- The standard modules written in cluau no longer put their helper
+  functions in the global table, where a script saw them and a function
+  of its own by the same name broke the module.
+- Luau's `lua_debugtrace` writes into one buffer for the whole process;
+  workers' tracebacks take turns with it. `print` and `io.write` write
+  each call at once, so lines from different workers do not mix.
+
 ## 0.32.0: patterns, spreads, rest parameters and async functions
 
 Language:

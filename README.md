@@ -37,7 +37,8 @@ files and a standard library for files, paths, processes, JSON, times,
 HTTP (a client and a server), WebSockets, TCP and TLS sockets, SQLite
 databases, hashing, compression, zip and tar archives, URLs, terminal
 colours, regular expressions, tasks that run side by side, command-line
-arguments, CSV and TOML, collections, random numbers and logging, and `cluau check script.cluau` type-checks it (and the
+arguments, CSV, TOML and YAML, collections, random numbers, logging,
+UUIDs, semantic versions, file watching and workers that run in parallel, and `cluau check script.cluau` type-checks it (and the
 modules it requires) without running it, `cluau test` runs its test files
 (with `--coverage`, the lines they missed), `cluau profile` shows where
 its time goes, `cluau fmt` formats it, and `cluau add` brings in packages
@@ -132,8 +133,8 @@ Each release also has Debian and RPM packages for Linux, which install
 `/usr/bin/cluau` for every user:
 
 ```sh
-sudo apt install ./cluau_0.32.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
-sudo dnf install --nogpgcheck ./cluau-0.32.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
+sudo apt install ./cluau_0.33.0_amd64.deb                   # Debian, Ubuntu (arm64: _arm64.deb)
+sudo dnf install --nogpgcheck ./cluau-0.33.0-1.x86_64.rpm   # Fedora, RHEL (arm64: .aarch64.rpm)
 ```
 
 The packages are not signed yet (`--nogpgcheck` lets dnf install one); the
