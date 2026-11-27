@@ -1733,7 +1733,7 @@ namespace cluau {
 					Error(m_Toks[eq], "destructuring takes one value after =");
 					return;
 				}
-				for (size_t k = Sig(eq + 1), depth = 0; k <= last; k = Sig(k + 1))
+				for (size_t k = Sig(eq + 1), depth = 0; k <= last && m_Toks[k].Kind != TokenKind::Eof; k = Sig(k + 1))
 				{
 					if (OpensGroup(m_Toks[k]))
 						depth++;

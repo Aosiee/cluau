@@ -1007,6 +1007,8 @@ TEST("destructuring patterns: renames, nesting, defaults and a list's rest")
 	CHECK(HasError(cluau::Translate("const { pos: { x } = p } = t"), "a nested pattern has no default"));
 	CHECK(HasError(cluau::Translate("const { a = } = t"), "a default needs a value"));
 	CHECK(HasError(cluau::Translate("const { pos: {} } = t"), "a { } pattern takes fields"));
+	// A value that runs to the end of the source (an unclosed type) ends there.
+	CHECK(cluau::Translate("const{a=()}={\"\"}::{").HasErrors());
 	const cluau::TranslateResult r = cluau::Translate("const { a: b, c: [d] } = t\n");
 	CHECK_EQ(r.ConstNames.size(), (size_t)2);
 }
