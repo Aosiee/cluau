@@ -1058,6 +1058,29 @@ TEST("async and await: a task per call, joined by await (scripts)")
 	CHECK(HasError(cluau::Translate("async function* f() { }", script), "a generator is not async"));
 }
 
+TEST("nested ??, ?. and spreads: each level adds to the translation, not doubles it")
+{
+	cluau::TranslateOptions script;
+	script.Script = true;
+	std::string coalesce = "local x = f()", chain = "local x = f()", spread = "local x = ", close;
+	for (int level = 0; level < 40; level++)
+	{
+		coalesce += " ?? (g()";
+		close += ")";
+		chain += "?.a";
+		spread += "{ ...";
+	}
+	spread += "a";
+	for (int level = 0; level < 40; level++)
+		spread += " }";
+	for (const std::string& source : { coalesce + close, chain, spread })
+	{
+		const cluau::TranslateResult r = cluau::Translate(source, script);
+		CHECK(!r.HasErrors());
+		CHECK(r.Luau.size() < 100000); // doubling would be terabytes
+	}
+}
+
 TEST("?? and ?. in a parameter's default")
 {
 	CHECK_EQ(Luau("function f(a = b ?? 1) { }"), std::string("function f(a    )  local a = if a == nil then (if b  ~= nil then b else  1) else a; end"));

@@ -34,6 +34,10 @@ Standard library:
 Fixes:
 - A parameter default containing `??` or `?.` translated into broken
   Luau.
+- Nested `??` and `?.` (`a ?? f() ?? g() ...`, `f()?.a?.b ...`) made a
+  translation that doubled in size with each level, so a few dozen levels
+  took seconds and then ran out of memory; it now grows by a little per
+  level.
 
 Tooling: highlighting, completion and the converter know `async` and
 `await` (the converter reports a Luau name `await` used as a call, which a

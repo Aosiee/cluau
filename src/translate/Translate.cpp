@@ -54,6 +54,18 @@ namespace cluau {
 			"if type(k) ~= \"number\" or k < 1 or k > len or k % 1 ~= 0 then out[k] = v end end end return out end; ",
 		};
 
+		// The expressions translated on their own during one translation (a
+		// default's value, the parts a typeof names), by their text and mode:
+		// nested ones (`a ?? b ?? c`, `{ ...{ ...t } }`) are translated again
+		// inside each enclosing one, which without this doubles the work at
+		// each level. Kept from the outermost Translate call to its end.
+		struct ValueCache
+		{
+			int Depth = 0;
+			std::map<std::string, std::pair<std::string, uint8_t>> Entries; // text -> (its translation, the helpers it uses)
+		};
+		thread_local ValueCache t_Values;
+
 		// Interp: an interpolated string's segment (its tokens are an expression).
 		enum class Frame : uint8_t { Paren, Bracket, Table, Block, Class, Interp };
 		enum class BlockKind : uint8_t { Plain, If, Else, Loop, Function, Repeat, Method, Try, Catch, Finally, Switch };
@@ -138,8 +150,10 @@ namespace cluau {
 		class Translator
 		{
 		public:
-			Translator(std::string_view source, const TranslateOptions& options)
-				: m_Src(source), m_Options(options)
+			// `typeOnly`: the text is read only for its type, inside a
+			// typeof (see TypeValue).
+			Translator(std::string_view source, const TranslateOptions& options, bool typeOnly = false)
+				: m_Src(source), m_Options(options), m_TypeOnly(typeOnly)
 			{
 				m_Profile = options.Profile ? options.Profile : &m_DefaultProfile;
 				if (m_Options.Repl)
@@ -1769,7 +1783,7 @@ namespace cluau {
 					for (size_t n = 0; n < leaves.size(); n++)
 						body += (n ? ", " : "") + std::string(m_Toks[leaves[n].Name].Text);
 				}
-				Generate(eq, "= (function(__cluau_t: typeof(" + TranslateValue(first, last + 1, true) + "))" + body + " end)(");
+				Generate(eq, "= (function(__cluau_t: typeof(" + TypeValue(first, last + 1) + "))" + body + " end)(");
 				AddAfter(last, ")");
 			}
 
@@ -2363,14 +2377,37 @@ namespace cluau {
 				return TranslateText(oneLine ? CodeText(begin, end) : SourceText(begin, end));
 			}
 
+			// Tokens [begin, end) translated for a typeof, which only reads the
+			// type: the parts that are evaluated once or only when needed are
+			// written so that each appears once (`a ?? b` as `if false then
+			// assert(a) else b`), not again inside a typeof of their own, which
+			// would double the text at each level of nesting.
+			std::string TypeValue(size_t begin, size_t end) const { return TranslateText(CodeText(begin, end), true); }
+
 			// cluau text translated as an expression.
-			std::string TranslateText(const std::string& text) const
+			std::string TranslateText(const std::string& text, bool typeOnly = false) const
+			{
+				const std::string key = std::string(m_Options.Script ? "s" : "-") + (m_Options.Manifest ? "m" : "-") + (typeOnly ? "t" : "-") + text;
+				if (auto known = t_Values.Entries.find(key); known != t_Values.Entries.end())
+				{
+					m_Helpers |= known->second.second;
+					return known->second.first;
+				}
+				const uint8_t helpers = m_Helpers;
+				m_Helpers = 0;
+				std::string value = TranslateTextOnce(text, typeOnly);
+				t_Values.Entries[key] = { value, m_Helpers };
+				m_Helpers |= helpers;
+				return value;
+			}
+
+			std::string TranslateTextOnce(const std::string& text, bool typeOnly) const
 			{
 				TranslateOptions options;
 				options.Script = m_Options.Script;
 				options.Manifest = m_Options.Manifest;
 				const std::string prefix = "return ";
-				const TranslateResult r = Translate(prefix + text, options);
+				const TranslateResult r = Translator(prefix + text, options, typeOnly).Run();
 				std::string_view luau = r.Luau;
 				if (luau.substr(0, kRaiseHead.size()) == kRaiseHead)
 					luau.remove_prefix(kRaiseHead.size());
@@ -3143,7 +3180,7 @@ namespace cluau {
 					const bool spread = std::find(spreads.begin(), spreads.end(), k) != spreads.end();
 					if (spread)
 					{
-						type += (type.empty() ? "" : " & ") + std::string("typeof(") + TranslateValue(Sig(k + 1), end, true) + ")";
+						type += (type.empty() ? "" : " & ") + std::string("typeof(") + TypeValue(Sig(k + 1), end) + ")";
 						Generate(k, "}, ");
 						m_Skip[k] = 1;
 						run = false;
@@ -3158,7 +3195,19 @@ namespace cluau {
 					k = end < close ? Sig(end + 1) : close;
 				}
 				if (!literal.empty())
-					type += " & typeof(" + TranslateText("{ " + literal + " }") + ")";
+					type += " & typeof(" + TranslateText("{ " + literal + " }", true) + ")";
+				if (m_TypeOnly)
+				{
+					// Only its type is read: the parts are in the type alone.
+					for (size_t k = open + 1; k <= close; k++)
+					{
+						Blank(k);
+						m_Before[k].clear();
+						m_After[k].clear();
+					}
+					Generate(open, "((nil :: any) :: " + type + ")");
+					return;
+				}
 				m_Helpers |= kHelperSpread;
 				AddBefore(open, "(__cluau_spread(");
 				Generate(close, std::string(run ? "}" : "") + ") :: " + type + ")");
@@ -3168,6 +3217,8 @@ namespace cluau {
 			// name, or names joined by dots).
 			void NilAssign(size_t i)
 			{
+				if (m_Skip[i])
+					return;
 				size_t start = i;
 				for (size_t k = PrevSig(i); k < i && (m_Toks[k].Kind == TokenKind::Name || m_Toks[k].Is(".")); k = PrevSig(k))
 				{
@@ -3719,11 +3770,19 @@ namespace cluau {
 						Error(m_Toks[q], "this optional chain cannot use ... (its steps are read in a function of their own)");
 						continue;
 					}
+					if (m_TypeOnly)
+					{
+						// For a typeof: the steps read from the value without nil.
+						AddBefore(Sig(start), "((nil :: any) :: typeof(assert(");
+						Generate(q, ")");
+						AddAfter(last, ")?)");
+						continue;
+					}
 					// The function's parameter has the value's type without nil
 					// (assert's), so what the chain reads from it is checked.
 					m_Helpers |= kHelperChain;
 					AddBefore(Sig(start), "__cluau_chain(");
-					Generate(q, ", function(__cluau_v: typeof(assert(" + TranslateValue(start, q, true) + "))) return __cluau_v");
+					Generate(q, ", function(__cluau_v: typeof(assert(" + TypeValue(start, q) + "))) return __cluau_v");
 					AddAfter(last, " end)");
 				}
 			}
@@ -3841,12 +3900,20 @@ namespace cluau {
 						AddAfter(last, ")");
 						continue;
 					}
+					if (m_TypeOnly)
+					{
+						// For a typeof: either side's type, each written once.
+						AddBefore(Sig(start), "(if false then assert(");
+						Generate(op, ") else ");
+						AddAfter(last, ")");
+						continue;
+					}
 					// A literal or a name is read at once, costing nothing; anything
 					// else is evaluated only when needed, in a function. The result
 					// is typed as the left side without nil or the right side
 					// (typeof does not evaluate them again).
 					const size_t right = Sig(op + 1);
-					const std::string type = ") :: typeof(assert(" + TranslateValue(start, op, true) + ")) | typeof(" + TranslateValue(right, last + 1, true) + "))";
+					const std::string type = ") :: typeof(assert(" + TypeValue(start, op) + ")) | typeof(" + TypeValue(right, last + 1) + "))";
 					const Token& r = m_Toks[right];
 					const bool literal = right == last && (r.Kind == TokenKind::Number || r.Kind == TokenKind::String ||
 															  r.Kind == TokenKind::LongString || r.Is("true") || r.Is("false") || r.Is("nil"));
@@ -4061,6 +4128,7 @@ namespace cluau {
 			size_t m_MethodHeaderEnd = npos;
 			mutable bool m_RaiseUsed = false; // host mode: the chunk takes Luau's `error` as __cluau_error
 			mutable uint8_t m_Helpers = 0;    // the Helper functions the chunk calls
+			bool m_TypeOnly = false;          // the chunk is an expression a typeof reads (never run)
 			std::string m_Tail;
 			TranslateResult m_R;
 		};
@@ -4129,6 +4197,15 @@ namespace cluau {
 
 	TranslateResult Translate(std::string_view source, const TranslateOptions& options)
 	{
+		struct Scope
+		{
+			Scope() { t_Values.Depth++; }
+			~Scope()
+			{
+				if (--t_Values.Depth == 0)
+					t_Values.Entries.clear();
+			}
+		} scope;
 		return Translator(source, options).Run();
 	}
 
