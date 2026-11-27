@@ -1,0 +1,8 @@
+12480	192
+8388608	true	200000	100000	20000	record 20000
+flood:	20000	20000
+terminated:	0	true
+its messages can be read after	true
+joins:	true
+one after another:	1353400
+exit: 0

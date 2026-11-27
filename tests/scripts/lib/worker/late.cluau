@@ -1,0 +1,7 @@
+// A worker that waits for a message its parent never sends: receive gives
+// nil once the parent's script has ended.
+const worker = require("@std/worker")
+
+const message = worker.receive()
+print("the worker got", message, "once its parent's script had ended")
+return "not seen: nothing joins it"

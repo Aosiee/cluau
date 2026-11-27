@@ -26,6 +26,10 @@ namespace cluau::runtime::detail {
 
 		struct Job
 		{
+			// The runtime whose script waits on it (its state's main
+			// thread): the jobs are the process's, and pending() counts a
+			// runtime's own (a worker's tasks do not wait on its parent's).
+			lua_State* Owner = nullptr;
 			bool Done = false;
 			JobResult Result;
 			JobUnclaimed Unclaimed; // when nothing takes the results
@@ -58,10 +62,11 @@ namespace cluau::runtime::detail {
 			};
 		}
 
-		int Start(JobWork work, JobUnclaimed unclaimed)
+		int Start(lua_State* L, JobWork work, JobUnclaimed unclaimed)
 		{
 			Jobs& jobs = State();
 			auto job = std::make_shared<Job>();
+			job->Owner = lua_mainthread(L);
 			job->Unclaimed = std::move(unclaimed);
 			int id = 0;
 			{
@@ -172,10 +177,11 @@ namespace cluau::runtime::detail {
 		int JobsPending(lua_State* L)
 		{
 			Jobs& jobs = State();
+			lua_State* owner = lua_mainthread(L);
 			std::lock_guard<std::mutex> lock(jobs.Mutex);
 			int pending = 0;
 			for (const auto& [id, job] : jobs.All)
-				pending += job->Done ? 0 : 1;
+				pending += job->Done || job->Owner != owner ? 0 : 1;
 			lua_pushinteger(L, pending);
 			return 1;
 		}
@@ -253,7 +259,7 @@ namespace cluau::runtime::detail {
 			// Under the debugger the call runs on a job's thread while this
 			// one reads the editor's requests (a pause, breakpoints, the end).
 			lua_pop(L, 1);
-			const int id = Start(std::move(work), std::move(unclaimed));
+			const int id = Start(L, std::move(work), std::move(unclaimed));
 			Jobs& jobs = State();
 			for (;;)
 			{
@@ -282,7 +288,7 @@ namespace cluau::runtime::detail {
 			SampleBlocking(L); // the profiler's sample, with the calling line
 			return finish(L);
 		}
-		const int id = Start(std::move(work), std::move(unclaimed));
+		const int id = Start(L, std::move(work), std::move(unclaimed));
 		if (IsTask(L))
 		{
 			lua_pop(L, 1);

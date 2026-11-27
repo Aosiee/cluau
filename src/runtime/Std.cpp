@@ -10,6 +10,7 @@
 #include "Tls.h"
 #endif
 #include "Spawn.h"
+#include "Worker.h"
 
 #include "lua.h"
 #include "lualib.h"
@@ -1178,6 +1179,12 @@ namespace cluau::runtime::detail {
 			}
 			if ((std::fflush(stderr) != 0 || std::ferror(stderr)) && code == 0)
 				code = 1;
+			// A worker's script ends there, not the process; the main
+			// script's exit waits for the workers (its own, and any other
+			// runtime's) to stop.
+			WorkerExit(L, code);
+			StopWorkers(L);
+			StopAllWorkers();
 			if (g_ExitHook)
 				g_ExitHook(code);
 			std::exit(code);
@@ -1788,17 +1795,27 @@ namespace cluau::runtime::detail {
 			std::abort(); // not reached
 		}
 
+		// The values' text in one write, so that what workers write at the
+		// same time does not mix within a call.
 		int WriteTo(lua_State* L, const char* fn, FILE* to)
 		{
 			const int n = lua_gettop(L);
+			std::string text;
 			for (int i = 1; i <= n; i++)
 			{
 				size_t len = 0;
 				const char* s = luaL_tolstring(L, i, &len);
-				if (std::fwrite(s, 1, len, to) != len)
-					StreamFailed(L, fn, to, errno);
+				if (n == 1)
+				{
+					if (std::fwrite(s, 1, len, to) != len)
+						StreamFailed(L, fn, to, errno);
+					return 0;
+				}
+				text.append(s, len);
 				lua_pop(L, 1);
 			}
+			if (std::fwrite(text.data(), 1, text.size(), to) != text.size())
+				StreamFailed(L, fn, to, errno);
 			return 0;
 		}
 
@@ -2019,6 +2036,27 @@ namespace cluau::runtime::detail {
 			{ "write", IoWrite }, { "writeError", IoWriteError }, { "readLine", IoReadLine }, { "readAll", IoReadAll },
 			{ "flush", IoFlush }, { nullptr, nullptr },
 		};
+
+		// print, as Luau's (each value's text, tab-separated), but the line
+		// goes out in one write: lines that workers print at the same time
+		// do not mix.
+		int Print(lua_State* L)
+		{
+			std::string line;
+			const int n = lua_gettop(L);
+			for (int i = 1; i <= n; i++)
+			{
+				size_t len = 0;
+				const char* s = luaL_tolstring(L, i, &len);
+				if (i > 1)
+					line += '\t';
+				line.append(s, len);
+				lua_pop(L, 1);
+			}
+			line += '\n';
+			std::fwrite(line.data(), 1, line.size(), stdout);
+			return 0;
+		}
 
 		// input(prompt?): a line from standard input (nil at its end).
 		int Input(lua_State* L)
@@ -3126,7 +3164,7 @@ namespace cluau::runtime::detail {
 
 	bool SandboxLeavesOut(const std::string& name)
 	{
-		return name == "fs" || name == "http" || name == "net" || name == "sqlite" || name == "zip" || name == "tar" || name == "watch" ||
+		return name == "fs" || name == "http" || name == "net" || name == "sqlite" || name == "zip" || name == "tar" || name == "watch" || name == "worker" ||
 			   name == "_packages";
 	}
 
@@ -3237,6 +3275,12 @@ namespace cluau::runtime::detail {
 		}
 #endif
 
+		if (!sandbox)
+		{
+			OpenWorker(L);
+			lua_setfield(L, -2, "worker");
+		}
+
 		OpenJobs(L);
 		lua_setfield(L, -2, "_jobs");
 		OpenEntropy(L);
@@ -3246,6 +3290,8 @@ namespace cluau::runtime::detail {
 
 		lua_pushcclosurek(L, Input, "input", 0, AwaitContinue);
 		lua_setglobal(L, "input");
+		lua_pushcfunction(L, Print, "print");
+		lua_setglobal(L, "print");
 	}
 
 	void SetScript(lua_State* L, const std::string& script)
@@ -3276,11 +3322,24 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_SQLITE
 										 + ", @std/sqlite"
 #endif
-										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv, @std/toml, @std/collections, @std/log, @std/uuid, @std/semver, @std/test";
+										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/worker, @std/args, @std/csv, @std/toml, @std/collections, @std/log, @std/uuid, @std/semver, @std/test";
 		return names.c_str();
 	}
 
 	void SetExitHook(void (*hook)(int code)) { g_ExitHook = hook; }
+
+	bool JsonNullAt(lua_State* L, int index) { return IsJsonNull(L, index); }
+
+	void PushJsonNull(lua_State* L) { lua_pushlightuserdata(L, &g_JsonNull); }
+
+	char JsonMarkAt(lua_State* L, int index) { return JsonMark(L, index); }
+
+	void SetJsonMark(lua_State* L, int index, char mark)
+	{
+		index = lua_absindex(L, index);
+		luaL_getmetatable(L, mark == 'o' ? kJsonObject : kJsonArray);
+		lua_setmetatable(L, index);
+	}
 
 	bool ReadStandardInputLine(std::string& line)
 	{

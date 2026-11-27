@@ -1,0 +1,8 @@
+// What a worker cannot send back: a function in its results, or in a
+// message (worker.args[1] says which).
+const worker = require("@std/worker")
+
+if (worker.args[1] == "send") {
+	worker.send({ ok = true, run = print })
+}
+return 1, { handlers = { print } }

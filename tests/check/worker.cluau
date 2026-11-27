@@ -1,0 +1,13 @@
+// @std/worker's values are unknown until a cast says what they are.
+const worker = require("@std/worker")
+
+const w = worker.start("lib/none", 1, "two", { 3 })
+const reply: string = w:receive()                 // unknown: cast it
+const count: number = worker.receive(1) :: number // a cast: no error
+const first: number = w:join()                    // unknown as well
+w:receive("soon")                                 // seconds
+const done: string = w.done                       // a boolean
+worker.start(42)                                  // a path
+const arg: string = worker.args[1]                // unknown
+w:terminate(true)                                 // no arguments
+print(reply, count, first, done, arg)

@@ -1,0 +1,9 @@
+the script's code ends
+the worker lib/worker/fail.cluau failed: lib/worker/fail.cluau:7: 9 is too big
+stack backtrace (in the worker):
+[C] function error
+lib/worker/fail.cluau:7 function Check
+    error(`{n} is too big`)
+lib/worker/fail.cluau:19
+    return Check(worker.args[1] :: number)
+exit: 1

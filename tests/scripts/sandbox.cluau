@@ -7,6 +7,7 @@ print(process.run == nil, process.env == nil, process.spawn == nil, process.chdi
 print(pcall(require, "@std/fs"))
 print(pcall(require, "@std/http"))
 print(pcall(require, "@std/watch"))
+print(pcall(require, "@std/worker")) // it runs files
 
 // Modules from the script's directory load; those outside it do not, and
 // one outside that exists reads the same as one that doesn't.

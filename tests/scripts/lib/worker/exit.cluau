@@ -1,0 +1,6 @@
+// process.exit in a worker ends the worker's script, not the process.
+const process = require("@std/process")
+const worker = require("@std/worker")
+
+process.exit(worker.args[1] :: number)
+worker.send("not sent")

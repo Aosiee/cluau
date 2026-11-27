@@ -1,0 +1,8 @@
+// A worker that starts workers of its own: each sums a part of the range,
+// and the last one still runs when this script ends, so it is waited for.
+const worker = require("@std/worker")
+
+const first = worker.start("sum", 1, 500)
+const second = worker.start("sum", 501, 1000)
+worker.start("echo")
+return (first:join() :: number) + (second:join() :: number)

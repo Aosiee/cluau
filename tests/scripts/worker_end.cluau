@@ -1,0 +1,13 @@
+// When the script's code (and its tasks) have finished, the workers still
+// running are waited for: one waiting on its parent gets nil then, and one
+// that is still working finishes first.
+const task = require("@std/task")
+const worker = require("@std/worker")
+
+worker.start("lib/worker/late")
+worker.start("lib/worker/sum", 1, 3000000)
+const nested = worker.start("lib/worker/nested")
+task.spawn(function() {
+	print("a task joins:", nested:join())
+})
+print("the script's code ends")

@@ -395,6 +395,89 @@ TEST("runtime: a file run from inside a run leaves the outer script's directory 
 	}
 }
 
+namespace {
+
+	// A worker script in this run's directory, as a path a script's string can hold.
+	std::string WorkerScript(const std::string& name, const std::string& text)
+	{
+		return std::filesystem::path(Temp(name, text)).generic_u8string();
+	}
+
+	double SecondsSince(std::chrono::steady_clock::time_point start)
+	{
+		return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+	}
+
+} // namespace
+
+TEST("worker: runtimes on two threads each run workers, side by side")
+{
+	const std::string sum = WorkerScript("worker_sum.cluau", "const worker = require(\"@std/worker\")\n"
+															 "let total = 0\n"
+															 "for (i = worker.args[1] :: number, worker.args[2] :: number) { total += i }\n"
+															 "return total\n");
+	const std::string script = "const worker = require(\"@std/worker\")\n"
+							   "const task = require(\"@std/task\")\n"
+							   "const parts: { worker.Worker } = {}\n"
+							   "for (i = 0, 3) { table.insert(parts, worker.start(\"" + sum + "\", i * 100000 + 1, (i + 1) * 100000)) }\n"
+							   "let total = 0\n"
+							   "for (_, part in parts) { total += task.join(task.spawn(function(): number { return part:join() :: number })) }\n"
+							   "assert(total == 400000 * 400001 / 2)\n";
+	int statuses[2] = { -1, -1 };
+	std::thread threads[2];
+	for (int i = 0; i < 2; i++)
+		threads[i] = std::thread([&statuses, &script, i] {
+			cluau::runtime::Runtime runtime;
+			statuses[i] = runtime.RunSource(script, "-e");
+		});
+	for (std::thread& thread : threads)
+		thread.join();
+	CHECK_EQ(statuses[0], 0);
+	CHECK_EQ(statuses[1], 0);
+}
+
+TEST("worker: a run that fails terminates its workers, and a Ctrl-C stops them")
+{
+	const std::string forever = WorkerScript("worker_forever.cluau", "let n = 0\nwhile (true) { n += 1 }\n");
+	auto start = std::chrono::steady_clock::now();
+	CHECK_EQ(Run("const w = require(\"@std/worker\").start(\"" + forever + "\")\nerror(\"the script fails\")\n"), 1);
+	CHECK(SecondsSince(start) < 10);
+	start = std::chrono::steady_clock::now();
+	CHECK_EQ(CatchingInterrupts("const worker = require(\"@std/worker\")\n"
+								"const a = worker.start(\"" + forever + "\")\n"
+								"const b = worker.start(\"" + forever + "\")\n"
+								"require(\"@test/signal\").raise()\n"
+								"a:join()\n"),
+		130);
+	CHECK(SecondsSince(start) < 10);
+	// While the script's end waits for them.
+	start = std::chrono::steady_clock::now();
+	CHECK_EQ(CatchingInterrupts("require(\"@std/worker\").start(\"" + forever + "\")\n"
+								"require(\"@test/signal\").raise()\n"),
+		130);
+	CHECK(SecondsSince(start) < 10);
+}
+
+TEST("worker: destroying the runtime terminates the workers still running")
+{
+	const std::string forever = WorkerScript("worker_forever.cluau", "let n = 0\nwhile (true) { n += 1 }\n");
+	const auto start = std::chrono::steady_clock::now();
+	{
+		cluau::runtime::Runtime runtime;
+		lua_State* L = runtime.State();
+		// Started outside a run (as the prompt starts one): no run's end
+		// waits for it.
+		lua_getglobal(L, "require");
+		lua_pushstring(L, "@std/worker");
+		lua_call(L, 1, 1);
+		lua_getfield(L, -1, "start");
+		lua_pushstring(L, forever.c_str());
+		CHECK_EQ(lua_pcall(L, 1, 1, 0), 0);
+		lua_settop(L, 0);
+	}
+	CHECK(SecondsSince(start) < 10);
+}
+
 TEST("runtime: a NUL byte in a script is an error; a byte order mark is skipped in source text too")
 {
 	std::string withNul = "require(\"@test/sink\").put(1)\n";

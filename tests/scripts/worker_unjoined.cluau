@@ -1,0 +1,6 @@
+// A worker's error that nothing joins is raised once the script's code has
+// finished, so none goes unseen.
+const worker = require("@std/worker")
+
+worker.start("lib/worker/fail", 9)
+print("the script's code ends")

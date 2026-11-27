@@ -1,0 +1,14 @@
+// A task that waits on nothing can never finish, so joining it is an error
+// at once, even while the script that started this worker waits on a
+// blocking call of its own: a worker's tasks do not wait on its parent's.
+const task = require("@std/task")
+
+const stuck = task.spawn(function() {
+	coroutine.yield()
+})
+try {
+	task.join(stuck)
+} catch (error) {
+	return tostring(error)
+}
+return "joined"

@@ -1,0 +1,95 @@
+// Many workers at once, large messages, a flood of small ones, a worker
+// terminated while it sends, and joins from several tasks at once.
+const task = require("@std/task")
+const worker = require("@std/worker")
+
+// 64 workers, each sent its messages while all of them run.
+const echoes: { worker.Worker } = {}
+for (i = 1, 64) {
+	table.insert(echoes, worker.start("lib/worker/echo"))
+}
+for (round = 1, 3) {
+	for (i, echo in echoes) {
+		echo:send(i * round)
+	}
+}
+let sum = 0
+for (_, echo in echoes) {
+	for (round = 1, 3) {
+		sum += echo:receive() :: number
+	}
+	echo:send("stop")
+}
+let echoed = 0
+for (_, echo in echoes) {
+	echoed += echo:join() :: number
+}
+print(sum, echoed)
+
+// Large values both ways: a string of 8 MB, a list of 200000 numbers and a
+// table of 20000 records.
+const big = worker.start("lib/worker/echo")
+const text = string.rep("0123456789abcdef", 512 * 1024)
+const numbers: { number } = {}
+const records: { { id: number, name: string } } = {}
+for (i = 1, 200000) {
+	numbers[i] = i * 0.5
+}
+for (i = 1, 20000) {
+	records[i] = { id = i, name = `record {i}` }
+}
+big:send(text)
+big:send(numbers)
+big:send(records)
+const textBack = big:receive() :: string
+const numbersBack = big:receive() :: { number }
+const recordsBack = big:receive() :: { { id: number, name: string } }
+print(#textBack, textBack == text, #numbersBack, numbersBack[200000], #recordsBack, recordsBack[20000].name)
+big:send("stop")
+big:join()
+
+// A flood of small messages, read as they come.
+const flood = worker.start("lib/worker/flood", 20000, 100)
+let received = 0
+while (true) {
+	const message = flood:receive()
+	if (type(message) == "number") {
+		print("flood:", received, message)
+		break
+	}
+	received += 1
+}
+flood:join()
+
+// Terminated while it sends: the messages sent before stay to be read,
+// and join gives nothing.
+const stopped = worker.start("lib/worker/flood", 10000000, 10)
+stopped:receive()
+stopped:terminate()
+print("terminated:", select("#", stopped:join()), stopped.done)
+let left = 0
+while (stopped:receive() != nil) {
+	left += 1
+}
+print("its messages can be read after", left >= 0)
+
+// Several tasks join the same worker at once, and each gets its results.
+const shared = worker.start("lib/worker/sum", 1, 1000000)
+const joins: { task.Task<number> } = {}
+for (i = 1, 8) {
+	table.insert(joins, task.spawn(function(): number {
+		return shared:join() :: number
+	}))
+}
+let agreed = true
+for (_, join in joins) {
+	agreed = agreed && task.join(join) == 500000500000
+}
+print("joins:", agreed)
+
+// Workers started and joined one after another, many times.
+let count = 0
+for (i = 1, 200) {
+	count += worker.start("lib/worker/sum", 1, i):join() :: number
+}
+print("one after another:", count)

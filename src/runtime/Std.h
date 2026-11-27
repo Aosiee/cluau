@@ -40,7 +40,17 @@ namespace cluau::runtime::detail {
 	// @std/http's `json` option.
 	std::string JsonEncodeValue(lua_State* L, int index);
 
-	// A Ctrl-C is waiting to stop the script (a long transfer checks).
+	// json.null (true when the value at `index` is it, or pushed), and the
+	// marker json.object / json.array put on a table ('o', 'a' or 0; set on
+	// the table at `index`): kept when @std/worker copies a value.
+	bool JsonNullAt(lua_State* L, int index);
+	void PushJsonNull(lua_State* L);
+	char JsonMarkAt(lua_State* L, int index);
+	void SetJsonMark(lua_State* L, int index, char mark);
+
+	// A Ctrl-C is waiting to stop the script (a long transfer checks). On a
+	// worker's thread: the worker is to stop (worker:terminate, or a Ctrl-C
+	// since it started).
 	bool InterruptPending();
 	// How many Ctrl-Cs have come so far (never reset): a job's thread
 	// compares it with the count when its work began.
@@ -86,7 +96,8 @@ namespace cluau::runtime::detail {
 	void OpenZip(lua_State* L);
 
 	// After a read of standard input came back empty-handed: when a Ctrl-C
-	// stopped it, raises the `interrupted` error (and does not return).
+	// stopped it, raises the `interrupted` error (and does not return). On
+	// a worker's thread, raises why the worker is to stop, if it is.
 	void RaiseIfInterrupted(lua_State* L);
 
 	// Called with the exit status when a script calls `process.exit`,

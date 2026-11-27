@@ -1,0 +1,15 @@
+// A worker that sends each message back until it is sent "stop" (or its
+// parent sends no more), then returns how many it echoed and what it can
+// tell of how it was started.
+const worker = require("@std/worker")
+
+let count = 0
+while (true) {
+	const message = worker.receive()
+	if (message == nil || message == "stop") {
+		break
+	}
+	worker.send(message)
+	count += 1
+}
+return count, worker.isWorker, #worker.args

@@ -1,0 +1,12 @@
+worker.cluau:5:1: Expected this to be 'string', but got 'unknown'
+worker.cluau:7:1: Expected this to be 'number', but got 'unknown'
+worker.cluau:8:11: Expected this to be 'number?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be 'number', but got 'string'
+worker.cluau:9:1: Expected this to be 'string', but got 'boolean'
+worker.cluau:10:14: Expected this to be 'string', but got 'number'
+worker.cluau:11:1: Expected this to be 'string', but got 'unknown'
+worker.cluau:12:13: Argument count mismatch. Function 'w.terminate' expects 1 argument, but 2 are specified
+cluau check: 7 error(s), 0 warning(s)
+exit: 1

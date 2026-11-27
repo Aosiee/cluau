@@ -1,0 +1,27 @@
+// A worker that never ends on its own: it computes, sleeps or waits for a
+// message that never comes (worker.args[1] says which), until it is
+// terminated. A `catch` sees the termination, but it stops the worker anyway.
+const process = require("@std/process")
+const worker = require("@std/worker")
+
+worker.send("started")
+const how = worker.args[1]
+try {
+	if (how == "compute") {
+		let x = 0
+		while (true) {
+			x = (x + 1) % 7
+		}
+	} else if (how == "sleep") {
+		process.sleep(math.huge)
+	} else {
+		const task = require("@std/task")
+		task.spawn(function() {
+			worker.receive()
+		})
+	}
+} catch (e) {
+	worker.send(`caught: {e}`)
+	while (true) {
+	}
+}
