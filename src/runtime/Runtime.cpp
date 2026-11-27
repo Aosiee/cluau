@@ -7,6 +7,7 @@
 #include "Resolve.h"
 #include "Spawn.h"
 #include "Std.h"
+#include "Worker.h"
 
 #include "Luau/CodeGen.h"
 #include "Luau/Common.h"
@@ -283,6 +284,12 @@ __cluau_meta = {
 		std::vector<lua_State*> Threads; // the threads Execute is running (innermost last)
 		bool Interrupted = false;        // the last run ended in a Ctrl-C's `interrupted`
 		std::string Script;              // process.script
+		// A worker's runtime (@std/worker): the error that ends its script
+		// goes here instead of to stderr (the message, the stack's frames,
+		// whether they are a task's), and what the script returned is given
+		// to OnResults (which returns "" or why it cannot be kept).
+		std::function<void(const std::string& message, const std::string& trace, bool task)> OnError;
+		std::function<std::string(lua_State* T)> OnResults;
 		// While a run is in progress, another (a host's callback running a
 		// file) keeps the main directory and the script's name for it.
 		struct NestedRun
@@ -668,10 +675,19 @@ __cluau_meta = {
 				Debug->OnUncaught(T, message);
 			std::fflush(stdout);
 			lua_State* traced = FailedTask(T);
-			std::string trace = lua_debugtrace(traced ? traced : T);
+			std::string trace;
+			{
+				// Luau writes the trace into a buffer of its own, one for the
+				// process: workers failing at once take turns.
+				static std::mutex tracing;
+				std::lock_guard<std::mutex> lock(tracing);
+				trace = lua_debugtrace(traced ? traced : T);
+			}
 			while (!trace.empty() && trace.back() == '\n')
 				trace.pop_back();
-			if (trace.empty())
+			if (OnError)
+				OnError(message, trace.empty() ? std::string() : Backtrace(trace), traced != nullptr);
+			else if (trace.empty())
 				std::fprintf(stderr, "%s\n", message.c_str());
 			else
 				std::fprintf(stderr, "%s\nstack backtrace%s:\n%s\n", message.c_str(), traced ? " (in the task)" : "", Backtrace(trace).c_str());
@@ -689,20 +705,67 @@ __cluau_meta = {
 			return 130;
 		}
 
+		// An error that ends the script without a stack (one in loading it).
+		void Report(const std::string& message)
+		{
+			if (OnError)
+				OnError(message, {}, false);
+			else
+				std::fprintf(stderr, "%s\n", message.c_str());
+		}
+
 		int RunChunk(const std::string& source, const std::string& name, bool luau = false)
 		{
 			std::string error;
 			if (Load(L, source, name, false, false, error, luau) != LoadStatus::Ok)
 			{
-				std::fprintf(stderr, "%s\n", error.c_str());
-				return 1;
+				Report(error);
+				return Finished(1);
 			}
 			lua_State* T = Execute();
 			std::fflush(stdout);
 			if (!T)
-				return Ended();
+				return Finished(Ended());
+			if (OnResults)
+				if (const std::string why = OnResults(T); !why.empty())
+				{
+					lua_pop(L, 1);
+					Report(why);
+					return Finished(1);
+				}
 			lua_pop(L, 1);
-			return RunTasks();
+			int status = RunTasks();
+			if (status == 0)
+				status = FinishWorkers();
+			return Finished(status);
+		}
+
+		// The end of a run: after a failure, the workers it started are
+		// terminated (a run inside another leaves them to the outer one).
+		int Finished(int status)
+		{
+			if (status != 0 && Threads.empty())
+				detail::StopWorkers(L);
+			return status;
+		}
+
+		// After the script's code and its tasks: the @std/worker workers
+		// still running are waited for, and the error of one that nothing
+		// joined is reported as the script's.
+		int FinishWorkers()
+		{
+			if (!Threads.empty() || !detail::HasWorkers(L))
+				return 0;
+			lua_pushcfunction(L, detail::FinishWorkers, "worker");
+			lua_State* T = Execute();
+			std::fflush(stdout);
+			if (!T)
+				return Ended();
+			const bool failed = lua_gettop(T) > 0 && lua_isstring(T, -1);
+			if (failed)
+				Report(lua_tostring(T, -1));
+			lua_pop(L, 1);
+			return failed ? 1 : 0;
 		}
 
 		// After the script's code: the @std/task tasks still waiting run to
@@ -852,6 +915,26 @@ __cluau_meta = {
 			return 3;
 		}
 
+		// The calling chunk's directory (past C functions such as pcall:
+		// `pcall(require, "./x")` is the caller's), where relative requires
+		// start.
+		fs::path CallerDir(lua_State* L, const Runtime::Impl& rt)
+		{
+			lua_Debug ar;
+			for (int level = 1; lua_getinfo(L, level, "s", &ar); level++)
+			{
+				if (!ar.source || std::strcmp(ar.source, "=[C]") == 0 || std::strcmp(ar.source, "=require") == 0)
+					continue;
+				if (ar.source[0] == '@')
+				{
+					auto dir = rt.ChunkDirs.find(ar.source + 1);
+					return dir != rt.ChunkDirs.end() ? dir->second : (rt.StartDir / fs::u8path(ar.source + 1)).parent_path();
+				}
+				break;
+			}
+			return rt.StartDir;
+		}
+
 		int RequireWith(lua_State* L, bool deferred)
 		{
 			Runtime::Impl& rt = Runtime::Impl::Get(L);
@@ -905,22 +988,7 @@ __cluau_meta = {
 			if (StartsWith(name, "@"))
 				luaL_error(L, "unknown alias in '%s' (the standard modules are @std/<name>)", name.c_str());
 
-			// The requiring chunk's directory (past C functions such as
-			// pcall: `pcall(require, "./x")` is the caller's).
-			fs::path from = rt.StartDir;
-			lua_Debug ar;
-			for (int level = 1; lua_getinfo(L, level, "s", &ar); level++)
-			{
-				if (!ar.source || std::strcmp(ar.source, "=[C]") == 0 || std::strcmp(ar.source, "=require") == 0)
-					continue;
-				if (ar.source[0] == '@')
-				{
-					auto dir = rt.ChunkDirs.find(ar.source + 1);
-					from = dir != rt.ChunkDirs.end() ? dir->second : (rt.StartDir / fs::u8path(ar.source + 1)).parent_path();
-				}
-				break;
-			}
-
+			const fs::path from = CallerDir(L, rt);
 			std::vector<fs::path> searchDirs;
 			for (const std::string& dir : rt.Opts.SearchPath)
 				searchDirs.push_back(rt.StartDir / fs::u8path(dir));
@@ -1380,12 +1448,30 @@ end
 
 	} // namespace
 
-	bool detail::InterruptPending() { return g_Interrupt.load() != 0; }
+	// A worker's thread sees its own stop instead of the pending Ctrl-C,
+	// which is the main script's to take (a Ctrl-C stops a worker too: it
+	// counts the Ctrl-Cs since it started).
+	bool detail::InterruptPending()
+	{
+		if (detail::InWorker())
+			return detail::WorkerStopping() != nullptr;
+		return g_Interrupt.load() != 0;
+	}
 
 	unsigned detail::InterruptCount() { return g_Interrupts; }
 
 	void detail::RaiseIfInterrupted(lua_State* L)
 	{
+		if (detail::InWorker())
+		{
+			if (const char* why = detail::WorkerStopping())
+			{
+				lua_rawcheckstack(L, 1);
+				lua_pushstring(L, why);
+				lua_error(L);
+			}
+			return;
+		}
 		if (!g_Interrupt.exchange(0))
 			return;
 		std::cin.clear();
@@ -1769,6 +1855,69 @@ end
 		const Runtime::Impl& rt = Runtime::Impl::Get(L);
 		auto it = rt.Sources.find(name);
 		return it == rt.Sources.end() ? std::string() : it->second;
+	}
+
+	detail::WorkerLaunch detail::PrepareWorker(lua_State* L, const std::string& path, const char* fn)
+	{
+		const Runtime::Impl& rt = Runtime::Impl::Get(L);
+		// A path that is not absolute is the calling script's directory's,
+		// as `./path` is to require (never a package or the search path's).
+		const bool relative = !fs::u8path(path).is_absolute() && !StartsWith(path, "./") && !StartsWith(path, "../");
+		std::vector<fs::path> looked;
+		const fs::path found = detail::ResolveRequire(relative ? "./" + path : path, CallerDir(L, rt), rt.MainDir, {}, &looked);
+		if (found.empty())
+		{
+			std::string tried;
+			for (const fs::path& base : looked)
+				tried += (tried.empty() ? "" : ", ") + rt.Display(base) + "[.cluau|.luau]";
+			luaL_error(L, "%s: no script '%s' (looked for %s)", fn, path.c_str(), tried.c_str());
+		}
+		WorkerLaunch launch;
+		launch.File = ToUtf8(found);
+		launch.Name = rt.Display(found);
+		// The worker's runtime is the script's, but for what belongs to the
+		// main script: Ctrl-C (it stops the workers through their own
+		// check), the debugger, the profiler and coverage.
+		launch.Opts.Args = rt.Opts.Args;
+		for (const std::string& dir : rt.Opts.SearchPath)
+			launch.Opts.SearchPath.push_back(ToUtf8(rt.StartDir / fs::u8path(dir)));
+		launch.Opts.Native = rt.Native;
+		return launch;
+	}
+
+	void detail::RunWorker(const WorkerLaunch& launch, const std::function<void(lua_State*)>& prepare,
+		const std::function<std::string(lua_State*)>& results, WorkerFailure& failure)
+	{
+		Runtime runtime(launch.Opts);
+		Runtime::Impl& rt = Runtime::Impl::Get(runtime.State());
+		rt.OnError = [&failure](const std::string& message, const std::string& trace, bool task) {
+			failure.Failed = true;
+			failure.Message = message;
+			failure.Trace = trace;
+			failure.InTask = task;
+		};
+		rt.OnResults = results;
+		prepare(rt.L);
+		// As RunFile: the modules beside the real file are the script's.
+		const fs::path file = fs::u8path(launch.File);
+		const std::string name = rt.Display(file);
+		std::string text;
+		if (!ReadFile(file, text))
+		{
+			failure.Failed = true;
+			failure.Message = "cannot read '" + name + "'";
+			return;
+		}
+		std::error_code ec;
+		const fs::path real = fs::weakly_canonical(file, ec);
+		rt.MainDir = (ec ? file.lexically_normal() : real).parent_path();
+		rt.ChunkDirs[name] = rt.MainDir;
+		rt.SetScript(name);
+		if (rt.RunChunk(text, name, detail::IsLuauFile(file)) != 0 && !failure.Failed)
+		{
+			failure.Failed = true;
+			failure.Message = "the script failed";
+		}
 	}
 
 } // namespace cluau::runtime

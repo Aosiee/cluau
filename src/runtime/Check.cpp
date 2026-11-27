@@ -273,6 +273,23 @@ return m :: {
 	weighted: <T>(list: { T }, weights: { number }) -> T,
 }
 )LUAU" },
+				{ "worker", R"LUAU(
+export type Worker = {
+	done: boolean,
+	send: (self: Worker, value: unknown) -> (),
+	receive: (self: Worker, seconds: number?) -> unknown,
+	join: (self: Worker) -> ...unknown,
+	terminate: (self: Worker) -> (),
+}
+local m: any = nil
+return m :: {
+	start: (path: string, ...unknown) -> Worker,
+	isWorker: boolean,
+	args: { unknown },
+	send: (value: unknown) -> (),
+	receive: (seconds: number?) -> unknown,
+}
+)LUAU" },
 				{ "compress", R"LUAU(
 local m: any = nil
 return m :: {

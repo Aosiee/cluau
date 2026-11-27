@@ -1,0 +1,19 @@
+// A worker whose script fails, in its own code or in a task of its own.
+const task = require("@std/task")
+const worker = require("@std/worker")
+
+function Check(n: number): number {
+	if (n > 2) {
+		error(`{n} is too big`)
+	}
+	return n
+}
+
+if (worker.args[2] == "task") {
+	task.spawn(function() {
+		task.wait(0)
+		Check(worker.args[1] :: number)
+	})
+	return 0 // the task fails after this
+}
+return Check(worker.args[1] :: number)

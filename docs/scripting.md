@@ -74,9 +74,10 @@ before the script (`cluau --no-native script.cluau`) interprets it instead.
 network or other programs: for a script from somewhere else, or one that
 only computes.
 
-- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite`, `@std/zip` and
-  `@std/tar` are not available (`require` raises an error saying so), nor
-  what is built on them (`@std/server`, `@std/websocket`).
+- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite`, `@std/zip`,
+  `@std/tar` and `@std/worker` (which runs files) are not available
+  (`require` raises an error saying so), nor what is built on them
+  (`@std/server`, `@std/websocket`).
 - `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
   environment variables, the working directory and running commands are
   left out.
@@ -1899,7 +1900,8 @@ for (_, page in pages) {
 - The standard library's blocking calls wait on their own: `@std/http`'s
   requests and downloads, `@std/net`'s waits, `process.run` and `process.exec`, a child's
   `read`, `readLine`, `lines`, `write` and `wait`, `io.readLine`,
-  `io.readAll` and `input`, and `process.sleep`. In a task, the call runs
+  `io.readAll` and `input`, `process.sleep`, and `@std/worker`'s
+  `receive` and `join`. In a task, the call runs
   on a thread of its own while the task waits, and the other tasks run meanwhile; in the
   script's own code, the tasks run until the call is done. So three
   downloads in three tasks take as long as the slowest, not the three
@@ -1912,7 +1914,127 @@ for (_, page in pages) {
   that runs a task for each connection stays the same size.
 - Tasks still take turns over the script's own code: a long computation
   without a `task.wait` holds the others up, as do the calls that finish at
-  once (files, JSON, paths).
+  once (files, JSON, paths). For work that needs more than one core, see
+  [`@std/worker`](#stdworker).
+
+### `@std/worker`
+
+Scripts that run in parallel, for work that needs more than one core. A
+worker is a script file run in a runtime of its own (its own Luau VM, its
+own modules and globals) on a thread of its own: the script that started it
+and the worker share nothing, and what they send each other is copied.
+
+| function | is |
+|---|---|
+| `start(path, ...): Worker` | the script at `path` running as a worker, with `...` (copied) as its `worker.args` |
+
+A `Worker` is the starting script's side of it:
+
+| member | is |
+|---|---|
+| `send(value)` | sends the worker a copy of `value` (dropped once the worker has ended) |
+| `receive(seconds?): unknown` | the next value the worker sent; `nil` when `seconds` pass first, or once the worker has ended and its values are read |
+| `join(): ...` | waits for the worker to end, and returns what its script returned; an error in the worker is raised here |
+| `terminate()` | stops the worker at its next safepoint |
+| `done: boolean` | the worker has ended (returned, failed or was terminated) |
+
+In the worker's own script, the module talks to the script that started it:
+
+| member | is |
+|---|---|
+| `isWorker: boolean` | `true` in a worker (`false` in the main script) |
+| `args: {unknown}` | what `start` was given after the path (`{}` in the main script) |
+| `send(value)` | sends the starting script a copy of `value` |
+| `receive(seconds?): unknown` | the next value the starting script sent; `nil` when `seconds` pass first, or once it can send no more (its script has ended, or its `Worker` was collected) and the values are read |
+
+```
+// main.cluau
+const worker = require("@std/worker")
+
+const parts: { worker.Worker } = {}
+for (i = 0, 3) {
+	table.insert(parts, worker.start("count", i * 25000000 + 1, (i + 1) * 25000000))
+}
+let primes = 0
+for (_, part in parts) {
+	primes += part:join() :: number // the four count side by side, on four cores
+}
+print(primes)
+```
+
+```
+// count.cluau
+const worker = require("@std/worker")
+
+const from = worker.args[1] :: number
+const to = worker.args[2] :: number
+let count = 0
+for (n = from, to) {
+	// ... count the primes ...
+}
+return count
+```
+
+- `path` is relative to the calling script's directory, as
+  `require("./path")` takes it (the `.cluau` or `.luau` may be left off),
+  or absolute. The worker's runtime has the standard modules, the script's
+  arguments (`process.args`) and its search path; `process.script` is the
+  worker's file. A host's own modules (`Runtime::AddModule`) are not in
+  it, since they may hold the host's state.
+- What crosses (the arguments, the values sent, the results): `nil`,
+  booleans, numbers, strings (any bytes), buffers, `json.null`, and tables
+  of these, keys too, read without metamethods. A table marked by
+  `json.object` or `json.array` keeps its mark; any other table with a
+  metatable (an instance of a class) is refused, as are functions,
+  threads and userdata (a `Worker` too), a table inside itself, a table
+  met twice in one value, and tables more than 1000 inside one another.
+  The error says where: `worker:send: a function at value.handlers[2]
+  cannot be sent`. `send(nil)` is refused too, since `receive` gives `nil`
+  for no value.
+- The values sent one way arrive in the order sent. There is no limit on
+  how many wait to be received: a worker that sends faster than its
+  values are read holds them in memory.
+- `receive` and `join` wait as the other blocking calls do (see
+  [`@std/task`](#stdtask)): in a task, the task waits and the other tasks
+  run meanwhile; in the script's own code, the tasks run until the call is
+  done. A task cancelled while it waits takes nothing: the value is the
+  next receive's. `receive(0)` looks without waiting.
+- `join` gives the results again when called again. An error in the worker
+  (in its code or in one of its tasks) is raised by `join` with the
+  worker's message and stack:
+
+  ```
+  main.cluau:4: the worker count.cluau failed: count.cluau:9: attempt to compare nil < number
+  stack backtrace (in the worker):
+  ...
+  ```
+
+  A worker that `terminate` stopped gives `join` nothing, and so does one
+  whose script called `process.exit(0)`: in a worker, `process.exit` ends
+  the worker's script, not the process, and a status other than 0 is an
+  error for `join`.
+- `terminate` takes effect at the worker's next safepoint (a call or a
+  loop's next round, as Ctrl-C does); a worker waiting in a blocking call
+  that Ctrl-C ends (`worker.receive`, `process.sleep`, a download, a task's
+  wait) stops waiting. A `catch` in the worker sees the error, but the
+  next safepoint raises it again, so the worker ends. Values it sent
+  before are still received.
+- When the starting script's code and its tasks have finished, the workers
+  still running are waited for, as tasks are: their `worker.receive` gives
+  `nil` once they have read what was sent, so a worker looping on it ends.
+  The first error of a worker that nothing joined is then the script's
+  error. When an error ends the script instead, its workers are
+  terminated. `process.exit` in the main script stops every worker before
+  the process ends.
+- Ctrl-C stops the workers too, each at its next safepoint, and the script
+  exits with status 130.
+- A worker can start workers of its own; its script's end waits for them.
+- `print` and `io.write` write each call's text at once, so the lines of
+  workers printing at the same time do not mix; their order is the order
+  the writes happen.
+- The debugger, the profiler and `cluau test --coverage` see the main
+  script, not its workers. `@std/worker` is not available in
+  [the sandbox](#the-sandbox), since it runs files.
 
 ## Embedding the runtime
 
@@ -1939,7 +2061,12 @@ time, and each profiles on its own; Ctrl-C (`CatchInterrupt`) is the
 process's signal, and stops whichever catching runtime reaches its next
 safepoint first. A file or source run from inside a run (a host's callback
 calling `RunFile`) leaves the outer script's directory and
-`process.script` as they were when it returns. `cluau::runtime::Repr`
+`process.script` as they were when it returns. A script's workers
+([`@std/worker`](#stdworker)) are runtimes the runtime makes, each on a
+thread of its own, without the host's modules or interrupt callback:
+`RunFile` and `RunSource` return once the workers still running have
+ended (and after terminating them, when the script failed), and destroying
+the runtime terminates any left (those the prompt started). `cluau::runtime::Repr`
 runs a value's `__tostring`, which can raise a Lua error: call it where
 an error is caught (inside a protected call).
 

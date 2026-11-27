@@ -1,0 +1,14 @@
+// Returns its arguments as they arrived, with what it can tell of them
+// here (a buffer is a buffer, json.null is json.null, marks are kept).
+const json = require("@std/json")
+const worker = require("@std/worker")
+
+const args = worker.args
+const bytes = args[5] :: buffer
+const record = args[6] :: { [string]: unknown }
+const notes = {
+	buffer = typeof(bytes) == "buffer" && buffer.len(bytes) == 3 && buffer.readu8(bytes, 1) == 0,
+	null = record.missing == json.null,
+	marks = json.encode(record.empty) .. json.encode(record.none),
+}
+return args[1], args[2], args[3], args[4], bytes, record, notes

@@ -1,0 +1,4 @@
+the script's code ends
+a task joins:	500500
+the worker got	nil	once its parent's script had ended
+exit: 0

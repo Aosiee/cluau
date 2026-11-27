@@ -1,0 +1,10 @@
+// Sends worker.args[1] messages of worker.args[2] bytes each, as fast as it
+// can, then a last one saying how many.
+const worker = require("@std/worker")
+
+const count = worker.args[1] :: number
+const text = string.rep("x", worker.args[2] :: number)
+for (i = 1, count) {
+	worker.send({ n = i, text = text })
+}
+worker.send(count)

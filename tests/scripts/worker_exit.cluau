@@ -1,0 +1,11 @@
+// process.exit in the script stops its workers (computing, sleeping or
+// waiting) before the process ends with that status.
+const process = require("@std/process")
+const worker = require("@std/worker")
+
+worker.start("lib/worker/busy", "compute")
+worker.start("lib/worker/busy", "sleep")
+const waiting = worker.start("lib/worker/busy", "wait")
+waiting:receive()
+print("exiting")
+process.exit(3)

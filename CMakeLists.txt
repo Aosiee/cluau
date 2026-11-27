@@ -242,7 +242,7 @@ if(CLUAU_BUILD_RUNTIME)
     add_library(cluau_runtime STATIC src/runtime/Runtime.cpp src/runtime/Std.cpp src/runtime/Resolve.cpp src/runtime/Spawn.cpp
         src/runtime/Check.cpp src/runtime/Json.cpp src/runtime/LanguageService.cpp src/runtime/LspServer.cpp
         src/runtime/Debugger.cpp src/runtime/DapServer.cpp src/runtime/Profile.cpp src/runtime/Jobs.cpp src/runtime/Net.cpp src/runtime/Encoding.cpp src/runtime/Term.cpp
-        src/runtime/Random.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
+        src/runtime/Random.cpp src/runtime/Worker.cpp ${CMAKE_CURRENT_BINARY_DIR}/cluau_std_sources.cpp)
     target_include_directories(cluau_runtime PUBLIC include)
     target_link_libraries(cluau_runtime PUBLIC cluau_translator PRIVATE cluau_check Luau.VM Luau.Compiler Luau.Analysis Luau.CodeGen)
     if(WIN32)

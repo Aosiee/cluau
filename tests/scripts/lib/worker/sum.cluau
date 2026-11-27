@@ -1,0 +1,11 @@
+// The sum of the whole numbers from worker.args[1] to worker.args[2]: work
+// for a thread of its own.
+const worker = require("@std/worker")
+
+const from = worker.args[1] :: number
+const to = worker.args[2] :: number
+let total = 0
+for (i = from, to) {
+	total += i
+}
+return total
