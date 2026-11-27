@@ -1,0 +1,17 @@
+// Nests as deeply in C as the main script may: JSON 999 arrays deep, read
+// and written, and calls nested through pcall.
+const json = require("@std/json")
+
+const text = string.rep("[", 999) .. string.rep("]", 999)
+const value = json.decode(text)
+const back = json.encode(value)
+
+function Down(n: number): number {
+	if (n == 0) {
+		return 0
+	}
+	const ok, result = pcall(Down, n - 1)
+	return if (ok) (result :: number) + 1 else -1
+}
+
+return #back, Down(150)

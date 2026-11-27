@@ -30,6 +30,9 @@ const got = f :: { [unknown]: unknown }
 print(got.name == "a\0b", got[true], got[2.5], got.missing == json.null, got != record)
 print(repr(notes))
 
+// A worker has as much room to nest as the script itself.
+print(worker.start("lib/worker/deep"):join())
+
 // What cannot be sent says where it is.
 const Try = function(fn: () -> ()) {
 	try {

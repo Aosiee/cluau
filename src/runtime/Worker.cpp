@@ -28,17 +28,127 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
 namespace cluau::runtime::detail {
+
+	namespace {
+
+		// A thread with the stack a script's own thread has (8 MiB) rather
+		// than the platform's default for new threads (512 KiB on macOS, 1
+		// MiB on Windows): a worker's script nests as deeply as the main
+		// script's, in Luau's C calls, the compiler and the translator.
+		class WorkerThread
+		{
+		public:
+			WorkerThread() = default;
+			WorkerThread(const WorkerThread&) = delete;
+			WorkerThread& operator=(const WorkerThread&) = delete;
+
+			template <typename F>
+			explicit WorkerThread(F&& body)
+			{
+				auto* run = new std::function<void()>(std::forward<F>(body));
+#if defined(_WIN32)
+				m_Handle = CreateThread(nullptr, kStack, &WorkerThread::Start, run, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+				if (m_Handle == nullptr)
+#else
+				pthread_attr_t attributes;
+				pthread_attr_init(&attributes);
+				pthread_attr_setstacksize(&attributes, kStack);
+				const int failed = pthread_create(&m_Thread, &attributes, &WorkerThread::Start, run);
+				pthread_attr_destroy(&attributes);
+				m_Started = failed == 0;
+				if (!m_Started)
+#endif
+				{
+					delete run;
+					throw std::runtime_error("the system could not start a thread");
+				}
+			}
+
+			WorkerThread& operator=(WorkerThread&& other) noexcept
+			{
+				std::swap(m_Handle, other.m_Handle);
+				std::swap(m_Thread, other.m_Thread);
+				std::swap(m_Started, other.m_Started);
+				return *this;
+			}
+
+			~WorkerThread()
+			{
+				if (joinable())
+					std::terminate(); // as std::thread does: a thread is joined before it goes
+			}
+
+			bool joinable() const
+			{
+#if defined(_WIN32)
+				return m_Handle != nullptr;
+#else
+				return m_Started;
+#endif
+			}
+
+			void join()
+			{
+#if defined(_WIN32)
+				WaitForSingleObject(m_Handle, INFINITE);
+				CloseHandle(m_Handle);
+				m_Handle = nullptr;
+#else
+				pthread_join(m_Thread, nullptr);
+				m_Started = false;
+#endif
+			}
+
+		private:
+			static constexpr size_t kStack = 8 * 1024 * 1024;
+
+#if defined(_WIN32)
+			static DWORD WINAPI Start(void* data)
+#else
+			static void* Start(void* data)
+#endif
+			{
+				std::unique_ptr<std::function<void()>> run(static_cast<std::function<void()>*>(data));
+				(*run)();
+				return 0;
+			}
+
+			void* m_Handle = nullptr; // Windows: the thread's HANDLE
+#if !defined(_WIN32)
+			pthread_t m_Thread {};
+#else
+			int m_Thread = 0;
+#endif
+			bool m_Started = false;
+		};
+
+	} // namespace
+
 
 	namespace {
 
@@ -89,7 +199,7 @@ namespace cluau::runtime::detail {
 			int ExitStatus = 0;
 
 			// The parent's thread's alone: it starts and joins the thread.
-			std::thread Thread;
+			WorkerThread Thread;
 			bool Joined = false; // worker:join has given its outcome (or the run's end has)
 		};
 
@@ -945,7 +1055,7 @@ namespace cluau::runtime::detail {
 			}
 			try
 			{
-				link->Thread = std::thread(Main, link, std::move(launch));
+				link->Thread = WorkerThread([link, launch = std::move(launch)]() mutable { Main(link, std::move(launch)); });
 			}
 			catch (const std::exception& e)
 			{

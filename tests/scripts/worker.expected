@@ -6,29 +6,23 @@ nil	nil	false	Worker
 nil	false	-0.5	inf	buffer	true	255
 true	1	x	true	true
 {buffer = true, marks = "[]{}", null = true}
-worker.cluau:43: worker:send: a function at value.handlers[2] cannot be sent
-worker.cluau:48: worker:send: the table at value.self.back is inside itself: a cycle cannot be sent
-worker.cluau:52: worker:send: the table at value.first is also elsewhere in the value: a table is copied once, so it cannot be sent twice
-worker.cluau:55: worker:send: a function as a key in value cannot be sent
-worker.cluau:58: worker:send: a table with a metatable (an instance of a class, say) at value["a key"] cannot be sent: only plain tables are copied
-worker.cluau:61: worker:send: a Worker at value.w cannot be sent
-worker.cluau:64: worker:send: nil cannot be sent (receive gives nil for no message)
-worker.cluau:67: worker.start: a thread at args[2] cannot be sent
-worker.cluau:74: worker:send: the value nests tables more than 1000 deep, too deep to send
-worker.cluau:77: worker.send: not in a worker (in the script that started one, its Worker's methods talk to it)
-worker.cluau:80: worker.receive: not in a worker (in the script that started one, its Worker's methods talk to it)
-worker.cluau:83: worker.start: no script 'lib/worker/missing' (looked for lib/worker/missing[.cluau|.luau])
+1998	150
+worker.cluau:46: worker:send: a function at value.handlers[2] cannot be sent
+worker.cluau:51: worker:send: the table at value.self.back is inside itself: a cycle cannot be sent
+worker.cluau:55: worker:send: the table at value.first is also elsewhere in the value: a table is copied once, so it cannot be sent twice
+worker.cluau:58: worker:send: a function as a key in value cannot be sent
+worker.cluau:61: worker:send: a table with a metatable (an instance of a class, say) at value["a key"] cannot be sent: only plain tables are copied
+worker.cluau:64: worker:send: a Worker at value.w cannot be sent
+worker.cluau:67: worker:send: nil cannot be sent (receive gives nil for no message)
+worker.cluau:70: worker.start: a thread at args[2] cannot be sent
+worker.cluau:77: worker:send: the value nests tables more than 1000 deep, too deep to send
+worker.cluau:80: worker.send: not in a worker (in the script that started one, its Worker's methods talk to it)
+worker.cluau:83: worker.receive: not in a worker (in the script that started one, its Worker's methods talk to it)
+worker.cluau:86: worker.start: no script 'lib/worker/missing' (looked for lib/worker/missing[.cluau|.luau])
 3	true	2
 3	true	2
 true	nil
 1
-worker.cluau:99: the worker lib/worker/fail.cluau failed: lib/worker/fail.cluau:7: 5 is too big
-stack backtrace (in the worker):
-[C] function error
-lib/worker/fail.cluau:7 function Check
-    error(`{n} is too big`)
-lib/worker/fail.cluau:19
-    return Check(worker.args[1] :: number)
 worker.cluau:102: the worker lib/worker/fail.cluau failed: lib/worker/fail.cluau:7: 5 is too big
 stack backtrace (in the worker):
 [C] function error
@@ -36,15 +30,22 @@ lib/worker/fail.cluau:7 function Check
     error(`{n} is too big`)
 lib/worker/fail.cluau:19
     return Check(worker.args[1] :: number)
-worker.cluau:105: the worker lib/worker/fail.cluau failed: lib/worker/fail.cluau:7: 7 is too big
+worker.cluau:105: the worker lib/worker/fail.cluau failed: lib/worker/fail.cluau:7: 5 is too big
+stack backtrace (in the worker):
+[C] function error
+lib/worker/fail.cluau:7 function Check
+    error(`{n} is too big`)
+lib/worker/fail.cluau:19
+    return Check(worker.args[1] :: number)
+worker.cluau:108: the worker lib/worker/fail.cluau failed: lib/worker/fail.cluau:7: 7 is too big
 stack backtrace (in the worker's task):
 [C] function error
 lib/worker/fail.cluau:7 function Check
     error(`{n} is too big`)
 lib/worker/fail.cluau:15
     Check(worker.args[1] :: number)
-worker.cluau:108: the worker lib/worker/refuse.cluau failed: a function at results[2].handlers[1] cannot be sent (what the script returns is copied to worker:join)
-worker.cluau:111: the worker lib/worker/refuse.cluau failed: lib/worker/refuse.cluau:6: worker.send: a function at value.run cannot be sent
+worker.cluau:111: the worker lib/worker/refuse.cluau failed: a function at results[2].handlers[1] cannot be sent (what the script returns is copied to worker:join)
+worker.cluau:114: the worker lib/worker/refuse.cluau failed: lib/worker/refuse.cluau:6: worker.send: a function at value.run cannot be sent
 stack backtrace (in the worker):
 [C] function send
 lib/worker/refuse.cluau:6
@@ -56,7 +57,7 @@ sleep	started
 wait	started
 0	true
 0
-worker.cluau:128: the worker lib/worker/exit.cluau ended with process.exit(3)
+worker.cluau:131: the worker lib/worker/exit.cluau ended with process.exit(3)
 ping	1	true	0
 true
 kept
