@@ -54,6 +54,9 @@ namespace cluau::runtime::detail {
 	// Pushes @std/net's table (TCP connections and servers).
 	void OpenNet(lua_State* L);
 
+	// Pushes @std/watch's table (changes to files and directories).
+	void OpenWatch(lua_State* L);
+
 	// Pushes @std/sqlite's table (when the runtime is built with it).
 	void OpenSqlite(lua_State* L);
 

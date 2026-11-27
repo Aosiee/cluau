@@ -1,0 +1,31 @@
+missing:	false	watch.new: cannot watch '<root>/missing': no such file or directory
+NUL:	false	invalid argument #1 to 'new' (the path holds a NUL byte)
+watching:	<root>/tree	false
+created:	true
+modified:	true
+nested:	true	<root>/tree/a/b/c/deep.txt
+directories made:	<root>/tree/a <root>/tree/a/b <root>/tree/a/b/c
+renamed:	true
+removed:	true
+in a renamed directory:	true	<root>/tree/z/b/c/after.txt
+closed:	true	true	true
+top level:	true
+below the top level:	false
+file:	<root>/single/watched.txt
+first event:	<root>/single/watched.txt
+saved by a rename:	true
+file removed:	true
+file back:	true	false
+directory of the file removed:	true	removed <root>/single/watched.txt
+directory removed:	true	removed <root>/gone
+after the end:	true
+a task saw:	<root>/tasks1/t.txt
+the script saw what a task did:	true
+closed while a task waits:	true
+events() until closed:	true	true
+cancelled before the change:	true
+cancelled after its wait got the change:	true
+busy directory watched:	true
+2000 files made and removed:	true
+watchers at once, each with its own change:	16
+exit: 0

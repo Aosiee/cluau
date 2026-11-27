@@ -174,7 +174,53 @@ TEST("runtime: the sandbox has no file, network or process access")
 		CHECK_EQ(Sunk()[3], std::string("\"[1,2]\""));
 	}
 	CHECK_EQ(Run("require(\"@std/http\")\n", sandbox), 1);
+	CHECK_EQ(Run("require(\"@std/watch\")\n", sandbox), 1);
 	CHECK_EQ(Run("require(\"@std/fs\")\n"), 0);
+}
+
+TEST("watch: options are checked; watchers dropped, closed under a waiting task or left open end cleanly")
+{
+	const std::filesystem::path dir = TempDir() / "watch_many";
+	std::filesystem::create_directories(dir);
+	const std::string d = dir.generic_string();
+	CHECK_EQ(Run("const watch = require('@std/watch')\n"
+				 "const task = require('@std/task')\n"
+				 "const fs = require('@std/fs')\n"
+				 "const sink = require('@test/sink')\n"
+				 "const dir = '" +
+					 d +
+					 "'\n"
+					 "sink.put(select(2, pcall(watch.new, dir, { recursive = 'yes' })))\n"
+					 "sink.put(select(2, pcall(watch.new, dir, 5)))\n"
+					 "sink.put(watch.new(dir .. '/').path == dir)\n"
+					 "sink.put(select(2, pcall(function() { watch.new(dir):next(0 / 0) })))\n"
+					 // Dropped without a close: the collector closes them (as
+					 // the garbage made after them has it run).
+					 "for (i = 1, 32) { watch.new(dir) }\n"
+					 "for (i = 1, 200000) { const garbage = { i, i } }\n"
+					 // Closed while a task waits on the watcher, many times over.
+					 "for (i = 1, 200) {\n"
+					 "  const w = watch.new(dir)\n"
+					 "  const t = task.spawn(function() { w:next() })\n"
+					 "  if (i % 2 == 0) { task.wait(0) }\n"
+					 "  w:close()\n"
+					 "  task.join(t)\n"
+					 "}\n"
+					 // Left open, a change unread: closed with the runtime.
+					 "const kept = watch.new(dir)\n"
+					 "fs.write(dir .. '/f.txt', 'x')\n"
+					 "sink.put(kept:next(10)?.path == dir .. '/f.txt')\n"
+					 "fs.write(dir .. '/g.txt', 'x')\n"),
+		0);
+	CHECK_EQ(Sunk().size(), size_t(5));
+	if (Sunk().size() == 5)
+	{
+		CHECK_EQ(Sunk()[0], std::string("\"watch.new: options.recursive is a boolean\""));
+		CHECK(Sunk()[1].find("bad argument #2") != std::string::npos || Sunk()[1].find("invalid argument #2") != std::string::npos);
+		CHECK_EQ(Sunk()[2], std::string("true"));
+		CHECK_EQ(Sunk()[3], std::string("\"-e:9: watcher:next: the time is NaN, not a number of seconds\""));
+		CHECK_EQ(Sunk()[4], std::string("true"));
+	}
 }
 
 TEST("runtime: scripts run the same interpreted")
@@ -2422,6 +2468,20 @@ TEST("interrupt: a SIGINT ignored by whoever started the script stays ignored")
 	CHECK_EQ(status, 0);
 	CHECK(took >= 0.5);
 	sigaction(SIGINT, &old, nullptr);
+}
+
+TEST("interrupt: a Ctrl-C ends watcher:next, without @std/task and with it")
+{
+	const std::string dir = TempDir().generic_string();
+	auto [status, took] = RunInterrupted("require('@std/watch').new('" + dir + "'):next()");
+	CHECK_EQ(status, 130);
+	CHECK(took < 3);
+	std::tie(status, took) = RunInterrupted("const task = require('@std/task')\n"
+											"const w = require('@std/watch').new('" +
+		dir + "')\n"
+			  "task.spawn(function() { w:next() })\n");
+	CHECK_EQ(status, 130);
+	CHECK(took < 3);
 }
 
 #endif

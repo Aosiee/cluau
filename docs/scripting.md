@@ -74,9 +74,9 @@ before the script (`cluau --no-native script.cluau`) interprets it instead.
 network or other programs: for a script from somewhere else, or one that
 only computes.
 
-- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite`, `@std/zip` and
-  `@std/tar` are not available (`require` raises an error saying so), nor
-  what is built on them (`@std/server`, `@std/websocket`).
+- `@std/fs`, `@std/http`, `@std/net`, `@std/sqlite`, `@std/zip`,
+  `@std/tar` and `@std/watch` are not available (`require` raises an error
+  saying so), nor what is built on them (`@std/server`, `@std/websocket`).
 - `@std/process` keeps `args`, `platform`, `script`, `exit` and `sleep`;
   environment variables, the working directory and running commands are
   left out.
@@ -815,6 +815,112 @@ by default), `isAbsolute(p)`. `normalize`, `absolute` and `relative` leave
 no `/` at the end (but for a root's), and a path with nothing left is `.`,
 so `basename(absolute("."))` is the current directory's name. Paths come
 back with `/` on every platform, Windows included (which accepts them).
+
+### `@std/watch`
+
+Changes to files and directories as they happen, for a script that
+rebuilds on save or keeps a folder in sync. Each system's own
+notifications are used: inotify on Linux, FSEvents on macOS and
+`ReadDirectoryChangesW` on Windows (on other systems `new` is an error).
+The sandbox leaves the module out.
+
+| function | is |
+|---|---|
+| `new(path, options?): Watcher` | a watcher of `path`: a directory and everything under it (`options.recursive = false`: only its own entries), or a file; a path that is not there is an error naming it |
+
+A `Watcher` has `path` (the path watched, as given, without a `/` at its
+end), `closed` (true once it has stopped: closed, or its directory
+removed) and:
+
+| method | is |
+|---|---|
+| `next(seconds?): Event?` | the next change, waiting up to `seconds` for one (none: until there is one; 0: only one already there); `nil` when the time is up, and at once when the watcher has stopped and nothing is left |
+| `events()` | an iterator over the changes, `for (event in w:events()) { }`, which ends when the watcher stops |
+| `close()` | stops watching; a wait on the watcher in a task ends with `nil`. A watcher nothing refers to closes by itself |
+
+An `Event` (`watch.Event`) is `{ path: string, kind: watch.Kind, from: string? }`:
+
+| `kind` | means |
+|---|---|
+| `"created"` | `path` was made (a file or a directory), or moved in from outside what is watched |
+| `"modified"` | a file's contents or attributes changed (a directory is never reported as modified) |
+| `"removed"` | `path` was removed, or moved out of what is watched |
+| `"renamed"` | what was at `from` was renamed to `path`, both under what is watched; the one kind with `from` |
+| `"overflow"` | changes came faster than they could be kept, and some were lost: `path` is the watched path, to be looked over again (with `fs.walk`, say) |
+
+A changed path is the watched path joined with the path below it, with `/`
+between names on every platform, as `@std/path` and `@std/fs` give them:
+watching `"site"`, a change to `main.css` in its `css` directory is
+`site/css/main.css`. Watching a file, its events have the file's path as
+given.
+
+```
+const watch = require("@std/watch")
+const process = require("@std/process")
+
+// Runs the tests each time a source file is saved.
+const w = watch.new("src")
+for (event in w:events()) {
+	if (event.kind != "removed" and string.find(event.path, "%.cluau$") != nil) {
+		print(`{event.kind}: {event.path}`)
+		process.exec({ process.executable, "test" })
+		// A save comes as a few changes in a row, and the tests may write
+		// files too: what piled up meanwhile is let go.
+		while (w:next(0.2) != nil) {
+		}
+	}
+}
+```
+
+What a script can rely on, and what differs by system:
+
+- The changes made after `new` returns are reported, each path's in the
+  order they happened (but for what the points below say). A change made
+  just before may be reported too (FSEvents is a moment behind).
+- Notifications for the same path are merged while the script has not yet
+  taken them: another of the same kind is not added, nor a `"modified"`
+  for a file whose `"created"` is still unread. So a file written in many
+  steps gives one event, or a few when the script takes them as they come:
+  an event says to look at the path now, not how many times it changed.
+- Editors save in different ways: writing the file in place (`"modified"`),
+  writing a temporary file and renaming it over the file (`"created"` for
+  the temporary file, then `"renamed"` with the file as `path`), or
+  removing the file and writing it again (`"removed"`, then `"created"`).
+  Where what matters is that a file may have new contents, take
+  `"created"`, `"modified"` and `"renamed"` alike.
+- A file is watched through its directory, for its name, so all three
+  saves are seen; its `"renamed"` events are those to or from its name. A
+  watched file that is removed gives `"removed"` and the watcher goes on
+  (the file may come back, as `"created"`).
+- Removing the watched directory (or the directory of a watched file)
+  gives a `"removed"` event for the watched path, and then the watcher
+  stops: `closed` is true, and `next` gives what is left, then `nil`.
+- On Linux and Windows a rename's two names come from the system as a
+  pair. FSEvents reports each name on its own, and the watcher pairs them
+  by which one is there now. A rename that cannot be paired, and a move
+  into or out of what is watched, are `"created"` and `"removed"`.
+- FSEvents (macOS) merges what happens to a path within a moment into one
+  notification, and the order of its kinds is worked out from whether the
+  path is there now; it may report a change to a file made a moment
+  before as `"created"` again.
+- Windows reports a file's change as several notifications (its contents,
+  its times), merged when unread.
+- On Linux each directory under a watched one takes one of the system's
+  watches (`fs.inotify.max_user_watches`), and each watcher one inotify
+  instance (`fs.inotify.max_user_instances`, often 128); past either
+  limit, `new` is an error saying so. A directory made under a watched one
+  is watched once it is reported, and what it holds by then is reported as
+  created; a file made and removed in it before then is not seen.
+- A watcher keeps up to 65536 events the script has not taken; past that,
+  an `"overflow"` stands for those it let go.
+- A symbolic link may be watched (its target is); the links inside a
+  watched directory are reported as entries, not followed.
+- Files on a network share may change without a notification (from other
+  machines), as each system's documentation warns.
+- `next` and `events` wait as the standard library's other blocking calls
+  do (see [`@std/task`](#stdtask)): in a task, the task waits on its own
+  and the others run meanwhile; in the script's own code, the tasks run
+  until a change comes. A Ctrl-C ends the wait.
 
 ### `@std/process`
 
@@ -1899,15 +2005,17 @@ for (_, page in pages) {
 - The standard library's blocking calls wait on their own: `@std/http`'s
   requests and downloads, `@std/net`'s waits, `process.run` and `process.exec`, a child's
   `read`, `readLine`, `lines`, `write` and `wait`, `io.readLine`,
-  `io.readAll` and `input`, and `process.sleep`. In a task, the call runs
+  `io.readAll` and `input`, a watcher's `next` and `events` (`@std/watch`),
+  and `process.sleep`. In a task, the call runs
   on a thread of its own while the task waits, and the other tasks run meanwhile; in the
   script's own code, the tasks run until the call is done. So three
   downloads in three tasks take as long as the slowest, not the three
   together.
 - A task cancelled while such a call waits takes nothing from it: what
   a child's, standard input's or a socket's read got goes back for the
-  next read, and a connection `server:accept` got goes to the next accept
-  (or is closed with the server).
+  next read, a connection `server:accept` got goes to the next accept
+  (or is closed with the server), and a change a watcher's `next` got goes
+  to the next wait on the watcher.
 - A finished task keeps nothing once nothing refers to it, so a server
   that runs a task for each connection stays the same size.
 - Tasks still take turns over the script's own code: a long computation
