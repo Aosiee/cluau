@@ -2,6 +2,19 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.33.2: the Odd Fish Society License
+
+Licensing only; the language, the tools and the standard library are
+unchanged.
+
+- cluau is now under the Odd Fish Society License, the licence it shares
+  with kiln, hamr, loom, wisp, hearth and tmath: MIT plus a credit line.
+  A product that includes cluau, is written in cluau or is built with it
+  credits it as "Uses cluau - Copyright (c) 2026 Odd Fish Society / Felipe
+  Lara", and a product that uses several of these libraries can credit
+  them all in one line. The README says so, and the RPM package names
+  the licence.
+
 ## 0.33.1: the VS Code extension on the Marketplace
 
 - The VS Code extension's publisher is now `oddfishsociety`, its ID on the
