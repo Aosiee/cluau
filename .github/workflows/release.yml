@@ -426,17 +426,17 @@ jobs:
 
       - name: Notes from the tag
         env:
-          # The extension is on the Marketplace and Open VSX only when the
-          # token that publishes it there is set.
-          HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
-          HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+          # The stores the marketplaces job publishes the extension to (its
+          # token, or trusted publishing, for each).
+          VSCE: ${{ secrets.VSCE_PAT != '' || vars.MARKETPLACE_PUBLISHING == 'trusted' }}
+          OVSX: ${{ secrets.OVSX_PAT != '' || vars.OPEN_VSX_PUBLISHING == 'trusted' }}
         run: |
           stores=""
-          if [ "$HAS_VSCE_PAT" = true ] && [ "$HAS_OVSX_PAT" = true ]; then
+          if [ "$VSCE" = true ] && [ "$OVSX" = true ]; then
             stores=", also on the VS Code Marketplace and Open VSX"
-          elif [ "$HAS_VSCE_PAT" = true ]; then
+          elif [ "$VSCE" = true ]; then
             stores=", also on the VS Code Marketplace"
-          elif [ "$HAS_OVSX_PAT" = true ]; then
+          elif [ "$OVSX" = true ]; then
             stores=", also on Open VSX"
           fi
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
@@ -473,11 +473,19 @@ jobs:
           fi
 
   # The extension on the VS Code Marketplace and Open VSX, once the release
-  # is out. Each is published when its token is set (VSCE_PAT, OVSX_PAT).
+  # is out. Each store is published to with its token when one is set
+  # (VSCE_PAT, OVSX_PAT), or else by trusted publishing when the repository
+  # variable MARKETPLACE_PUBLISHING or OPEN_VSX_PUBLISHING is `trusted`:
+  # the store takes this workflow's GitHub identity token in place of one
+  # (each store's trusted publisher names this repository and release.yml).
+  # Open VSX takes a first version only with a token.
   marketplaces:
     needs: release
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         shell: bash
@@ -486,6 +494,8 @@ jobs:
     env:
       HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
       HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+      MARKETPLACE_PUBLISHING: ${{ vars.MARKETPLACE_PUBLISHING }}
+      OPEN_VSX_PUBLISHING: ${{ vars.OPEN_VSX_PUBLISHING }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -509,8 +519,16 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx vsce publish --packagePath "../../dist/cluau-vscode-$TAG.vsix" --pat "$VSCE_PAT"
 
+      - name: VS Code Marketplace (trusted publishing)
+        if: env.HAS_VSCE_PAT != 'true' && env.MARKETPLACE_PUBLISHING == 'trusted'
+        run: npx vsce publish --packagePath "../../dist/cluau-vscode-$TAG.vsix" --oidc
+
       - name: Open VSX
         if: env.HAS_OVSX_PAT == 'true'
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: npx ovsx publish "../../dist/cluau-vscode-$TAG.vsix" --pat "$OVSX_PAT"
+
+      - name: Open VSX (trusted publishing)
+        if: env.HAS_OVSX_PAT != 'true' && env.OPEN_VSX_PUBLISHING == 'trusted'
+        run: npx ovsx publish "../../dist/cluau-vscode-$TAG.vsix" --trusted-publishing
