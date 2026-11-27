@@ -1,0 +1,285 @@
+{"-dash": "plain", "explicit": "value", "list": ["at the key's column", "second"], "matrix": [[1, 2], [3, 4]], "name": "demo", "no value": null, "people": [{"age": 36, "name": "Ada"}, {"langs": ["en", "fr"], "name": "Bo"}], "server": {"host": "example.com", "ports": [80, 443]}}
+{"a": null, "b": null, "c": null, "d": null}
+[null, null, null]
+{"colons": {"a:b": null, "c": null, "d": null, "url": "http://example.com"}, "empty": [[], {}], "lines": ["one", "two", "three"], "map": {"a": 1, "b": null, "c": 3, "d": 4, "e": 5}, "pairs": [{"a": 1}, {"b": 2}, "c"], "seq": ["a", "b", ["c", "d"], {"e": "f"}]}
+{"folded": "this is one line\nand a second", "inner": "a#b a:b -x ?y", "top": ["-x", "a b c"]}
+"plain text over\n\nlines"
+{"escapes": "\u0000 \u0007 \b \t \t \n \u000b \f \r \u001b   \" / \\ \u0085 \u00A0 \u2028 \u2029 A é 😀 😀", "folded": "one two\nthree", "joined": "no space, then a space", "single": "it's # not a comment: really", "trailing": "a b"}
+{"clip": "\nleading empty line\n", "comment": "text\n", "folded": "folded text\nnew paragraph\n  kept as is\nback\n", "indicator": "  two more spaces\n", "keep": "all the breaks\n\n\n", "last": "end", "literal": "line one\n  indented\nline three\n", "strip": "no line break"}
+["top level\n", "folded at the top", "column zero\n", "indicator from column 0\n"]
+[{"a": 1}, ["second"], "third", null]
+["reserved directives are passed over"]
+[]
+[]
+[]
+true	true	true
+{"again": 3, "base": {"x": 1, "y": 2}, "copy": {"x": 1, "y": 2}, "k": "k", "last": 3, "list": ["one", "one"]}	true
+{"booleans": [true, true, true, false, false, false, "yes", "no", "on", "off", "y", "n", "tRUE"], "empty": {"a": null, "b": null, "c": "", "d": ""}, "floats": [1.5, -1.5, 0.5, -0.5, 0.5, 1, 1000, 0.001, -25000000000, 0, -0, inf], "integers": [0, 0, 12, 12, -12, 12, 15, 31, 255, 9007199254740992, -9007199254740992], "nulls": [null, null, null, null, "nULL"], "special": [inf, inf, inf, -inf, inf, nan, nan, nan], "strings": ["1_000", "0b101", "12:30", "2001-12-14", "0o8", "0xg", ".infinity", "-.nan", "1.2.3", "0x", "1e", "1", "2"]}
+{"binary": "aGVsbG8=", "bool": true, "emptystr": "", "float": 1, "hex": 16, "inf": inf, "int": 12, "local": "12", "map": {"a": 1}, "nonspecific": "12", "nothing": null, "seq": ["a"], "set": {"a": null, "b": null}, "str": "12", "verbatim": 7}
+[5, "5"]
+6
+number	text	boolean	float	true
+{"a":null,"b":[1,null,3],"c":{},"d":[]}
+{"a": 1, "b": "x\ny\n", "c": "p q"}
+{"a": 1, "b": 2}
+yaml.decodeAll: the key 'a' is in the mapping twice (line 2, column 1)
+yaml.decodeAll: the key 1 is in the mapping twice (line 2, column 1)
+yaml.decodeAll: the key 'a' is in the mapping twice (line 1, column 8)
+yaml.decodeAll: a key is a scalar: a sequence or mapping as a key (a complex key) is not supported (line 1, column 1)
+yaml.decodeAll: a key is a scalar: a sequence or mapping as a key (a complex key) is not supported (line 1, column 1)
+yaml.decodeAll: a key is a scalar: a sequence or mapping as a key (a complex key) is not supported (line 1, column 2)
+yaml.decodeAll: a key is null, which a table cannot hold (line 1, column 1)
+yaml.decodeAll: a key is null, which a table cannot hold (line 1, column 1)
+yaml.decodeAll: a block mapping starts on a line of its own, not on the line of a key ('a: b: c') or of --- (line 1, column 5)
+yaml.decodeAll: a block sequence or mapping starts on a line of its own, not on the line of a key or of --- (line 1, column 6)
+yaml.decodeAll: a block mapping starts on a line of its own, not on the line of a key ('a: b: c') or of --- (line 1, column 6)
+yaml.decodeAll: a block sequence or mapping starts on a line of its own, not on the line of a key or of --- (line 1, column 5)
+yaml.decodeAll: a key and its ':' are on one line (line 1, column 4)
+yaml.decodeAll: expected a key at column 1, found 'y' indented more (line 3, column 3)
+yaml.decodeAll: expected the end of the document, found 'b' (line 2, column 1)
+yaml.decodeAll: a key and its ':' are on one line (line 1, column 1)
+yaml.decodeAll: a key and its ':' are on one line (line 1, column 6)
+yaml.decodeAll: a flow sequence has no closing ']' (line 1, column 1)
+yaml.decodeAll: a flow mapping has no closing '}' (line 1, column 1)
+yaml.decodeAll: expected a value before ',' (line 1, column 5)
+yaml.decodeAll: expected the end of the line, found 'b' (line 1, column 5)
+yaml.decodeAll: expected ',' or '}' in a flow mapping, found ':' (line 1, column 8)
+yaml.decodeAll: a document marker (--- or ...) inside a flow sequence (line 2, column 1)
+yaml.decodeAll: a quoted string has no closing quote (line 1, column 1)
+yaml.decodeAll: a double-quoted string has no closing quote (line 1, column 1)
+yaml.decodeAll: \'q' is not an escape (line 1, column 6)
+yaml.decodeAll: \x takes 2 hexadecimal digits (line 1, column 2)
+yaml.decodeAll: '\ud800' is not a Unicode character (line 1, column 2)
+yaml.decodeAll: a document marker (--- or ...) inside a quoted string (line 2, column 1)
+yaml.decodeAll: a block scalar's indentation indicator is 1 to 9 (line 1, column 5)
+yaml.decodeAll: expected the end of the line after the block scalar's header ('|' or '>' and its indicators), found 'x' (line 1, column 5)
+yaml.decodeAll: a comment is separated by a space from what is before it (line 3, column 7)
+yaml.decodeAll: the alias *nothing names no anchor (&nothing comes before its aliases) (line 1, column 1)
+yaml.decodeAll: the alias *a is inside the node it names (line 1, column 5)
+yaml.decodeAll: the alias *b names no anchor (&b comes before its aliases) (line 1, column 4)
+yaml.decodeAll: 'abc' is not an integer (!!int) (line 1, column 7)
+yaml.decodeAll: '1.2.3' is not a number (!!float) (line 1, column 9)
+yaml.decodeAll: 'yes' is not a boolean (!!bool is true or false) (line 1, column 8)
+yaml.decodeAll: 'x' is not null (!!null is null, Null, NULL, ~ or nothing) (line 1, column 8)
+yaml.decodeAll: !!map is on a sequence (line 1, column 7)
+yaml.decodeAll: !!seq is on a mapping (line 1, column 7)
+yaml.decodeAll: !!str is on a sequence (line 1, column 7)
+yaml.decodeAll: 'x' is not an integer (!!int) (line 1, column 7)
+yaml.decodeAll: the tag handle !x! is not declared (a %TAG directive declares it) (line 1, column 1)
+yaml.decodeAll: the tag !! has no name after it (line 1, column 1)
+yaml.decodeAll: a node has two anchors (line 1, column 4)
+yaml.decodeAll: a node has two tags (line 1, column 7)
+yaml.decodeAll: '9007199254740993' is past 2^53, the largest integer a number holds exactly (line 1, column 1)
+yaml.decodeAll: '-9007199254740993' is past 2^53, the largest integer a number holds exactly (line 1, column 1)
+yaml.decodeAll: '0x20000000000001' is past 2^53, the largest integer a number holds exactly (line 1, column 1)
+yaml.decodeAll: %YAML 2.0 is not a version this reads (1.x) (line 1, column 1)
+yaml.decodeAll: a document has two %YAML directives (line 2, column 1)
+yaml.decodeAll: %TAG declares !a! twice (line 2, column 1)
+yaml.decodeAll: directives are followed by a document, which starts with --- (line 2, column 1)
+yaml.decodeAll: directives are followed by a document, which starts with --- (line 2, column 1)
+yaml.decodeAll: expected the end of the document, found '%' (line 2, column 1)
+yaml.decodeAll: a tab in the indentation (YAML indents with spaces) (line 2, column 1)
+yaml.decodeAll: the control character U+0001 is not allowed in YAML text (a double-quoted string holds it as an escape) (line 1, column 5)
+yaml.decodeAll: the control character U+009F is not allowed in YAML text (a double-quoted string holds it as an escape) (line 1, column 4)
+yaml.decodeAll: the text is not UTF-8 (line 1, column 5)
+yaml.decodeAll: expected the end of the line, found 'y' (line 1, column 8)
+yaml.decodeAll: '@' cannot start a value (line 1, column 1)
+yaml.decodeAll: '`' cannot start a value (line 1, column 1)
+yaml.decodeAll: expected a key at column 1, found 'b' indented more (line 3, column 2)
+false	yaml.decode: the text holds more than one document (yaml.decodeAll reads them all) (line 2, column 1)
+false	yaml.decode: the text holds more than one document (yaml.decodeAll reads them all) (line 2, column 1)
+yaml.decode: collections nest more than 1000 deep (line 1, column 1001)
+yaml.decode: collections nest more than 1000 deep (line 1, column 2001)
+yaml.decode: the aliases stand for more than 1000000 nodes in all (line 6, column 36)
+true: "yes"
+1: one
+2.5: two and a half
+empty: {}
+emptyList: []
+matrix:
+  - - 1
+    - 2
+  - - 3
+    - - 4
+name: demo
+nothing: null
+people:
+  - age: 36
+    name: Ada
+  - langs:
+      - en
+      - fr
+    name: Bo
+server:
+  host: example.com
+  ports:
+    - 80
+    - 443
+
+- "yes"
+- "no"
+- "on"
+- "Off"
+- "y"
+- "true"
+- "False"
+- "null"
+- "~"
+- ""
+- " lead"
+- "trail "
+- "1"
+- "1.0"
+- "-1"
+- "+1"
+- ".5"
+- "1e3"
+- "0x1F"
+- "0o17"
+- "012"
+- "1_000"
+- "12:30"
+- "2001-12-14"
+- ".inf"
+- ".nan"
+- "<<"
+- "="
+- "-"
+- "- x"
+- -x
+- "?"
+- "? x"
+- ?x
+- ":"
+- ": x"
+- :x
+- "a: b"
+- a:b
+- "a #b"
+- a#b
+- "a:"
+- "#x"
+- "&a"
+- "*a"
+- "!a"
+- "|"
+- ">"
+- "'q'"
+- "\"q\""
+- "%x"
+- "@x"
+- "`x"
+- "[x]"
+- "{x}"
+- ",x"
+- x,y
+- x[y]
+- "---"
+- "--- x"
+- "..."
+- "...x"
+- plain text
+- é 日本 😀
+- "tab\there"
+- "bell\a"
+- "nul\0"
+- "esc\e"
+- "del\x7F"
+- "\Nnel"
+-  nbsp
+- "\Lls"
+- "\uFEFFbom"
+- "\x9Fc1"
+- "cr\rhere"
+- \backslash
+- quote"s
+
+blankInside: |
+  a
+
+    
+  b
+clip: |
+  one
+  two
+crlf: "a\r\nb\n"
+escapes: "a\nb\x01\n"
+indented: |2
+    starts with spaces
+  then not
+keep: |+
+  one
+  two
+
+
+leadingBreak: |
+
+
+  after breaks
+nested:
+  - |
+    item
+    with a break
+  - inner: |-
+      x
+      y
+onlyBreaks: "\n\n"
+strip: |-
+  one
+  two
+tabbed: |
+  	x
+  y
+
+- 0.1
+- 0.3333333333333333
+- 1.0e+300
+- 1.0e-300
+- 5.0e-324
+- 9007199254740992
+- 9007199254740994.0
+- -1.152921504606847e+18
+- 123456.789
+- -0.0
+- 0
+- .inf
+- -.inf
+- .nan
+
+top level
+
+|
+  two
+  lines
+
+"  indented\nat the top\n"
+
+42
+	null
+	null
+	true
+	{}
+	[]
+
+a:
+    b:
+        - c
+        -   d: 1
+
+true
+1: a
+2: b
+	- a
+- b
+
+yaml.encode: a.b[3] is a function, which YAML has no form for
+yaml.encode: self.inner is a table that holds itself (a cycle)
+yaml.encode: the value has a key that is not UTF-8 text
+yaml.encode: text is not UTF-8 text
+yaml.encode: the value has a key that is a table (a key is text, a number or a boolean)
+yaml.encode: the value is marked as a sequence (json.array) but has keys other than 1 to n
+yaml.encode: the value is a thread, which YAML has no form for
+yaml.encode: options.indent is a whole number from 2 to 9
+yaml.encode: options.indent is a whole number from 2 to 9
+500 of 500 random values round-trip
+exit: 0

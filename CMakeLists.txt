@@ -344,7 +344,7 @@ if(CLUAU_BUILD_RUNTIME)
         option(CLUAU_FUZZ "Build the fuzz targets (clang's libFuzzer)" OFF)
         if(CLUAU_FUZZ)
             # Only the targets whose module this build has.
-            set(cluau_fuzz_targets translate base64 json csv toml)
+            set(cluau_fuzz_targets translate base64 json csv toml yaml)
             if(CLUAU_COMPRESS)
                 list(APPEND cluau_fuzz_targets gunzip inflate zip)
             endif()
