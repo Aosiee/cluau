@@ -2,8 +2,8 @@
 	"name": "cluau",
 	"displayName": "cluau",
 	"description": "cluau, C-syntax-flavoured Luau: highlighting, the checker's errors, completion, hover and navigation as you type, and the debugger.",
-	"version": "0.33.0",
-	"publisher": "odd-fish-society",
+	"version": "0.33.1",
+	"publisher": "oddfishsociety",
 	"license": "SEE LICENSE IN LICENSE",
 	"repository": {
 		"type": "git",

@@ -2,6 +2,14 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.33.1: the VS Code extension on the Marketplace
+
+- The VS Code extension's publisher is now `oddfishsociety`, its ID on the
+  Visual Studio Marketplace, so the release publishes it there. 0.33.0's
+  extension was not published there, because it named a publisher the
+  Marketplace does not have; its `.vsix` on the release page still
+  installs by hand.
+
 ## 0.33.0: workers, file watching, YAML, UUIDs and semantic versions
 
 Five new standard modules:
