@@ -1,0 +1,20 @@
+yaml.cluau:5:7: Type 'unknown' does not have key 'port'
+yaml.cluau:6:1: Expected this to be 'number', but got 'unknown'
+yaml.cluau:7:1: Expected this to be exactly '{string}', but got '{unknown}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'string', but got 'unknown'
+yaml.cluau:8:24: Expected this to be 'Options?', but got '{| indent: string |}'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly 'Options', but got '{| indent: string |}'
+caused by:
+  Property 'indent' is not compatible.
+Expected this to be exactly 'number?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be exactly 'number', but got 'string'
+yaml.cluau:9:1: Expected this to be 'number', but got 'string'
+yaml.cluau:10:13: Expected this to be 'string', but got 'number'
+cluau check: 6 error(s), 0 warning(s)
+exit: 1

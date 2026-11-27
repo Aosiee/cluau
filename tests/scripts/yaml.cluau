@@ -1,0 +1,475 @@
+// @std/yaml: block and flow collections, every scalar style, comments,
+// documents and directives, anchors and aliases, the core schema and tags;
+// the errors malformed documents raise, with their positions; and encode's
+// output, its round trips and its errors.
+const yaml = require("@std/yaml")
+const json = require("@std/json")
+
+type Table = { [unknown]: unknown }
+
+const objectMark = getmetatable(json.object())
+
+// A value as one line: mappings with their keys sorted, null as null.
+function Dump(value: unknown): string {
+	if (value == yaml.null) {
+		return "null"
+	}
+	if (type(value) == "number") {
+		if (value != value) {
+			return "nan"
+		}
+		if (value == math.floor(value) && math.abs(value) <= 2 ^ 53) {
+			return if (value == 0 && 1 / value < 0) "-0" else string.format("%d", value)
+		}
+		return string.format("%.17g", value)
+	}
+	if (type(value) == "string") {
+		// Characters past ASCII that print as nothing, written as escapes.
+		return (string.gsub(json.encode(value), "[\194\226\239][\128-\191]+", function(c: string): string {
+			const code = utf8.codepoint(c)
+			return if (code < 0xA1 || (code >= 0x2028 && code <= 0x2029) || code == 0xFEFF) string.format("\\u%04X", code) else c
+		}))
+	}
+	if (type(value) != "table") {
+		return tostring(value)
+	}
+	const t = value :: Table
+	let count = 0
+	for (_ in t) {
+		count += 1
+	}
+	if (getmetatable(value) != objectMark && count == #(t :: { unknown })) {
+		const items: { string } = {}
+		for (_, item in t :: { unknown }) {
+			table.insert(items, Dump(item))
+		}
+		return "[" .. table.concat(items, ", ") .. "]"
+	}
+	const entries: { string } = {}
+	for (key, item in t) {
+		table.insert(entries, `{Dump(key)}: {Dump(item)}`)
+	}
+	table.sort(entries)
+	return "{" .. table.concat(entries, ", ") .. "}"
+}
+
+function Show(text: string) {
+	print(Dump(yaml.decode(text)))
+}
+
+function ShowAll(text: string) {
+	print(Dump(yaml.decodeAll(text)))
+}
+
+function Fails(text: string) {
+	const ok, message = pcall(yaml.decodeAll, text)
+	print(if (ok) `decoded {json.encode(text)}` else message)
+}
+
+// Block mappings and sequences: nesting, a sequence at its key's column,
+// the compact forms ("- a: 1", "- - x", "- ? k"), explicit keys.
+Show([==[
+name: demo
+server:
+  host: example.com
+  ports:
+    - 80
+    - 443
+list:
+- at the key's column
+- second
+people:
+  - name: Ada
+    age: 36
+  - name: Bo
+    langs: [en, fr]
+matrix:
+  - - 1
+    - 2
+  -   - 3
+      - 4
+? explicit
+: value
+? no value
+-dash: plain
+]==])
+
+// Empty values are null, which keeps their keys.
+Show("a:\nb: ~\nc: # comment\nd: null\n")
+Show("- \n-\n- ~\n")
+
+// Flow collections: nested, over lines with comments and trailing commas,
+// single pairs in a sequence, keys with no value, JSON-like keys before a
+// ':' with no space, explicit keys, and YAML 1.2's plain scalars with ':'.
+Show([==[
+seq: [a, b, [c, d], {e: f}]
+map: {a: 1, b, "c":3, 'd':  4, ? e : 5}
+pairs: [a: 1, b: 2, c]
+lines: [
+  one,   # first
+  two,
+  # a comment of its own
+  three,
+]
+empty: [[], {}]
+colons: {a:b, url: http://example.com, c:, d: }
+]==])
+
+// Plain scalars: folded over lines (an empty line is a line break), a '#'
+// or ':' that is not after a space or before one is text.
+Show([==[
+folded: this is
+  one line
+
+  and a second
+inner: a#b a:b -x ?y
+top: [-x, a b c]
+]==])
+Show("plain\ntext over\n\n\nlines\n")
+
+// Quoted scalars: '' in single quotes, every escape in double quotes, a
+// backslash ending a line, folding.
+Show([==[
+single: 'it''s # not a comment: really'
+folded: 'one
+  two
+
+  three'
+escapes: "\0 \a \b \t \	 \n \v \f \r \e \  \" \/ \\ \N \_ \L \P \x41 \u00e9 \U0001F600 \ud83d\ude00"
+joined: "no \
+  space, then
+  a space"
+trailing: "a
+  b"
+]==])
+
+// Block scalars: literal and folded, clipped, stripped and kept, with an
+// indentation indicator, more-indented lines (kept as they are when
+// folded), leading and trailing empty lines, and a comment after.
+Show([==[
+literal: |
+  line one
+    indented
+  line three
+folded: >
+  folded
+  text
+
+  new paragraph
+    kept as is
+  back
+strip: |-
+  no line break
+keep: |+
+  all the breaks
+
+
+clip: >
+
+  leading empty line
+indicator: |2
+    two more spaces
+comment: | # a comment
+  text
+# not part of it
+last: >-
+  end
+]==])
+ShowAll("--- |\n  top level\n--- >-\n folded\n at the top\n--- |\ncolumn zero\n--- |2\n  indicator from column 0\n")
+
+// Comments, document markers, several documents, directives.
+ShowAll([==[
+# a comment before
+%YAML 1.2
+%TAG !e! tag:example.com,2000:
+--- # the first
+a: 1
+...
+%YAML 1.1
+---
+- second
+--- third
+---
+...
+# after everything
+]==])
+ShowAll("%RESERVED something\n--- reserved directives are passed over\n")
+ShowAll("")
+ShowAll("# only a comment\n")
+ShowAll("...\n")
+print(yaml.decode("") == yaml.null, yaml.decode("~") == yaml.null, yaml.decode("--- \n...") == yaml.null)
+
+// Anchors and aliases: an alias to a table is that table; one to a scalar
+// its value; an anchor on a key; an anchor given again names the new node.
+const shared = yaml.decode([==[
+base: &base {x: 1, y: 2}
+copy: *base
+list:
+  - &item one
+  - *item
+&key k: *key
+again: &base 3
+last: *base
+]==]) :: Table
+print(Dump(shared), rawequal(shared.base, shared.copy))
+
+// The core schema: null, booleans (three spellings only), integers
+// (decimal, 0o, 0x), floats, and strings otherwise (YAML 1.1's yes, 0777
+// octals, 1_000, 12:30 and dates among them).
+Show([==[
+nulls: [~, null, Null, NULL, nULL]
+empty: {a: , b: !!null , c: !!str , d: !!str}
+booleans: [true, True, TRUE, false, False, FALSE, yes, no, on, off, y, n, tRUE]
+integers: [0, -0, 12, +12, -12, 012, 0o17, 0x1F, 0xff, 9007199254740992, -9007199254740992]
+floats: [1.5, -1.5, .5, -.5, +.5, 1., 1e3, 1E-3, -2.5e+10, 0.0, -0.0, 1e400]
+special: [.inf, .Inf, .INF, -.inf, +.inf, .nan, .NaN, .NAN]
+strings: [1_000, 0b101, 12:30, 2001-12-14, 0o8, 0xg, .infinity, -.nan, 1.2.3, 0x, 1e, "1", '2']
+]==])
+
+// Tags: the core schema's, a non-specific '!' (a string), a local tag and
+// a verbatim one (the content as it is), a %TAG handle.
+Show([==[
+str: !!str 12
+int: !!int "12"
+hex: !!int 0x10
+float: !!float 1
+inf: !!float .inf
+bool: !!bool 'true'
+nothing: !!null
+emptystr: !!str
+seq: !!seq [a]
+map: !!map {a: 1}
+nonspecific: ! 12
+local: !thing 12
+verbatim: !<tag:yaml.org,2002:int> "7"
+binary: !!binary aGVsbG8=
+set: !!set {a, b}
+]==])
+Show("%TAG !c! tag:yaml.org,2002:\n---\n- !c!int '5'\n- !c!str 5\n")
+Show("%TAG ! tag:yaml.org,2002:\n---\n!int '6'\n")
+
+// Keys: numbers and booleans are keys of those types ("1" and 1 are two
+// keys); a key with a null value stays.
+const keyed = yaml.decode("1: number\n\"1\": text\ntrue: boolean\n1.5: float\nnothing: ~\n") :: Table
+print(keyed[1], keyed["1"], keyed[true], keyed[1.5], keyed.nothing == yaml.null)
+print(json.encode(yaml.decode("a: ~\nb: [1, ~, 3]\nc: {}\nd: []\n")))
+
+// Line breaks as \r\n or \r, a byte order mark.
+Show("\u{FEFF}a: 1\r\nb: |\r\n  x\r\n  y\r\nc: 'p\r\n  q'\r\n")
+Show("a: 1\rb: 2\r")
+
+// Errors, with the line and column of what is wrong.
+Fails("a: 1\na: 2\n")
+Fails("1: x\n1.0: y\n")
+Fails("{a: 1, a: 2}")
+Fails("? [a, b]\n: c\n")
+Fails("[a, b]: c\n")
+Fails("{[a]: b}")
+Fails("~: x\n")
+Fails("? \n: x\n")
+Fails("a: b: c\n")
+Fails("key: - item\n")
+Fails("--- a: b\n")
+Fails("--- - x\n")
+Fails("a: 1\n  b: 2\n")
+Fails("a:\n  - x\n  y: 1\n")
+Fails("- a\nb: 1\n")
+Fails("a\nb: c\n")
+Fails("key: \"multi\n  line\": value\n")
+Fails("[a, b\n")
+Fails("{a: 1\n")
+Fails("[a, , b]")
+Fails("[a] b")
+Fails("{a: 1 b: 2}")
+Fails("[\n---\n]")
+Fails("'unclosed\n")
+Fails("\"unclosed")
+Fails("\"bad \\q escape\"")
+Fails("\"\\x4\"")
+Fails("\"\\ud800\"")
+Fails("\"a\n---\nb\"")
+Fails("a: |0\n  x\n")
+Fails("a: |x\n")
+Fails("a: 1 # ok\nb: 2# not a comment, and then\nc: \"x\"# no space\n")
+Fails("*nothing\n")
+Fails("&a [*a]\n")
+Fails("&a *b\n")
+Fails("!!int abc\n")
+Fails("!!float 1.2.3\n")
+Fails("!!bool yes\n")
+Fails("!!null x\n")
+Fails("!!map [a]\n")
+Fails("!!seq {a: 1}\n")
+Fails("!!str [a]\n")
+Fails("!!int x: 1\n")
+Fails("!x!y z\n")
+Fails("!! z\n")
+Fails("&a &b x\n")
+Fails("!!str !!int x\n")
+Fails("9007199254740993\n")
+Fails("-9007199254740993\n")
+Fails("0x20000000000001\n")
+Fails("%YAML 2.0\n---\nx\n")
+Fails("%YAML 1.2\n%YAML 1.2\n---\nx\n")
+Fails("%TAG !a! x:\n%TAG !a! y:\n---\nx\n")
+Fails("%YAML 1.2\nx\n")
+Fails("%YAML 1.2\n")
+Fails("[a]\n%YAML 1.2\n---\nb\n")
+Fails("a: 1\n\tb: 2\n")
+Fails("a: \"\1\"\n")
+Fails("a: \u{9F}\n")
+Fails("a: \"\255\"\n")
+Fails("é: \"x\" y\n")
+Fails("@x\n")
+Fails("`x\n")
+Fails("a: |\n  x\n b\n")
+print(pcall(yaml.decode, "a\n---\nb\n"))
+print(pcall(yaml.decode, "a\n---\n"))
+print(select(2, pcall(yaml.decode, string.rep("[", 1001))))
+print(select(2, pcall(yaml.decode, string.rep("- ", 1001) .. "x")))
+
+// An alias bomb: each level ten aliases of the one before, a billion
+// nodes at the last, is refused.
+const bomb: { string } = { "a: &a [x, x, x, x, x, x, x, x, x, x]" }
+for (level = 2, 9) {
+	const name = string.char(96 + level)
+	const before = string.char(95 + level)
+	const items = string.rep(`*{before}, `, 9) .. `*{before}`
+	table.insert(bomb, `{name}: &{name} [{items}]`)
+}
+print(select(2, pcall(yaml.decode, table.concat(bomb, "\n"))))
+
+// Encoding: block style, keys sorted (false, true, numbers, then text),
+// strings quoted when they would read as something else, line breaks as
+// literal blocks, floats written to read back exactly.
+const sample: Table = {
+	name = "demo",
+	server = { host = "example.com", ports = { 80, 443 } },
+	people = { { name = "Ada", age = 36 } :: unknown, { name = "Bo", langs = { "en", "fr" } } },
+	matrix = { { 1, 2 } :: unknown, { 3 :: unknown, { 4 } } },
+	empty = {},
+	emptyList = json.array(),
+	nothing = yaml.null,
+	[1] = "one",
+	[2.5] = "two and a half",
+	[true] = "yes",
+}
+print(yaml.encode(sample))
+print(yaml.encode({
+	"yes", "no", "on", "Off", "y", "true", "False", "null", "~", "", " lead", "trail ",
+	"1", "1.0", "-1", "+1", ".5", "1e3", "0x1F", "0o17", "012", "1_000", "12:30", "2001-12-14", ".inf", ".nan",
+	"<<", "=", "-", "- x", "-x", "?", "? x", "?x", ":", ": x", ":x", "a: b", "a:b", "a #b", "a#b", "a:",
+	"#x", "&a", "*a", "!a", "|", ">", "'q'", "\"q\"", "%x", "@x", "`x", "[x]", "{x}", ",x", "x,y", "x[y]",
+	"---", "--- x", "...", "...x", "plain text", "é 日本 😀",
+	"tab\there", "bell\7", "nul\0", "esc\27", "del\127", "\u{85}nel", "\u{A0}nbsp", "\u{2028}ls", "\u{FEFF}bom", "\u{9F}c1",
+	"cr\rhere", "\\backslash", "quote\"s",
+}))
+const blocks: Table = {
+	clip = "one\ntwo\n",
+	strip = "one\ntwo",
+	keep = "one\ntwo\n\n\n",
+	indented = "  starts with spaces\nthen not\n",
+	leadingBreak = "\n\nafter breaks\n",
+	blankInside = "a\n\n  \nb\n",
+	tabbed = "\tx\ny\n",
+	onlyBreaks = "\n\n",
+	escapes = "a\nb\1\n",
+	crlf = "a\r\nb\n",
+	nested = { "item\nwith a break\n" :: unknown, { inner = "x\ny" } },
+}
+print(yaml.encode(blocks))
+print(yaml.encode({ 0.1, 1 / 3, 1e300, 1e-300, 5e-324, 2 ^ 53, 2 ^ 53 + 2, -(2 ^ 60), 123456.789, -0.0, 0, math.huge, -math.huge, 0 / 0 }))
+print(yaml.encode("top level"))
+print(yaml.encode("two\nlines\n"))
+print(yaml.encode("  indented\nat the top\n"))
+print(yaml.encode(42), yaml.encode(yaml.null), yaml.encode(nil), yaml.encode(true), yaml.encode({}), yaml.encode(json.array()))
+const deep: Table = { a = { b = { "c" :: unknown, { d = 1 } } } }
+print(yaml.encode(deep, { indent = 4 }))
+print(yaml.encode({ [string.rep("k", 1001)] = { 1 } }) == "? " .. string.rep("k", 1001) .. "\n:\n  - 1\n")
+// A mapping whose keys are 1 to n stays a mapping when it was decoded as
+// one (decoded mappings are marked as json.object marks them).
+print(yaml.encode(yaml.decode("1: a\n2: b\n")), yaml.encode({ "a", "b" }))
+
+// What encode cannot write is an error naming where it is.
+function EncodeFails(value: unknown, options: yaml.Options?) {
+	const ok, message = pcall(yaml.encode, value, options)
+	print(if (ok) "encoded" else message)
+}
+const withFunction: Table = { a = { b = { 1 :: unknown, 2, print } } }
+EncodeFails(withFunction)
+const cycle: Table = {}
+cycle.self = { inner = cycle }
+EncodeFails(cycle)
+EncodeFails({ ["bad\255"] = 1 })
+EncodeFails({ text = "bad\255" })
+EncodeFails({ [{}] = 1 })
+EncodeFails(json.array({ x = 1 }))
+EncodeFails(coroutine.create(print))
+EncodeFails({ 1 }, { indent = 1 })
+EncodeFails({ 1 }, { indent = 2.5 })
+
+// Round trips: encode then decode gives back an equal value.
+function Equal(a: unknown, b: unknown): boolean {
+	if (type(a) == "number" && type(b) == "number") {
+		return a == b || (a != a && b != b)
+	}
+	if (type(a) != "table" || type(b) != "table") {
+		return a == b
+	}
+	const ta = a :: Table
+	const tb = b :: Table
+	for (key, item in ta) {
+		if (!Equal(item, tb[key])) {
+			return false
+		}
+	}
+	for (key in tb) {
+		if (ta[key] == nil) {
+			return false
+		}
+	}
+	return true
+}
+const pieces = {
+	"a", "yes", "No", "null", "~", "", " ", "1", "1.0", "-.5", "0x1F", "012", "1_000", "<<", "-", "---", ":", ": ",
+	" #", "#", "?", "[", "{", ",", "&", "*", "!", "|", ">", "'", "\"", "%", "@", "\\", "\t", "\n", "\r", "\0", "\127",
+	"é", "😀", "\u{85}", "\u{2028}", "\u{FEFF}", "x y", "a: b", "- x", "trail ", " lead",
+}
+math.randomseed(20261126)
+function RandomValue(depth: number): unknown {
+	const k = math.random(1, 10)
+	if (depth > 3 || k <= 4) {
+		const parts: { string } = {}
+		for (_ = 1, math.random(0, 4)) {
+			table.insert(parts, pieces[math.random(1, #pieces)])
+		}
+		return table.concat(parts)
+	}
+	if (k == 5) {
+		return ({ math.random(-1000, 1000), math.random() * 10 ^ math.random(-300, 300), -0.0, 2 ^ 53, math.huge, 0 / 0 })[math.random(1, 6)]
+	}
+	if (k == 6) {
+		return if (math.random(1, 3) == 1) yaml.null else math.random(1, 2) == 1
+	}
+	const t: Table = {}
+	for (i = 1, math.random(0, 4)) {
+		if (k <= 8) {
+			t[i] = RandomValue(depth + 1)
+		} else {
+			const key = RandomValue(4)
+			t[if (math.random(1, 4) == 1) i * 1.5 else key] = RandomValue(depth + 1)
+		}
+	}
+	return t
+}
+let same = 0
+for (_ = 1, 500) {
+	const value = RandomValue(0)
+	const text = yaml.encode(value, { indent = math.random(2, 9) })
+	if (Equal(value, yaml.decode(text))) {
+		same += 1
+	} else {
+		print("did not round-trip:", text)
+	}
+}
+print(`{same} of 500 random values round-trip`)

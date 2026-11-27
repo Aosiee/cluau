@@ -17,6 +17,7 @@ const modules: { unknown } = {
 	require("@std/toml"),
 	require("@std/url"),
 	require("@std/uuid"),
+	require("@std/yaml"),
 }
 const added: { string } = {}
 for (name in pairs(globals)) {

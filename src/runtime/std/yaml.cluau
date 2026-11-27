@@ -1,0 +1,1856 @@
+// @std/yaml: YAML 1.2 documents (https://yaml.org/spec/1.2.2/) read into
+// tables and written back.
+//
+//   const yaml = require("@std/yaml")
+//   const config = yaml.decode("name: demo\nserver:\n  port: 8080\n") :: { name: string, server: { port: number } }
+//   print(config.name, config.server.port)   // demo 8080
+//   print(yaml.encode({ name = "demo", server = { port = 8080 } }))
+//
+// Values are read with the 1.2 core schema: null, booleans (true and false,
+// not 1.1's yes and no), integers, floats and strings. Null is json.null,
+// so a key whose value is null stays in its table. Mappings decode marked
+// as json.object marks a table and empty sequences as json.array marks
+// one, so either encodes (as YAML or JSON) as what it was.
+
+const json = require("@std/json")
+
+export type Options = { indent: number? }
+
+type Table = { [unknown]: unknown }
+type Failure = { message: string, where: string }
+// An anchor (&name) and a tag (!tag) written before a node, where they
+// were, and how many nodes had been read by then.
+type Props = { anchor: string?, tag: string?, at: number, before: number }
+// What an anchor names, and how many nodes it is (its aliases counted as
+// what they stand for); open while its own node is being read.
+type Anchor = { value: unknown, size: number, open: boolean }
+// How a node was written, which decides how its tag and the schema read
+// it: "empty" is a node with no content (null, or "" with !!str).
+type Kind = "plain" | "quoted" | "block" | "empty" | "seq" | "map" | "alias"
+
+const kNull: unknown = json.null
+const kObjectMark = getmetatable(json.object())
+const kArrayMark = getmetatable(json.array())
+
+const kSpace = string.byte(" ")
+const kTab = string.byte("\t")
+const kNewline = string.byte("\n")
+const kHash = string.byte("#")
+const kColon = string.byte(":")
+const kDash = string.byte("-")
+const kPlus = string.byte("+")
+const kDot = string.byte(".")
+const kQuestion = string.byte("?")
+const kComma = string.byte(",")
+const kOpen = string.byte("[")
+const kClose = string.byte("]")
+const kBrace = string.byte("{")
+const kBraceClose = string.byte("}")
+const kQuote = string.byte("\"")
+const kApostrophe = string.byte("'")
+const kBackslash = string.byte("\\")
+const kAmpersand = string.byte("&")
+const kStar = string.byte("*")
+const kBang = string.byte("!")
+const kPipe = string.byte("|")
+const kGreater = string.byte(">")
+const kPercent = string.byte("%")
+const kDepth = 1000
+const kAliasNodes = 1000000
+const kExact = 2 ^ 53
+const kCore = "tag:yaml.org,2002:"
+
+// The characters a plain scalar cannot start with (`-`, `?` and `:` can,
+// before a character that is not a space).
+const kIndicators: { [number]: boolean } = {}
+for (i = 1, #",[]{}#&*!|>'\"%@`") {
+	kIndicators[string.byte(",[]{}#&*!|>'\"%@`", i)] = true
+}
+
+const kNullWords: { [string]: boolean } = { ["~"] = true, ["null"] = true, ["Null"] = true, ["NULL"] = true }
+const kTrueWords: { [string]: boolean } = { ["true"] = true, ["True"] = true, ["TRUE"] = true }
+const kFalseWords: { [string]: boolean } = { ["false"] = true, ["False"] = true, ["FALSE"] = true }
+// Words YAML 1.1 reads as booleans, quoted when written so that a 1.1
+// reader sees text too.
+const kOldWords: { [string]: boolean } = {
+	["y"] = true,
+	["n"] = true,
+	["yes"] = true,
+	["no"] = true,
+	["on"] = true,
+	["off"] = true,
+}
+
+const kEscapes: { [string]: string } = {
+	["0"] = "\0",
+	a = "\a",
+	b = "\b",
+	t = "\t",
+	["\t"] = "\t",
+	n = "\n",
+	v = "\v",
+	f = "\f",
+	r = "\r",
+	e = "\27",
+	[" "] = " ",
+	["\""] = "\"",
+	["/"] = "/",
+	["\\"] = "\\",
+	N = "\u{85}",
+	_ = "\u{A0}",
+	L = "\u{2028}",
+	P = "\u{2029}",
+}
+const kNamedEscapes: { [string]: string } = {
+	["\0"] = "\\0",
+	["\a"] = "\\a",
+	["\b"] = "\\b",
+	["\t"] = "\\t",
+	["\n"] = "\\n",
+	["\v"] = "\\v",
+	["\f"] = "\\f",
+	["\r"] = "\\r",
+	["\27"] = "\\e",
+	["\""] = "\\\"",
+	["\\"] = "\\\\",
+}
+
+function IsBlank(c: number?): boolean {
+	return c == nil || c == kSpace || c == kNewline || c == kTab
+}
+
+function IsFlowIndicator(c: number?): boolean {
+	return c == kComma || c == kOpen || c == kClose || c == kBrace || c == kBraceClose
+}
+
+// ---- decoding ----------------------------------------------------------
+
+// The text being read, where in it (`lineStart` is the first byte of the
+// line `pos` is on), how deep in flow collections and in collections of
+// any kind, the nodes read so far (aliases counted as what they stand
+// for), and the current document's anchors and tag handles.
+let src = ""
+let pos = 1
+let len = 0
+let lineStart = 1
+// The line SkipBlank last measured, where its leading spaces end, and
+// where its leading spaces and tabs end.
+let measured = 0
+let indentEnd = 1
+let blankEnd = 1
+let flow = 0
+let depth = 0
+let nodes = 0
+let aliased = 0
+let anchors: { [string]: Anchor } = {}
+let handles: { [string]: string } = {}
+let versioned = false
+
+// Line and column of a byte of the text.
+function Where(at: number): string {
+	const before = string.sub(src, 1, at - 1)
+	const _, breaks = string.gsub(before, "\n", "")
+	const start = (string.find(before, "\n[^\n]*$") or 0) + 1
+	const column = (utf8.len(string.sub(before, start)) or (at - start)) + 1
+	return `line {breaks + 1}, column {column}`
+}
+
+function Fail(message: string, at: number?): never {
+	const failure: Failure = { message = message, where = Where(at or pos) }
+	error(failure, 0)
+}
+
+// What is at `pos`, for a message: "'x'", "the end of the line", ...
+function Found(): string {
+	if (pos > len) {
+		return "the end of the text"
+	}
+	const c = string.byte(src, pos)
+	if (c == kNewline) {
+		return "the end of the line"
+	}
+	if (c == kTab) {
+		return "a tab"
+	}
+	return `'{string.match(src, "^[\0-\127\194-\244][\128-\191]*", pos) or string.sub(src, pos, pos)}'`
+}
+
+// A piece of the text as a message shows it.
+function Shown(text: string): string {
+	const cut = if (#text > 40) utf8.offset(text, 38) else nil
+	return if (cut != nil && cut <= #text) `'{string.sub(text, 1, cut - 1)}...'` else `'{text}'`
+}
+
+// A tag as a message shows it: !!int for the core schema's.
+function TagName(tag: string): string {
+	return if (string.sub(tag, 1, #kCore) == kCore) "!!" .. string.sub(tag, #kCore + 1) else tag
+}
+
+function SkipWhite() {
+	const _, last = string.find(src, "^[ \t]*", pos)
+	pos = (last :: number) + 1
+}
+
+// Spaces, comments and line breaks, up to the next content. Whether that
+// content is the first on its line (which a block collection must be,
+// but for the compact forms "- - a" and "- a: 1").
+function SkipBlank(): boolean {
+	while (true) {
+		SkipWhite()
+		const c = string.byte(src, pos)
+		if (c == kNewline) {
+			pos += 1
+			lineStart = pos
+		} else if (c == kHash) {
+			const before = string.byte(src, pos - 1)
+			if (pos > lineStart && before != kSpace && before != kTab) {
+				Fail("a comment is separated by a space from what is before it")
+			}
+			pos = string.find(src, "\n", pos, true) or len + 1
+		} else {
+			break
+		}
+	}
+	// The line's leading spaces and blanks, measured once a line (a long
+	// line is passed over many times).
+	if (lineStart != measured) {
+		measured = lineStart
+		const _, spaces = string.find(src, "^ *", lineStart)
+		const _, white = string.find(src, "^[ \t]*", (spaces :: number) + 1)
+		indentEnd = (spaces :: number) + 1
+		blankEnd = (white :: number) + 1
+	}
+	if (indentEnd >= pos) {
+		return true
+	}
+	if (blankEnd < pos) {
+		return false
+	}
+	if (flow == 0 && pos <= len) {
+		Fail("a tab in the indentation (YAML indents with spaces)", indentEnd)
+	}
+	return true
+}
+
+// Whether `pos` is at a document marker: --- or ... at the start of a line.
+function AtMarker(): boolean {
+	if (pos != lineStart) {
+		return false
+	}
+	const three = string.sub(src, pos, pos + 2)
+	return (three == "---" || three == "...") && IsBlank(string.byte(src, pos + 3))
+}
+
+// After a node: the rest of its line is blank or a comment.
+function LineEnd() {
+	if (!SkipBlank() && pos <= len) {
+		Fail(`expected the end of the line, found {Found()}`)
+	}
+}
+
+function Deeper(at: number) {
+	depth += 1
+	if (depth > kDepth) {
+		Fail(`collections nest more than {kDepth} deep`, at)
+	}
+}
+
+// ---- scalars -----------------------------------------------------------
+
+// Digits of a base, value checked against 2^53.
+function Based(digits: string, base: number, word: string, at: number): number {
+	let value = 0
+	for (i = 1, #digits) {
+		const digit = tonumber(string.sub(digits, i, i), 16) :: number
+		if (value > (kExact - digit) / base) {
+			Fail(`{Shown(word)} is past 2^53, the largest integer a number holds exactly`, at)
+		}
+		value = value * base + digit
+	}
+	return value
+}
+
+// An integer as the core schema writes one (decimal, 0o octal, 0x
+// hexadecimal), or nil.
+function Integer(text: string, at: number): number? {
+	const sign, digits = string.match(text, "^([%-%+]?)(%d+)$")
+	if (sign != nil && digits != nil) {
+		const significant = string.match(digits, "^0*(%d*)$") :: string
+		if (#significant > 16 || (#significant == 16 && significant > "9007199254740992")) {
+			Fail(`{Shown(text)} is past 2^53, the largest integer a number holds exactly`, at)
+		}
+		const n = tonumber(digits) :: number
+		// 0 - n: "-0" is the integer 0, not -0.
+		return if (sign == "-") 0 - n else n
+	}
+	const octal = string.match(text, "^0o([0-7]+)$")
+	if (octal != nil) {
+		return Based(octal, 8, text, at)
+	}
+	const hex = string.match(text, "^0x(%x+)$")
+	if (hex != nil) {
+		return Based(hex, 16, text, at)
+	}
+	return nil
+}
+
+// A float as the core schema writes one (an integer is one too), or nil.
+function Float(text: string): number? {
+	// Digits with a point among them or before them, then an exponent.
+	const mantissa = string.match(text, "^[%-%+]?%d+%.?%d*") or string.match(text, "^[%-%+]?%.%d+")
+	if (mantissa != nil) {
+		const rest = string.sub(text, #mantissa + 1)
+		if (rest == "" || string.find(rest, "^[eE][%-%+]?%d+$") != nil) {
+			return tonumber(if (string.byte(text) == kPlus) string.sub(text, 2) else text)
+		}
+	}
+	const sign, word = string.match(text, "^([%-%+]?)%.(%a+)$")
+	if (word == "inf" || word == "Inf" || word == "INF") {
+		return if (sign == "-") -math.huge else math.huge
+	}
+	if (sign == "" && (word == "nan" || word == "NaN" || word == "NAN")) {
+		return 0 / 0
+	}
+	return nil
+}
+
+// A plain scalar's value by the core schema.
+function Resolve(text: string, at: number): unknown {
+	if (text == "" || kNullWords[text]) {
+		return kNull
+	}
+	if (kTrueWords[text]) {
+		return true
+	}
+	if (kFalseWords[text]) {
+		return false
+	}
+	const c = string.byte(text)
+	if ((c >= 48 && c <= 57) || c == kDash || c == kPlus || c == kDot) {
+		const n = Integer(text, at) ?? Float(text)
+		if (n != nil) {
+			return n
+		}
+	}
+	return text
+}
+
+// A scalar's value from its text, how it was written and its tag.
+function Scalar(text: string, kind: Kind, tag: string?, at: number): unknown {
+	if (tag == nil) {
+		return if (kind == "plain" || kind == "empty") Resolve(text, at) else text
+	}
+	if (tag == "!" || tag == kCore .. "str") {
+		return text
+	}
+	if (tag == kCore .. "null") {
+		if (text == "" || kNullWords[text]) {
+			return kNull
+		}
+		return Fail(`{Shown(text)} is not null (!!null is null, Null, NULL, ~ or nothing)`, at)
+	}
+	if (tag == kCore .. "bool") {
+		if (kTrueWords[text] || kFalseWords[text]) {
+			return kTrueWords[text] == true
+		}
+		return Fail(`{Shown(text)} is not a boolean (!!bool is true or false)`, at)
+	}
+	if (tag == kCore .. "int") {
+		return Integer(text, at) ?? Fail(`{Shown(text)} is not an integer (!!int)`, at)
+	}
+	if (tag == kCore .. "float") {
+		return Float(text) ?? Fail(`{Shown(text)} is not a number (!!float)`, at)
+	}
+	if (tag == kCore .. "seq" || tag == kCore .. "map") {
+		return Fail(`{TagName(tag)} is on a scalar`, at)
+	}
+	// A tag of another schema or a local one: the text as written.
+	return text
+}
+
+// The value a node's properties and content make, its anchor (if any)
+// set to it.
+function Finish(props: Props?, raw: unknown, kind: Kind, at: number): unknown {
+	if (kind == "alias") {
+		if (props != nil) {
+			Fail("an alias (*name) has no anchor or tag of its own", props.at)
+		}
+		return raw
+	}
+	const tag = if (props != nil) props.tag else nil
+	let value = raw
+	if (kind == "seq" || kind == "map") {
+		if (tag != nil && string.sub(tag, 1, #kCore) == kCore && tag != kCore .. kind) {
+			const name = string.sub(tag, #kCore + 1)
+			if (name == "str" || name == "int" || name == "float" || name == "bool" || name == "null" || name == "seq" || name == "map") {
+				Fail(`{TagName(tag)} is on a {if (kind == "seq") "sequence" else "mapping"}`, at)
+			}
+		}
+	} else {
+		value = Scalar(raw :: string, kind, tag, at)
+	}
+	nodes += 1
+	if (props != nil && props.anchor != nil) {
+		anchors[props.anchor] = { value = value, size = nodes - props.before, open = false }
+	}
+	return value
+}
+
+// "\u" and its kin: `count` hexadecimal digits after the letter at `pos`.
+function CodeEscape(count: number, out: { string }) {
+	const at = pos - 1
+	const hex = string.sub(src, pos + 1, pos + count)
+	if (#hex != count || string.find(hex, "^%x+$") == nil) {
+		Fail(`\\{string.sub(src, pos, pos)} takes {count} hexadecimal digits`, at)
+	}
+	let code = tonumber(hex, 16) :: number
+	pos += 1 + count
+	// A surrogate pair (as JSON writes a character past U+FFFF) is the one
+	// character.
+	if (code >= 0xD800 && code <= 0xDBFF && string.find(src, "^\\u[dD][c-fC-F]%x%x", pos) != nil) {
+		const low = tonumber(string.sub(src, pos + 2, pos + 5), 16) :: number
+		code = 0x10000 + (code - 0xD800) * 0x400 + (low - 0xDC00)
+		pos += 6
+	}
+	if (code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) {
+		Fail(`{Shown(string.sub(src, at, pos - 1))} is not a Unicode character`, at)
+	}
+	table.insert(out, utf8.char(code))
+}
+
+// A line break inside a quoted scalar (at `pos`): it and the empty lines
+// after it fold into a space or the empty lines' breaks; the next line's
+// leading spaces are left out.
+function Fold(out: { string }, at: number) {
+	let breaks = 0
+	while (string.byte(src, pos) == kNewline) {
+		pos += 1
+		lineStart = pos
+		breaks += 1
+		if (AtMarker()) {
+			Fail("a document marker (--- or ...) inside a quoted string")
+		}
+		SkipWhite()
+	}
+	if (pos > len) {
+		Fail("a quoted string has no closing quote", at)
+	}
+	table.insert(out, if (breaks == 1) " " else string.rep("\n", breaks - 1))
+}
+
+// '...': a doubled '' is a quote.
+function SingleQuoted(): string {
+	const at = pos
+	pos += 1
+	const out: { string } = {}
+	while (true) {
+		const first, last = string.find(src, "^[^'\n \t]+", pos)
+		if (first != nil && last != nil) {
+			table.insert(out, string.sub(src, first, last))
+			pos = last + 1
+		}
+		const c = string.byte(src, pos)
+		if (c == kApostrophe) {
+			if (string.byte(src, pos + 1) != kApostrophe) {
+				pos += 1
+				return table.concat(out)
+			}
+			table.insert(out, "'")
+			pos += 2
+		} else if (c == kSpace || c == kTab) {
+			// Spaces before a line break are left out.
+			const _, white = string.find(src, "^[ \t]+", pos)
+			if (string.byte(src, (white :: number) + 1) != kNewline) {
+				table.insert(out, string.sub(src, pos, white))
+			}
+			pos = (white :: number) + 1
+		} else if (c == kNewline) {
+			Fold(out, at)
+		} else {
+			break
+		}
+	}
+	return Fail("a single-quoted string has no closing quote", at)
+}
+
+// "...": with backslash escapes; a backslash ending a line joins it to the
+// next with no space.
+function DoubleQuoted(): string {
+	const at = pos
+	pos += 1
+	const out: { string } = {}
+	while (true) {
+		const first, last = string.find(src, "^[^\"\\\n \t]+", pos)
+		if (first != nil && last != nil) {
+			table.insert(out, string.sub(src, first, last))
+			pos = last + 1
+		}
+		const c = string.byte(src, pos)
+		if (c == kQuote) {
+			pos += 1
+			return table.concat(out)
+		} else if (c == kBackslash) {
+			pos += 1
+			const letter = string.sub(src, pos, pos)
+			const named = kEscapes[letter]
+			if (named != nil) {
+				table.insert(out, named)
+				pos += 1
+			} else if (letter == "x") {
+				CodeEscape(2, out)
+			} else if (letter == "u") {
+				CodeEscape(4, out)
+			} else if (letter == "U") {
+				CodeEscape(8, out)
+			} else if (letter == "\n") {
+				// The line break and the next line's leading spaces are left
+				// out; each empty line after it is a line break.
+				pos += 1
+				lineStart = pos
+				if (AtMarker()) {
+					Fail("a document marker (--- or ...) inside a quoted string")
+				}
+				SkipWhite()
+				while (string.byte(src, pos) == kNewline) {
+					table.insert(out, "\n")
+					pos += 1
+					lineStart = pos
+					if (AtMarker()) {
+						Fail("a document marker (--- or ...) inside a quoted string")
+					}
+					SkipWhite()
+				}
+			} else if (pos > len) {
+				break
+			} else {
+				Fail(`\\{if (letter == "\t") "(tab)" else Found()} is not an escape`, pos - 1)
+			}
+		} else if (c == kSpace || c == kTab) {
+			const _, white = string.find(src, "^[ \t]+", pos)
+			if (string.byte(src, (white :: number) + 1) != kNewline) {
+				table.insert(out, string.sub(src, pos, white))
+			}
+			pos = (white :: number) + 1
+		} else if (c == kNewline) {
+			Fold(out, at)
+		} else {
+			break
+		}
+	}
+	return Fail("a double-quoted string has no closing quote", at)
+}
+
+// Whether a plain scalar can start at `pos`.
+function PlainStart(): boolean {
+	const c = string.byte(src, pos)
+	if (IsBlank(c)) {
+		return false
+	}
+	if (c == kDash || c == kQuestion || c == kColon) {
+		const nx = string.byte(src, pos + 1)
+		return !IsBlank(nx) && !(flow > 0 && IsFlowIndicator(nx))
+	}
+	return !kIndicators[c]
+}
+
+// A plain scalar: its lines folded (the break between two lines is a
+// space, each empty line between them a line break). In a block, its
+// lines after the first are indented more than `n`.
+function Plain(n: number): string {
+	const run = if (flow > 0) "^[^ \t\n:#,%[%]{}]+" else "^[^ \t\n:#]+"
+	let out: { string }? = nil
+	while (true) {
+		const start = pos
+		let finish = pos
+		while (true) {
+			const _, last = string.find(src, run, pos)
+			if (last != nil) {
+				pos = last + 1
+				finish = pos
+			}
+			const c = string.byte(src, pos)
+			if (c == kColon) {
+				const nx = string.byte(src, pos + 1)
+				if (IsBlank(nx) || (flow > 0 && IsFlowIndicator(nx))) {
+					break
+				}
+				pos += 1
+				finish = pos
+			} else if (c == kHash) {
+				// After a character that is not a space: text, not a comment.
+				pos += 1
+				finish = pos
+			} else if (c == kSpace || c == kTab) {
+				const _, white = string.find(src, "^[ \t]+", pos)
+				const nx = string.byte(src, (white :: number) + 1)
+				if (nx == nil || nx == kNewline || nx == kHash) {
+					break
+				}
+				pos = (white :: number) + 1
+			} else {
+				break
+			}
+		}
+		const piece = string.sub(src, start, finish - 1)
+		pos = finish
+		// A line that continues it: the lines up to it empty, it not a
+		// comment, a document marker or (in a block) indented less.
+		const _, white = string.find(src, "^[ \t]*", finish)
+		let q = (white :: number) + 1
+		let breaks = 0
+		let next = q
+		while (string.byte(src, q) == kNewline) {
+			breaks += 1
+			next = q + 1
+			const _, w = string.find(src, "^[ \t]*", next)
+			q = (w :: number) + 1
+		}
+		const c = string.byte(src, q)
+		let more = breaks > 0 && c != nil && c != kHash
+		if (more) {
+			const three = string.sub(src, next, next + 2)
+			if (q == next && (three == "---" || three == "...") && IsBlank(string.byte(src, next + 3))) {
+				more = false
+			} else if (flow == 0) {
+				const _, spaces = string.find(src, "^ *", next)
+				more = (spaces :: number) - next + 1 > n
+			} else {
+				more = !IsFlowIndicator(c)
+			}
+			if (more && c == kColon) {
+				const nx = string.byte(src, q + 1)
+				more = !(IsBlank(nx) || (flow > 0 && IsFlowIndicator(nx)))
+			}
+		}
+		if (!more && out == nil) {
+			return piece
+		}
+		const parts: { string } = out or {}
+		table.insert(parts, piece)
+		if (!more) {
+			break
+		}
+		table.insert(parts, if (breaks == 1) " " else string.rep("\n", breaks - 1))
+		out = parts
+		pos = q
+		lineStart = next
+	}
+	return table.concat(out :: { string })
+}
+
+// | or >: the lines indented more than `n` (by the indicator's amount, or
+// as much as the first line is), kept as they are (|) or folded (>), and
+// the line breaks at the end clipped to one, stripped (-) or kept (+).
+function BlockScalar(n: number): string {
+	const literal = string.byte(src, pos) == kPipe
+	pos += 1
+	let chomp = 0
+	let explicit = 0
+	for (_ = 1, 2) {
+		const c = string.byte(src, pos)
+		if ((c == kDash || c == kPlus) && chomp == 0) {
+			chomp = if (c == kDash) -1 else 1
+			pos += 1
+		} else if (c != nil && c >= 49 && c <= 57 && explicit == 0) {
+			explicit = c - 48
+			pos += 1
+		} else if (c == 48) {
+			Fail("a block scalar's indentation indicator is 1 to 9")
+		} else {
+			break
+		}
+	}
+	const header = pos
+	SkipWhite()
+	if (string.byte(src, pos) == kHash) {
+		if (pos == header) {
+			Fail("a comment is separated by a space from what is before it")
+		}
+		pos = string.find(src, "\n", pos, true) or len + 1
+	}
+	if (pos <= len && string.byte(src, pos) != kNewline) {
+		Fail(`expected the end of the line after the block scalar's header ('|' or '>' and its indicators), found {Found()}`)
+	}
+	if (pos > len) {
+		return ""
+	}
+	pos += 1
+	lineStart = pos
+	// An indicator counts from the parent's indentation; at the top level,
+	// from column 0 (as libyaml reads `--- |2`).
+	let indent = math.max(n, 0) + explicit
+	if (explicit == 0) {
+		// The first line that is not empty sets the indentation; with none,
+		// the longest of the empty lines before it does.
+		let q = pos
+		let longest = 0
+		while (true) {
+			const _, spaces = string.find(src, "^ *", q)
+			const count = (spaces :: number) - q + 1
+			const c = string.byte(src, (spaces :: number) + 1)
+			if (c == kNewline) {
+				longest = math.max(longest, count)
+				q = (spaces :: number) + 2
+			} else if (c == nil) {
+				indent = math.max(longest, count, n + 1)
+				break
+			} else {
+				const three = string.sub(src, q, q + 2)
+				if (count <= n || (count == 0 && (three == "---" || three == "...") && IsBlank(string.byte(src, q + 3)))) {
+					indent = math.max(longest, n + 1)
+				} else {
+					// An empty line before it with more spaces sets it instead
+					// (as libyaml reads one), and that first line then ends the
+					// scalar.
+					indent = math.max(longest, count)
+				}
+				break
+			}
+		}
+	}
+	const out: { string } = {}
+	let breaks = 0
+	let lineBreak = ""
+	let any = false
+	let spaced = false
+	while (pos <= len) {
+		const _, spaces = string.find(src, "^ *", pos)
+		const count = (spaces :: number) - pos + 1
+		const c = string.byte(src, (spaces :: number) + 1)
+		if (c == nil && count <= indent) {
+			pos = len + 1
+			break
+		}
+		if (c == kNewline && count <= indent) {
+			breaks += 1
+			pos = (spaces :: number) + 2
+			lineStart = pos
+		} else if (count < indent || (indent == 0 && AtMarker())) {
+			break
+		} else {
+			const textStart = pos + indent
+			const lineEnd = string.find(src, "\n", textStart, true)
+			const first = string.byte(src, textStart)
+			const white = first == kSpace || first == kTab
+			if (any) {
+				if (!literal && lineBreak == "\n" && !spaced && !white) {
+					table.insert(out, if (breaks == 0) " " else string.rep("\n", breaks))
+				} else {
+					table.insert(out, lineBreak .. string.rep("\n", breaks))
+				}
+			} else if (breaks > 0) {
+				table.insert(out, string.rep("\n", breaks))
+			}
+			table.insert(out, string.sub(src, textStart, (lineEnd or len + 1) - 1))
+			any = true
+			spaced = white
+			breaks = 0
+			if (lineEnd == nil) {
+				lineBreak = ""
+				pos = len + 1
+				break
+			}
+			lineBreak = "\n"
+			pos = lineEnd + 1
+			lineStart = pos
+		}
+	}
+	if (chomp >= 0) {
+		table.insert(out, lineBreak)
+	}
+	if (chomp > 0) {
+		table.insert(out, string.rep("\n", breaks))
+	}
+	return table.concat(out)
+}
+
+// ---- properties and aliases --------------------------------------------
+
+// An anchor's or an alias's name, after the & or * at `pos`.
+function AnchorName(): string {
+	const first, last = string.find(src, "^[^ \t\n,%[%]{}]+", pos + 1)
+	if (first == nil || last == nil) {
+		return Fail(`{string.sub(src, pos, pos)} is followed by a name`)
+	}
+	pos = last + 1
+	return string.sub(src, first, last)
+}
+
+// A tag: !<verbatim>, !local, !!core, !handle!suffix, or ! alone (a
+// non-specific tag: a scalar with it is a string).
+function Tag(): string {
+	const at = pos
+	if (string.sub(src, pos, pos + 1) == "!<") {
+		const close = string.find(src, ">", pos + 2, true)
+		const uri = if (close != nil) string.sub(src, pos + 2, close - 1) else ""
+		if (close == nil || uri == "" || string.find(uri, "[ \t\n]") != nil) {
+			Fail("a verbatim tag is written !<tag>")
+		}
+		pos = (close :: number) + 1
+		return uri
+	}
+	const named = string.match(src, "^![%w%-]*!", pos)
+	const handle = named or "!"
+	pos += #handle
+	const _, last = string.find(src, "^[%w%-%%#;/%?:@&=%+%$%._~%*'%(%)]*", pos)
+	const suffix = string.sub(src, pos, last)
+	pos = (last :: number) + 1
+	if (handle == "!" && suffix == "") {
+		return "!"
+	}
+	if (suffix == "") {
+		return Fail(`the tag {handle} has no name after it`, at)
+	}
+	const prefix = handles[handle] or (if (handle == "!") "!" else if (handle == "!!") kCore else nil)
+	if (prefix == nil) {
+		return Fail(`the tag handle {handle} is not declared (a %TAG directive declares it)`, at)
+	}
+	const _, bad = string.gsub(string.gsub(suffix, "%%%x%x", ""), "%%", "")
+	if (bad > 0) {
+		Fail(`{Shown(handle .. suffix)}: a % in a tag starts an escape of two hexadecimal digits`, at)
+	}
+	return prefix .. string.gsub(suffix, "%%(%x%x)", function(hex: string): string {
+		return string.char(tonumber(hex, 16) :: number)
+	})
+}
+
+// A node's anchor and tag, in either order. Its anchor names nothing until
+// the node is read (an alias inside it is an error).
+function Properties(): Props {
+	const props: Props = { at = pos, before = nodes }
+	while (true) {
+		const c = string.byte(src, pos)
+		if (c == kAmpersand) {
+			if (props.anchor != nil) {
+				Fail("a node has two anchors")
+			}
+			const name = AnchorName()
+			props.anchor = name
+			anchors[name] = { value = nil, size = 0, open = true }
+		} else if (c == kBang) {
+			if (props.tag != nil) {
+				Fail("a node has two tags")
+			}
+			props.tag = Tag()
+		} else {
+			break
+		}
+		// In a flow collection, an empty node may end at a ',', ']' or '}'.
+		const nx = string.byte(src, pos)
+		if (!IsBlank(nx) && !(flow > 0 && (nx == kComma || nx == kClose || nx == kBraceClose))) {
+			Fail(`expected a space after the anchor or tag, found {Found()}`)
+		}
+		SkipWhite()
+	}
+	return props
+}
+
+// Properties on a line before the node and on its line: one set.
+function Merge(outer: Props?, inner: Props?): Props? {
+	if (outer == nil) {
+		return inner
+	}
+	if (inner == nil) {
+		return outer
+	}
+	if (outer.anchor != nil && inner.anchor != nil) {
+		Fail("a node has two anchors", inner.at)
+	}
+	if (outer.tag != nil && inner.tag != nil) {
+		Fail("a node has two tags", inner.at)
+	}
+	return { anchor = outer.anchor or inner.anchor, tag = outer.tag or inner.tag, at = outer.at, before = outer.before }
+}
+
+function Alias(): unknown {
+	const at = pos
+	const name = AnchorName()
+	const anchor = anchors[name]
+	if (anchor == nil) {
+		return Fail(`the alias *{name} names no anchor (&{name} comes before its aliases)`, at)
+	}
+	if (anchor.open) {
+		return Fail(`the alias *{name} is inside the node it names`, at)
+	}
+	nodes += anchor.size
+	aliased += anchor.size
+	if (aliased > kAliasNodes) {
+		Fail(`the aliases stand for more than {kAliasNodes} nodes in all`, at)
+	}
+	return anchor.value
+}
+
+// A key's value: a scalar a table can hold.
+function Key(value: unknown, at: number): unknown {
+	if (type(value) == "table") {
+		return Fail("a key is a scalar: a sequence or mapping as a key (a complex key) is not supported", at)
+	}
+	if (value == kNull) {
+		return Fail("a key is null, which a table cannot hold", at)
+	}
+	if (value != value) {
+		return Fail("a key is NaN, which a table cannot hold", at)
+	}
+	return value
+}
+
+function KeyShown(key: unknown): string {
+	return if (type(key) == "string") Shown(key) else tostring(key)
+}
+
+function Put(t: Table, key: unknown, value: unknown, at: number) {
+	if (rawget(t, key) != nil) {
+		Fail(`the key {KeyShown(key)} is in the mapping twice`, at)
+	}
+	t[key] = value
+}
+
+// ---- flow collections --------------------------------------------------
+
+// Blank space inside a flow collection, which ends before the text does.
+function FlowBlank(at: number, what: string) {
+	SkipBlank()
+	if (pos > len) {
+		Fail(`a flow {what} has no closing {if (what == "sequence") "']'" else "'}'"}`, at)
+	}
+	if (AtMarker()) {
+		Fail(`a document marker (--- or ...) inside a flow {what}`)
+	}
+}
+
+// Whether `pos` is at a ':' that starts a value: before a space or a flow
+// indicator, or straight after a quoted string or a flow collection.
+function ValueIndicator(adjacent: boolean): boolean {
+	if (string.byte(src, pos) != kColon) {
+		return false
+	}
+	const nx = string.byte(src, pos + 1)
+	return adjacent || IsBlank(nx) || IsFlowIndicator(nx)
+}
+
+function FlowNode(): (unknown, Kind) {
+	let props: Props? = nil
+	let c = string.byte(src, pos)
+	// An anchor and a tag may be on lines of their own.
+	while (c == kAmpersand || c == kBang) {
+		props = Merge(props, Properties())
+		SkipBlank()
+		c = string.byte(src, pos)
+	}
+	const at = pos
+	if (c == kOpen) {
+		return Finish(props, FlowSequence(), "seq", at), "seq"
+	}
+	if (c == kBrace) {
+		return Finish(props, FlowMapping(), "map", at), "map"
+	}
+	if (c == kQuote) {
+		return Finish(props, DoubleQuoted(), "quoted", at), "quoted"
+	}
+	if (c == kApostrophe) {
+		return Finish(props, SingleQuoted(), "quoted", at), "quoted"
+	}
+	if (c == kStar) {
+		return Finish(props, Alias(), "alias", at), "alias"
+	}
+	if (props != nil && (pos > len || IsFlowIndicator(c) || ValueIndicator(false))) {
+		return Finish(props, "", "empty", at), "empty"
+	}
+	if (!PlainStart()) {
+		return Fail(`{Found()} cannot start a value`), "empty"
+	}
+	return Finish(props, Plain(-1), "plain", at), "plain"
+}
+
+// A node of a flow collection, or an empty one where there is none.
+function FlowPart(): (unknown, Kind) {
+	const c = string.byte(src, pos)
+	if (c == kComma || c == kClose || c == kBraceClose || ValueIndicator(false)) {
+		return Finish(nil, "", "empty", pos), "empty"
+	}
+	return FlowNode()
+}
+
+function IsJsonLike(kind: Kind): boolean {
+	return kind == "quoted" || kind == "seq" || kind == "map"
+}
+
+// [a, b, c]: an entry `key: value` is a mapping of that one pair.
+function FlowSequence(): { unknown } {
+	const at = pos
+	pos += 1
+	flow += 1
+	Deeper(at)
+	const list: { unknown } = {}
+	while (true) {
+		FlowBlank(at, "sequence")
+		const c = string.byte(src, pos)
+		if (c == kClose) {
+			pos += 1
+			break
+		}
+		const itemAt = pos
+		const line = lineStart
+		let item: unknown
+		const nx = string.byte(src, pos + 1)
+		if (c == kQuestion && (IsBlank(nx) || IsFlowIndicator(nx))) {
+			pos += 1
+			FlowBlank(at, "sequence")
+			const key = FlowPart()
+			FlowBlank(at, "sequence")
+			let value: unknown = kNull
+			if (ValueIndicator(false)) {
+				pos += 1
+				FlowBlank(at, "sequence")
+				value = FlowPart()
+			}
+			const pair: Table = {}
+			pair[Key(key, itemAt)] = value
+			item = json.object(pair)
+			nodes += 1
+		} else {
+			if (c == kComma) {
+				Fail("expected a value before ','")
+			}
+			const node: unknown, kind: Kind = FlowNode()
+			const ended = pos
+			FlowBlank(at, "sequence")
+			if (ValueIndicator(IsJsonLike(kind) && pos == ended)) {
+				if (lineStart != line) {
+					Fail("a key and its ':' are on one line", itemAt)
+				}
+				pos += 1
+				FlowBlank(at, "sequence")
+				const pair: Table = {}
+				pair[Key(node, itemAt)] = FlowPart()
+				item = json.object(pair)
+				nodes += 1
+			} else {
+				item = node
+			}
+		}
+		table.insert(list, item)
+		FlowBlank(at, "sequence")
+		const after = string.byte(src, pos)
+		if (after == kComma) {
+			pos += 1
+		} else if (after == kClose) {
+			pos += 1
+			break
+		} else {
+			Fail(`expected ',' or ']' in a flow sequence, found {Found()}`)
+		}
+	}
+	flow -= 1
+	depth -= 1
+	if (#list == 0) {
+		json.array(list)
+	}
+	return list
+}
+
+// {a: 1, b}: an entry with no value has null.
+function FlowMapping(): Table {
+	const at = pos
+	pos += 1
+	flow += 1
+	Deeper(at)
+	const t: Table = {}
+	while (true) {
+		FlowBlank(at, "mapping")
+		const c = string.byte(src, pos)
+		if (c == kBraceClose) {
+			pos += 1
+			break
+		}
+		const keyAt = pos
+		const nx = string.byte(src, pos + 1)
+		if (c == kQuestion && (IsBlank(nx) || IsFlowIndicator(nx))) {
+			pos += 1
+			FlowBlank(at, "mapping")
+		}
+		const key: unknown, kind: Kind = FlowPart()
+		const ended = pos
+		FlowBlank(at, "mapping")
+		let value: unknown = kNull
+		if (ValueIndicator(IsJsonLike(kind) && pos == ended)) {
+			pos += 1
+			FlowBlank(at, "mapping")
+			value = FlowPart()
+		}
+		Put(t, Key(key, keyAt), value, keyAt)
+		FlowBlank(at, "mapping")
+		const after = string.byte(src, pos)
+		if (after == kComma) {
+			pos += 1
+		} else if (after == kBraceClose) {
+			pos += 1
+			break
+		} else {
+			Fail(`expected ',' or '{"}"}' in a flow mapping, found {Found()}`)
+		}
+	}
+	flow -= 1
+	depth -= 1
+	return json.object(t)
+}
+
+// ---- block collections -------------------------------------------------
+
+// Whether a block node (at the start of its line) has no content: the
+// text or the document ends, or the line is indented no more than `n` (a
+// sequence that is a key's value, `atN`, may be at `n` itself).
+function Ends(n: number, atN: boolean): boolean {
+	if (pos > len || AtMarker()) {
+		return true
+	}
+	const column = pos - lineStart
+	if (column > n) {
+		return false
+	}
+	return !(atN && column == n && string.byte(src, pos) == kDash && IsBlank(string.byte(src, pos + 1)))
+}
+
+// A scalar, a flow collection or an alias, as it starts a block node (it
+// may turn out to be a key): its text or value, and its kind.
+function Head(n: number): (unknown, Kind) {
+	const c = string.byte(src, pos)
+	if (c == kQuote) {
+		return DoubleQuoted(), "quoted"
+	}
+	if (c == kApostrophe) {
+		return SingleQuoted(), "quoted"
+	}
+	if (c == kOpen) {
+		return FlowSequence(), "seq"
+	}
+	if (c == kBrace) {
+		return FlowMapping(), "map"
+	}
+	if (c == kStar) {
+		return Alias(), "alias"
+	}
+	if (!PlainStart()) {
+		return Fail(`{Found()} cannot start a value`), "empty"
+	}
+	return Plain(n), "plain"
+}
+
+// Whether a ':' that makes what is before it a key follows (spaces between).
+function KeyFollows(): boolean {
+	SkipWhite()
+	return string.byte(src, pos) == kColon && IsBlank(string.byte(src, pos + 1))
+}
+
+// The key of a `key: value` entry of a block mapping at column `c`, which
+// ends on its own line with the ':' (`pos` left at it).
+function ImplicitKey(c: number): unknown {
+	let props: Props? = nil
+	let ch = string.byte(src, pos)
+	if (ch == kAmpersand || ch == kBang) {
+		props = Properties()
+		if (SkipBlank()) {
+			Fail("expected a key after the anchor or tag on its line")
+		}
+		ch = string.byte(src, pos)
+	}
+	const at = pos
+	const nx = string.byte(src, pos + 1)
+	if (ch == kDash && IsBlank(nx)) {
+		Fail("expected a key, found a sequence item ('- ') among a mapping's keys")
+	}
+	if (ch == kQuestion && IsBlank(nx)) {
+		Fail("an explicit key ('? ') has no anchor or tag before it")
+	}
+	if (ch == kPipe || ch == kGreater) {
+		Fail("a block scalar ('|' or '>') cannot be a key")
+	}
+	if (ch == kColon && IsBlank(nx)) {
+		Fail("a mapping entry has no key before its ':'")
+	}
+	const line = lineStart
+	const raw: unknown, kind: Kind = Head(c)
+	if (!KeyFollows()) {
+		Fail(`expected ':' after the key, found {Found()}`)
+	}
+	if (kind == "seq" || kind == "map") {
+		Fail("a key is a scalar: a sequence or mapping as a key (a complex key) is not supported", at)
+	}
+	if (lineStart != line) {
+		Fail("a key and its ':' are on one line", at)
+	}
+	return Key(Finish(props, raw, kind, at), at)
+}
+
+// A block mapping whose keys are at column `c`. `first` is its first key
+// when that has been read (`pos` is at its ':').
+function BlockMapping(c: number, first: unknown, at: number): Table {
+	Deeper(at)
+	const t: Table = {}
+	let key = first
+	let keyAt = at
+	while (true) {
+		let value: unknown = kNull
+		if (key != nil) {
+			pos += 1
+			value = BlockNode(c, false, true)
+		} else if (string.byte(src, pos) == kQuestion && IsBlank(string.byte(src, pos + 1))) {
+			// ? key, then (on a line of its own, at the same column) : value.
+			keyAt = pos
+			pos += 1
+			key = Key(BlockNode(c, true, true), keyAt)
+			LineEnd()
+			if (pos <= len && !AtMarker() && pos - lineStart == c && string.byte(src, pos) == kColon && IsBlank(string.byte(src, pos + 1))) {
+				pos += 1
+				value = BlockNode(c, true, true)
+			}
+		} else {
+			keyAt = pos
+			key = ImplicitKey(c)
+			pos += 1
+			value = BlockNode(c, false, true)
+		}
+		Put(t, key, value, keyAt)
+		key = nil
+		LineEnd()
+		if (pos > len || AtMarker()) {
+			break
+		}
+		const column = pos - lineStart
+		if (column < c) {
+			break
+		}
+		if (column > c) {
+			Fail(`expected a key at column {c + 1}, found {Found()} indented more`)
+		}
+	}
+	depth -= 1
+	return json.object(t)
+}
+
+// A block sequence whose '- ' items are at column `c`.
+function BlockSequence(c: number): { unknown } {
+	Deeper(pos)
+	const list: { unknown } = {}
+	while (true) {
+		pos += 1
+		table.insert(list, BlockNode(c, true, false))
+		LineEnd()
+		if (pos > len || AtMarker()) {
+			break
+		}
+		const column = pos - lineStart
+		if (column < c) {
+			break
+		}
+		if (column > c) {
+			Fail(`expected '- ' at column {c + 1}, found {Found()} indented more`)
+		}
+		if (string.byte(src, pos) != kDash || !IsBlank(string.byte(src, pos + 1))) {
+			break
+		}
+	}
+	depth -= 1
+	return list
+}
+
+// A node in block context: a key's value, a sequence's item, an explicit
+// key or value, or a document. Its lines are indented more than `n` (but
+// for a sequence that is a key's value, `atN`); `compact` lets a block
+// collection start on the line it is on (after "- ", "? " or ": ", not
+// after "key: " or "---").
+function BlockNode(n: number, compact: boolean, atN: boolean): unknown {
+	let first = SkipBlank()
+	if (pos > len || (first && Ends(n, atN))) {
+		return Finish(nil, "", "empty", pos)
+	}
+	let outer: Props? = nil
+	let inner: Props? = nil
+	let c = string.byte(src, pos)
+	if (c == kAmpersand || c == kBang) {
+		const props = Properties()
+		if (SkipBlank()) {
+			// Properties on a line of their own are the node's (a mapping's,
+			// rather than its first key's).
+			outer = props
+			first = true
+			if (Ends(n, atN)) {
+				return Finish(outer, "", "empty", props.at)
+			}
+			c = string.byte(src, pos)
+			if (c == kAmpersand || c == kBang) {
+				inner = Properties()
+				if (SkipBlank()) {
+					Fail("a node's anchor and tag are on the lines before it")
+				}
+			}
+		} else {
+			inner = props
+		}
+		c = string.byte(src, pos)
+	}
+	const at = pos
+	// A mapping's column is its first key's, properties included.
+	const column = (if (inner != nil) inner.at else pos) - lineStart
+	const nx = string.byte(src, pos + 1)
+	const collection = first || compact
+	if ((c == kDash || c == kQuestion) && IsBlank(nx)) {
+		if (!collection) {
+			Fail("a block sequence or mapping starts on a line of its own, not on the line of a key or of ---")
+		}
+		if (inner != nil) {
+			Fail("a block collection's anchor or tag goes on the line before it", inner.at)
+		}
+		if (c == kDash) {
+			return Finish(outer, BlockSequence(column), "seq", at)
+		}
+		return Finish(outer, BlockMapping(column, nil, at), "map", at)
+	}
+	if (pos > len) {
+		return Finish(Merge(outer, inner), "", "empty", at)
+	}
+	if (c == kPipe || c == kGreater) {
+		return Finish(Merge(outer, inner), BlockScalar(n), "block", at)
+	}
+	if (c == kColon && IsBlank(nx)) {
+		Fail("a mapping entry has no key before its ':'")
+	}
+	const line = lineStart
+	const raw: unknown, kind: Kind = Head(n)
+	if (KeyFollows()) {
+		if (kind == "seq" || kind == "map") {
+			Fail("a key is a scalar: a sequence or mapping as a key (a complex key) is not supported", at)
+		}
+		if (lineStart != line) {
+			Fail("a key and its ':' are on one line", at)
+		}
+		if (!collection) {
+			Fail("a block mapping starts on a line of its own, not on the line of a key ('a: b: c') or of ---", pos)
+		}
+		const key = Key(Finish(inner, raw, kind, at), at)
+		return Finish(outer, BlockMapping(column, key, at), "map", at)
+	}
+	return Finish(Merge(outer, inner), raw, kind, at)
+}
+
+// ---- documents ---------------------------------------------------------
+
+// %YAML 1.2, %TAG !handle! prefix, or a reserved directive (passed over).
+function Directive() {
+	const at = pos
+	const _, last = string.find(src, "^%%[^ \t\n]*", pos)
+	const name = string.sub(src, pos + 1, last)
+	pos = (last :: number) + 1
+	if (name == "YAML") {
+		SkipWhite()
+		const major, minor = string.match(src, "^(%d+)%.(%d+)", pos)
+		if (major == nil || minor == nil) {
+			Fail("%YAML is followed by a version, as in %YAML 1.2")
+		}
+		if (versioned) {
+			Fail("a document has two %YAML directives", at)
+		}
+		versioned = true
+		if (major != "1") {
+			Fail(`%YAML {major}.{minor} is not a version this reads (1.x)`, at)
+		}
+		pos += #(major :: string) + 1 + #(minor :: string)
+	} else if (name == "TAG") {
+		SkipWhite()
+		const handle = string.match(src, "^![%w%-]*!", pos)
+			or (if (string.byte(src, pos) == kBang) "!" else Fail("%TAG is followed by a handle (!, !! or !name!) and a prefix"))
+		pos += #handle
+		if (!IsBlank(string.byte(src, pos))) {
+			Fail(`expected a space after the handle, found {Found()}`)
+		}
+		SkipWhite()
+		const prefix = string.match(src, "^[^ \t\n]+", pos) or Fail(`%TAG {handle} is followed by a prefix`)
+		if (handles[handle] != nil) {
+			Fail(`%TAG declares {handle} twice`, at)
+		}
+		handles[handle] = prefix
+		pos += #prefix
+	} else {
+		pos = string.find(src, "\n", pos, true) or len + 1
+	}
+	LineEnd()
+}
+
+// The documents of the text (one at most, when `single`).
+function Stream(single: boolean): { unknown } {
+	const valid, bad = utf8.len(src)
+	if (valid == nil) {
+		Fail("the text is not UTF-8", bad)
+	}
+	const control = string.find(src, "[\0-\8\11-\31\127]")
+	if (control != nil) {
+		Fail(string.format("the control character U+%04X is not allowed in YAML text (a double-quoted string holds it as an escape)", string.byte(src, control)), control)
+	}
+	const c1 = string.find(src, "\194[\128-\132\134-\159]")
+	if (c1 != nil) {
+		Fail(string.format("the control character U+%04X is not allowed in YAML text (a double-quoted string holds it as an escape)", string.byte(src, c1 + 1)), c1)
+	}
+	const noncharacter = string.find(src, "\239\191[\190\191]")
+	if (noncharacter != nil) {
+		Fail("U+FFFE and U+FFFF are not allowed in YAML text", noncharacter)
+	}
+	const docs: { unknown } = {}
+	while (true) {
+		handles = {}
+		anchors = {}
+		versioned = false
+		let directives = false
+		SkipBlank()
+		while (pos <= len && pos == lineStart && string.byte(src, pos) == kPercent) {
+			Directive()
+			directives = true
+		}
+		if (pos > len) {
+			if (directives) {
+				Fail("directives are followed by a document, which starts with ---")
+			}
+			break
+		}
+		const at = pos
+		if (AtMarker()) {
+			if (string.byte(src, pos) == kDot) {
+				if (directives) {
+					Fail("directives are followed by a document, which starts with ---")
+				}
+				pos += 3
+				LineEnd()
+				continue
+			}
+			pos += 3
+		} else if (directives) {
+			Fail("directives are followed by a document, which starts with ---")
+		}
+		if (single && #docs == 1) {
+			Fail("the text holds more than one document (yaml.decodeAll reads them all)", at)
+		}
+		table.insert(docs, BlockNode(-1, false, false))
+		LineEnd()
+		if (pos > len) {
+			break
+		}
+		if (!AtMarker()) {
+			Fail(`expected the end of the document, found {Found()}`)
+		}
+		// A directive comes only after a ... line.
+		if (string.byte(src, pos) == kDot) {
+			pos += 3
+			LineEnd()
+		}
+	}
+	return docs
+}
+
+// Reads `text` from the start, then forgets it. Line breaks may be \n,
+// \r\n or \r; a byte order mark at the start is passed over.
+function Read(text: string, single: boolean): (boolean, unknown) {
+	let normal = text
+	if (string.find(normal, "\r", 1, true) != nil) {
+		normal = string.gsub(string.gsub(normal, "\r\n", "\n"), "\r", "\n")
+	}
+	if (string.sub(normal, 1, 3) == "\u{FEFF}") {
+		normal = string.sub(normal, 4)
+	}
+	src = normal
+	pos = 1
+	len = #normal
+	lineStart = 1
+	measured = 0
+	flow = 0
+	depth = 0
+	nodes = 0
+	aliased = 0
+	const ok, result = pcall(Stream, single)
+	src = ""
+	anchors = {}
+	handles = {}
+	return ok, result
+}
+
+function Failed(name: string, result: unknown): never {
+	if (type(result) == "table") {
+		const failure = result :: Failure
+		error(`{name}: {failure.message} ({failure.where})`, 3)
+	}
+	error(result, 0)
+}
+
+// The one document of the text (yaml.null for none); several are an error.
+function decode(text: string): unknown {
+	const ok, result = Read(text, true)
+	if (!ok) {
+		Failed("yaml.decode", result)
+	}
+	return (result :: { unknown })[1] ?? kNull
+}
+
+// Every document of the text, in order.
+function decodeAll(text: string): { unknown } {
+	const ok, result = Read(text, false)
+	if (!ok) {
+		Failed("yaml.decodeAll", result)
+	}
+	return result :: { unknown }
+}
+
+// ---- encoding ----------------------------------------------------------
+
+// The lines written so far, the indentation step, and the tables being
+// written (a table met again inside itself has no YAML form).
+let lines: { string } = {}
+let step = 2
+let open: { [unknown]: boolean } = {}
+
+function Refuse(message: string): never {
+	const failure: Failure = { message = message, where = "" }
+	error(failure, 0)
+}
+
+function PathName(path: string): string {
+	return if (path == "") "the value" else path
+}
+
+function ChildPath(path: string, key: unknown): string {
+	const name = if (type(key) == "string" && string.find(key, "^[%w_%-]+$") != nil) key else KeyShown(key)
+	return if (path == "") name else `{path}.{name}`
+}
+
+type Shape = "map" | "seq" | "scalar"
+
+// What a value is written as: a mapping, a sequence (keys 1 to n, or
+// marked by json.array), or a scalar. An empty table is a mapping unless
+// json.array marks it.
+function ShapeOf(value: unknown, path: string): Shape {
+	if (type(value) != "table") {
+		return "scalar"
+	}
+	const mark = getmetatable(value)
+	let count = 0
+	let top = 0
+	let other = false
+	for (key in value :: Table) {
+		count += 1
+		if (type(key) == "number" && key >= 1 && key == math.floor(key)) {
+			top = math.max(top, key)
+		} else {
+			other = true
+		}
+	}
+	const sequence = !other && top == count
+	if (mark == kArrayMark) {
+		if (!sequence) {
+			Refuse(`{PathName(path)} is marked as a sequence (json.array) but has keys other than 1 to n`)
+		}
+		return "seq"
+	}
+	if (mark == kObjectMark || count == 0 || !sequence) {
+		return "map"
+	}
+	return "seq"
+}
+
+function Enter(value: unknown, path: string) {
+	if (open[value]) {
+		Refuse(`{PathName(path)} is a table that holds itself (a cycle)`)
+	}
+	open[value] = true
+}
+
+function NumberText(n: number): string {
+	if (n != n) {
+		return ".nan"
+	}
+	if (n == math.huge) {
+		return ".inf"
+	}
+	if (n == -math.huge) {
+		return "-.inf"
+	}
+	if (n == math.floor(n) && math.abs(n) <= kExact) {
+		return if (n == 0 && 1 / n < 0) "-0.0" else string.format("%.0f", n)
+	}
+	// The shortest digits that read back as the same number, with a point
+	// (1.0e+300), which YAML 1.1 readers need too.
+	let text = string.format("%.17g", n)
+	for (precision = 1, 16) {
+		const shorter = string.format(`%.{precision}g`, n)
+		if (tonumber(shorter) == n) {
+			text = shorter
+			break
+		}
+	}
+	if (string.find(text, ".", 1, true) == nil) {
+		const e = string.find(text, "e", 1, true)
+		text = if (e != nil) string.sub(text, 1, e - 1) .. ".0" .. string.sub(text, e) else text .. ".0"
+	}
+	return text
+}
+
+// Characters past ASCII a double-quoted string writes as escapes: the C1
+// controls, the line and paragraph separators and the byte order mark.
+function Unprintable(text: string): boolean {
+	return string.find(text, "\194[\128-\159]") != nil || string.find(text, "\226\128[\168\169]") != nil
+		|| string.find(text, "\239\187\191") != nil
+}
+
+// Characters a double-quoted string writes as escapes: those and the C0
+// controls and DEL.
+function Special(text: string): boolean {
+	return string.find(text, "[\0-\31\127]") != nil || Unprintable(text)
+}
+
+function Escaped(c: string): string {
+	return kNamedEscapes[c] or string.format("\\x%02X", string.byte(c))
+}
+
+function Quoted(text: string): string {
+	let escaped = string.gsub(text, "[\0-\31\127\"\\]", Escaped)
+	if (string.find(escaped, "[\194\226\239]") != nil) {
+		escaped = string.gsub(escaped, "\194([\128-\159])", function(c: string): string {
+			return if (c == "\133") "\\N" else string.format("\\x%02X", string.byte(c))
+		})
+		escaped = string.gsub(string.gsub(escaped, "\226\128\168", "\\L"), "\226\128\169", "\\P")
+		escaped = string.gsub(escaped, "\239\187\191", "\\uFEFF")
+	}
+	return "\"" .. escaped .. "\""
+}
+
+// Whether a string reads back as itself written plain (as a key, a value
+// or an item): not something else by the core schema or by YAML 1.1 (yes,
+// 0777, 1_000, 12:30, 2001-12-14), and nothing in it that YAML reads as
+// syntax.
+function PlainSafe(text: string): boolean {
+	if (text == "" || Special(text) || string.find(text, "^[ \t]") != nil || string.find(text, "[ \t]$") != nil) {
+		return false
+	}
+	const c = string.byte(text)
+	if (c == kDash || c == kQuestion || c == kColon) {
+		if (#text == 1 || IsBlank(string.byte(text, 2))) {
+			return false
+		}
+	} else if (kIndicators[c]) {
+		return false
+	}
+	if (string.find(text, ": ", 1, true) != nil || string.find(text, " #", 1, true) != nil || string.byte(text, #text) == kColon) {
+		return false
+	}
+	if (string.find(text, "^%-%-%-") != nil || string.find(text, "^%.%.%.") != nil) {
+		return false
+	}
+	if (string.find(text, "^[%-%+]?%.?%d") != nil || kOldWords[string.lower(text)] || text == "<<" || text == "=") {
+		return false
+	}
+	return type(Resolve(text, 1)) == "string"
+}
+
+function StringText(text: string, path: string): string {
+	if (utf8.len(text) == nil) {
+		Refuse(`{PathName(path)} is not UTF-8 text`)
+	}
+	return if (PlainSafe(text)) text else Quoted(text)
+}
+
+function ScalarText(value: unknown, path: string): string {
+	if (value == nil || value == kNull) {
+		return "null"
+	}
+	if (type(value) == "boolean") {
+		return if (value) "true" else "false"
+	}
+	if (type(value) == "number") {
+		return NumberText(value)
+	}
+	if (type(value) == "string") {
+		return StringText(value, path)
+	}
+	return Refuse(`{PathName(path)} is a {type(value)}, which YAML has no form for`)
+}
+
+function KeyText(key: unknown, path: string): string {
+	if (type(key) == "string" && utf8.len(key) == nil) {
+		Refuse(`{PathName(path)} has a key that is not UTF-8 text`)
+	}
+	if (type(key) == "string" || type(key) == "number" || type(key) == "boolean") {
+		return ScalarText(key, path)
+	}
+	return Refuse(`{PathName(path)} has a key that is a {type(key)} (a key is text, a number or a boolean)`)
+}
+
+function Rank(key: unknown): number {
+	return if (type(key) == "boolean") 1 else if (type(key) == "number") 2 else 3
+}
+
+// A mapping's keys in order: false and true, then numbers, then text.
+function SortedKeys(t: Table, path: string): { unknown } {
+	const keys: { unknown } = {}
+	for (key in t) {
+		if (type(key) != "string" && type(key) != "number" && type(key) != "boolean") {
+			KeyText(key, path)
+		}
+		table.insert(keys, key)
+	}
+	table.sort(keys, function(a: unknown, b: unknown): boolean {
+		const ra = Rank(a)
+		const rb = Rank(b)
+		if (ra != rb) {
+			return ra < rb
+		}
+		if (ra == 1) {
+			return a == false && b == true
+		}
+		if (ra == 2) {
+			return (a :: number) < (b :: number)
+		}
+		return (a :: string) < (b :: string)
+	})
+	return keys
+}
+
+// A string with line breaks as a literal block (|): its header's
+// indicators and its lines (the empty ones a kept end has included), or
+// nil when it cannot be one (it holds a character that needs an escape, or
+// only line breaks).
+function Literal(text: string, top: boolean): (string?, { string }?) {
+	if (string.find(text, "\n", 1, true) == nil || string.find(text, "[\0-\8\11-\31\127]") != nil || Unprintable(text)) {
+		return nil, nil
+	}
+	let trailing = 0
+	while (string.byte(text, #text - trailing) == kNewline) {
+		trailing += 1
+	}
+	const body = string.sub(text, 1, #text - trailing)
+	if (string.find(body, "^\n*$") != nil || utf8.len(text) == nil) {
+		return nil, nil
+	}
+	// Its first line with content starts with a space: the indentation is
+	// given, since it cannot be told from that line.
+	let header = if (string.find(body, "^\n* ") != nil) tostring(step) else ""
+	if (header != "" && top) {
+		return nil, nil
+	}
+	header ..= if (trailing == 0) "-" else if (trailing == 1) "" else "+"
+	const written = string.split(body, "\n")
+	for (_ = 2, trailing) {
+		table.insert(written, "")
+	}
+	return header, written
+}
+
+// `value` written after `head` (the start of its line: "key:", ":" or a
+// sequence's "-", `item`), its own lines at `column`.
+function Value(head: string, item: boolean, value: unknown, column: number, path: string) {
+	const shape: Shape = ShapeOf(value, path)
+	if (shape == "scalar") {
+		if (type(value) == "string") {
+			const header, body = Literal(value, false)
+			if (header != nil && body != nil) {
+				table.insert(lines, `{head} |{header}`)
+				const pad = string.rep(" ", column)
+				for (_, line in body) {
+					table.insert(lines, if (line == "") "" else pad .. line)
+				}
+				return
+			}
+		}
+		table.insert(lines, `{head} {ScalarText(value, path)}`)
+		return
+	}
+	Enter(value, path)
+	if (next(value :: Table) == nil) {
+		table.insert(lines, head .. (if (shape == "seq") " []" else " {}"))
+		open[value] = nil
+		return
+	}
+	const first = #lines + 1
+	if (!item) {
+		table.insert(lines, head)
+	}
+	Collection(value :: Table, shape, column, path)
+	if (item) {
+		// The first entry goes on the dash's line: "- a: 1", "- - x".
+		lines[first] = head .. string.rep(" ", column - #head) .. string.sub(lines[first], column + 1)
+	}
+	open[value] = nil
+}
+
+// A mapping's entries or a sequence's items, at `column`.
+function Collection(t: Table, shape: Shape, column: number, path: string) {
+	const pad = string.rep(" ", column)
+	if (shape == "seq") {
+		const list = t :: { unknown }
+		for (i, item in list) {
+			Value(pad .. "-", true, item, column + step, `{path}[{i}]`)
+		}
+		return
+	}
+	for (_, key in SortedKeys(t, path)) {
+		const text = KeyText(key, path)
+		const at = ChildPath(path, key)
+		if (#text > 1000) {
+			// Past an implicit key's 1024 characters: an explicit one.
+			table.insert(lines, `{pad}? {text}`)
+			Value(pad .. ":", false, t[key], column + step, at)
+		} else {
+			Value(`{pad}{text}:`, false, t[key], column + step, at)
+		}
+	}
+}
+
+// A value as a YAML document: mappings and sequences in block style, keys
+// sorted (so the output is the same every run), strings quoted when they
+// would read as something else, and those with line breaks as literal
+// blocks. `options.indent` is the indentation step (2 to 9, 2 by default).
+function encode(value: unknown, options: Options?): string {
+	const indent = if (options != nil) options.indent else nil
+	if (indent != nil && (type(indent) != "number" || indent < 2 || indent > 9 || indent != math.floor(indent))) {
+		error("yaml.encode: options.indent is a whole number from 2 to 9", 2)
+	}
+	lines = {}
+	open = {}
+	step = indent ?? 2
+	const ok, result = pcall(function() {
+		const shape: Shape = ShapeOf(value, "")
+		let header: string? = nil
+		let body: { string }? = nil
+		if (type(value) == "string") {
+			header, body = Literal(value, true)
+		}
+		if (header != nil && body != nil) {
+			table.insert(lines, "|" .. header)
+			const pad = string.rep(" ", step)
+			for (_, line in body) {
+				table.insert(lines, if (line == "") "" else pad .. line)
+			}
+		} else if (shape == "scalar") {
+			table.insert(lines, ScalarText(value, ""))
+		} else if (next(value :: Table) == nil) {
+			table.insert(lines, if (shape == "seq") "[]" else "{}")
+		} else {
+			Enter(value, "")
+			Collection(value :: Table, shape, 0, "")
+		}
+	})
+	const written = lines
+	lines = {}
+	open = {}
+	if (!ok) {
+		if (type(result) == "table") {
+			error(`yaml.encode: {(result :: Failure).message}`, 2)
+		}
+		error(result, 0)
+	}
+	return table.concat(written, "\n") .. "\n"
+}
+
+return {
+	decode = decode,
+	decodeAll = decodeAll,
+	encode = encode,
+	null = json.null,
+	object = json.object,
+	array = json.array,
+}

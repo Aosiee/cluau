@@ -52,6 +52,8 @@ namespace {
 			return "local c = require('@std/csv') return function(s) pcall(c.parse, s) pcall(c.records, s) end";
 		if (target == "toml")
 			return "local t = require('@std/toml') return function(s) local ok, v = pcall(t.decode, s) if ok then pcall(t.encode, v) end end";
+		if (target == "yaml")
+			return "local y = require('@std/yaml') return function(s) local ok, v = pcall(y.decodeAll, s) if ok then pcall(y.encode, v) end end";
 		if (target == "regex")
 			return "local r = require('@std/regex') return function(s)\n"
 				   "  local cut = string.find(s, '\\n', 1, true) or #s + 1\n"

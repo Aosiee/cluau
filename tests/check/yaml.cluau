@@ -1,0 +1,10 @@
+// Mistakes with @std/yaml that cluau check reports.
+const yaml = require("@std/yaml")
+
+const config = yaml.decode("port: 8080\n")
+print(config.port)                                  // a decoded value is unknown until cast
+const port: number = yaml.decode("8080\n")          // the same for a number
+const documents: { string } = yaml.decodeAll("a\n") // documents are unknown values
+yaml.encode({ a = 1 }, { indent = "4" })            // the indentation is a number
+const text: number = yaml.encode({})                // encode gives text
+yaml.decode(42)                                     // decode reads text

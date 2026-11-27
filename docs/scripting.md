@@ -87,10 +87,10 @@ only computes.
   `@std/path` (text only: `absolute` and `relative` take absolute paths,
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
   `@std/random`, `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`,
-  `@std/args`, `@std/csv`, `@std/toml`, `@std/collections`, `@std/uuid`,
-  `@std/semver`, `@std/log` (which has no `CLUAU_LOG` to read there) and
-  `@std/test` work as usual, as do Luau's own libraries, which have no file
-  or process access.
+  `@std/args`, `@std/csv`, `@std/toml`, `@std/yaml`, `@std/collections`,
+  `@std/uuid`, `@std/semver`, `@std/log` (which has no `CLUAU_LOG` to read
+  there) and `@std/test` work as usual, as do Luau's own libraries, which
+  have no file or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1108,6 +1108,89 @@ fs.write("config.toml", toml.encode(config))
   over. Arrays and inline tables nest up to 1000 deep.
 - It is TOML 1.0: an inline table is on one line with no comma after its
   last value, a time has its seconds, and `\e` and `\xHH` are not escapes.
+
+### `@std/yaml`
+
+YAML 1.2 (yaml.org/spec/1.2.2): configuration files and data read into
+tables and written back.
+
+| function | is |
+|---|---|
+| `decode(text): unknown` | the text's one document (`yaml.null` when it has none). Several documents are an error, and so is a malformed one, saying what and where: `yaml.decode: the key 'port' is in the mapping twice (line 5, column 3)` |
+| `decodeAll(text): {unknown}` | every document of the text, in order (`---` starts one, `...` ends one) |
+| `encode(value, options?): string` | a value as a document in block style: keys sorted, so the output is the same every run; strings quoted when they would read as something else and written as literal blocks (`\|`) when they hold line breaks. `options.indent` is the indentation step, 2 (the default) to 9 |
+| `null` | what null is: `json.null`, so a key whose value is null stays in its table and `json.encode` writes it as `null` |
+| `object(t?)`, `array(t?)` | `json.object` and `json.array`: mark a table to encode as a mapping or a sequence |
+
+Values are read with the 1.2 core schema: `null`, `Null`, `NULL`, `~` and
+nothing are null; `true` and `false` (also `True`, `TRUE`, `False`,
+`FALSE`) are booleans; integers are decimal (`012` is twelve), `0o17` or
+`0x1F`; floats are `1.5`, `.5`, `1e3`, `.inf`, `-.inf` and `.nan`; any
+other plain scalar is a string, YAML 1.1's `yes`, `no`, `on`, `off`,
+`1_000`, `12:30` and `2001-12-14` among them. Quoted and block scalars are
+strings. A mapping decodes marked as `json.object` marks a table, so that
+one whose keys are 1 to n encodes as a mapping (or a JSON object) again;
+an empty sequence decodes marked as `json.array` marks one.
+
+```
+const fs = require("@std/fs")
+const yaml = require("@std/yaml")
+const config = yaml.decode(fs.read("config.yaml")) :: { server: { host: string, port: number }, tags: { string } }
+print(config.server.host, config.server.port, #config.tags)
+fs.write("config.yaml", yaml.encode(config))
+```
+
+- Everything YAML 1.2 has: block mappings and sequences (with the compact
+  forms `- a: 1` and `- - x`, and a sequence at its key's column), explicit
+  `? key` entries, flow collections (`[a, b]`, `{a: 1, b}`, a `key: value`
+  pair in a sequence), plain scalars over several lines, single- and
+  double-quoted ones with every escape, literal (`|`) and folded (`>`)
+  block scalars with chomping (`-`, `+`) and indentation indicators,
+  comments, `---` and `...`, `%YAML` and `%TAG` directives.
+- Keys are scalars, read like values: `1: a` has the number key 1 and
+  `"1": a` the text key `"1"`. A key that is a sequence or a mapping (a
+  complex key), a null or NaN key, and a key given twice in a mapping are
+  errors.
+- An alias (`*name`) is the node its anchor (`&name`) names: the same
+  table, not a copy. Aliases may stand for 1,000,000 nodes in all (an alias
+  counts as the nodes it names, its own aliases included), which stops a
+  document of aliases of aliases from growing exponentially; past that, and
+  for an alias inside the node it names, `decode` raises an error.
+- Tags: `!!str`, `!!int`, `!!float`, `!!bool` and `!!null` read the
+  scalar as that type (`!!int "12"` is 12; `!!int abc` is an error),
+  `!!seq` and `!!map` check the node is one, and `!` alone makes a scalar a
+  string. Any other tag (`!local`, `!!binary`, `!<tag:example.com,2000:x>`)
+  keeps the node as it is: a scalar is its text as a string, a collection
+  is a sequence or a mapping. `%TAG` handles are expanded before this.
+- `%YAML 1.x` is accepted (a 1.1 document is read by the 1.2 rules, so
+  `yes` is text); another major version is an error. Other directives are
+  passed over.
+- An integer outside -2^53 to 2^53 is an error, as in `@std/toml`.
+  `encode` writes a whole number in that range as an integer and any other
+  number so that it reads back the same, with a point for YAML 1.1 readers:
+  `0.1`, `1.0e+300`, `9007199254740994.0`, `-0.0`, `.inf`, `.nan`.
+- `encode` quotes a string that would read as something else here or in
+  YAML 1.1 (`"yes"`, `"1.0"`, `"null"`, `"012"`, `"12:30"`), one with spaces
+  at either end, `: ` or ` #` in it, or an indicator first (`"- x"`,
+  `"&a"`), and writes control characters as escapes. An empty table is
+  `{}` unless `json.array` marks it; a table met twice is written twice (no
+  anchors).
+- What `encode` cannot write is an error naming where it is: a function or
+  another value with no YAML form (`yaml.encode: a.b[3] is a function,
+  which YAML has no form for`), a table that holds itself, a key that is
+  not text, a number or a boolean, text that is not UTF-8.
+- The text must be UTF-8, with no control characters outside quoted
+  escapes (tabs and line breaks aside). Line breaks may be `\r\n` or `\r`,
+  read as `\n`, and a byte order mark at the start is passed over.
+  Collections nest up to 1000 deep. Indentation is spaces; a tab may
+  separate a value from its indicator (`key:<tab>value`).
+- Where libyaml (and so PyYAML) and the 1.2 rules differ, this follows the
+  rules, but for two cases it reads as libyaml does: a block scalar's
+  indentation indicator at the top level counts from column 0 (`--- |2`
+  is indented two spaces), and a leading empty line with more spaces than
+  a block scalar's first line sets its indentation rather than being an
+  error. A block collection does not start on the line of `---`
+  (`--- a: b` is an error, as in libyaml).
 
 ### `@std/time`
 
