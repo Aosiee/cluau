@@ -231,9 +231,13 @@ either.
 
 ## Licence
 
-The cluau License: MIT plus a credit line in the credits of every product that
-includes cluau or is made with it. No splash screen or logo is required. See
-[`LICENSE`](LICENSE).
+cluau is released under the Odd Fish Society License ([`LICENSE`](LICENSE)), which is
+MIT with one added condition. A product that includes cluau, is written in cluau or is
+built with it, credits it in its credits, about box or documentation, as "Uses cluau -
+Copyright (c) 2026 Odd Fish Society / Felipe Lara". A product that uses several Odd Fish
+Society libraries can credit them together, on one line or several, such as "Uses kiln,
+cluau and wisp - Copyright (c) 2026 Odd Fish Society / Felipe Lara". No logo or splash
+screen is required.
 
 The `cluau` tool contains Luau, isocline, libcurl, Mbed TLS, PCRE2, SQLite
 and miniz, each under its own licence (MIT, the curl licence, Apache 2.0,
