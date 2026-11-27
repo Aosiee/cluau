@@ -425,7 +425,20 @@ jobs:
           merge-multiple: true
 
       - name: Notes from the tag
+        env:
+          # The extension is on the Marketplace and Open VSX only when the
+          # token that publishes it there is set.
+          HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
+          HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
         run: |
+          stores=""
+          if [ "$HAS_VSCE_PAT" = true ] && [ "$HAS_OVSX_PAT" = true ]; then
+            stores=", also on the VS Code Marketplace and Open VSX"
+          elif [ "$HAS_VSCE_PAT" = true ]; then
+            stores=", also on the VS Code Marketplace"
+          elif [ "$HAS_OVSX_PAT" = true ]; then
+            stores=", also on Open VSX"
+          fi
           git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
           {
             git tag -l --format='%(contents)' "$TAG"
@@ -442,7 +455,7 @@ jobs:
             echo "irm https://github.com/Aosiee/cluau/releases/latest/download/install.ps1 | iex"
             echo '```'
             echo
-            echo "Downloads: the \`cluau\` command line (run, check, test and profile scripts, the REPL, the language server, the debugger, translate, convert) for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), with the licence, the README, the syntax guide and the scripting guide; Debian and RPM packages for Linux (\`.deb\`, \`.rpm\`); the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`, also on the VS Code Marketplace and Open VSX). To embed the translator, build from source (no dependencies)."
+            echo "Downloads: the \`cluau\` command line (run, check, test and profile scripts, the REPL, the language server, the debugger, translate, convert) for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), with the licence, the README, the syntax guide and the scripting guide; Debian and RPM packages for Linux (\`.deb\`, \`.rpm\`); the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`$stores). To embed the translator, build from source (no dependencies)."
           } > notes.md
           cp installer/install.sh installer/install.ps1 dist/
           (cd dist && sha256sum * > SHA256SUMS)
