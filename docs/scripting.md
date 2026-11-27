@@ -87,9 +87,9 @@ only computes.
   there being no working directory), `@std/regex`, `@std/task`, `@std/crypto`,
   `@std/random`, `@std/encoding`, `@std/compress`, `@std/term`, `@std/url`,
   `@std/args`, `@std/csv`, `@std/toml`, `@std/collections`, `@std/uuid`,
-  `@std/log` (which has no `CLUAU_LOG` to read there) and `@std/test` work
-  as usual, as do Luau's own libraries, which have no file or process
-  access.
+  `@std/semver`, `@std/log` (which has no `CLUAU_LOG` to read there) and
+  `@std/test` work as usual, as do Luau's own libraries, which have no file
+  or process access.
 
 `--sandbox` goes before the command, so `cluau --sandbox -e '...'`,
 `cluau --sandbox test` and the prompt (`cluau --sandbox`) are sandboxed
@@ -1632,6 +1632,102 @@ if (given == nil) {
   error. The random bytes come from the system a few thousand at a time
   (`getrandom` on Linux, `arc4random_buf` on macOS, `BCryptGenRandom` on
   Windows), as `crypto.randomBytes` has them, in every build.
+
+### `@std/semver`
+
+Semantic Versioning 2.0.0 (semver.org): versions read and written, ordered
+by precedence, and incremented, and npm's ranges (`^1.2.3`, `~1.2`, `1.x`,
+`>=1.2.3 <2 || 3.0.0 - 3.4`), for scripts that make releases or pick
+dependencies.
+
+| function | is |
+|---|---|
+| `parse(text): Version?` | `{ major, minor, patch, prerelease, build }`: the numbers, and the identifiers after `-` and `+` in order, numeric prerelease ones as numbers (`1.0.0-rc.1+linux.64` has `prerelease` `{ "rc", 1 }` and `build` `{ "linux", "64" }`); `nil` when the text is not a version |
+| `isValid(text): boolean` | whether `parse` reads it |
+| `format(version): string` | a `Version` as text: `1.0.0-rc.1+linux.64` |
+| `compare(a, b): number` | -1, 0 or 1 as `a` has lower, the same or higher precedence than `b` |
+| `lessThan(a, b)`, `greaterThan(a, b)`, `equals(a, b)`: `boolean` | the same comparisons; `equals` is the same precedence, so `1.0.0+a` equals `1.0.0+b` |
+| `sort(list, options?)` | a new list of the versions from lowest to highest (`options.descending`: highest first), those of the same precedence in the order they were in |
+| `increment(version, release, identifier?): string` | the next version for a `"major"`, `"minor"`, `"patch"`, `"premajor"`, `"preminor"`, `"prepatch"` or `"prerelease"` release, as npm's `semver.inc` makes it (below) |
+| `satisfies(version, range): boolean` | whether the version is in the range |
+| `maxSatisfying(list, range)`, `minSatisfying(list, range)` | the highest or lowest version of the list in the range, as the list has it (the first of those of the same precedence); `nil` when none is. Items that are not versions (`"latest"`, `"v1.2.3"`) are passed over |
+| `parseRange(text): Range` | the range as `{ sets }`: lists of comparators (`{ operator, version }`, the operator one of `<`, `<=`, `>`, `>=`, `=`), what `~`, `^`, x-ranges, partial versions and hyphen ranges stand for written out. A version is in the range when it satisfies every comparator of one of the sets; a set with none is any version |
+| `formatRange(range): string` | a range written out as npm writes one: `^1.2.3` is `>=1.2.3 <2.0.0-0`, sets are joined by ` \|\| `, and a set of any version is `*` |
+
+A version or a range is text or what `parse` or `parseRange` gives; the
+list functions give back what their list holds (text from a list of text).
+Text that is not a version, a malformed range or a malformed `Version` is
+an error saying what is wrong: `semver.satisfies: '1.2.3 <' is not a
+range: '<' has no version after it`.
+
+```
+const semver = require("@std/semver")
+
+print(semver.compare("1.0.0-rc.1", "1.0.0"))                 // -1
+print(semver.increment("1.4.0-beta.2", "prerelease"))       // 1.4.0-beta.3
+print(semver.increment("1.4.0", "preminor", "rc"))          // 1.5.0-rc.0
+print(semver.satisfies("1.4.2", "^1.2.0 || ~2.0.1"))        // true
+const tags = { "1.2.3", "1.9.0", "latest", "2.0.0-rc.1", "2.0.0" }
+print(semver.maxSatisfying(tags, "<2"))                     // 1.9.0
+print(table.concat(semver.sort({ "1.10.0", "1.2.0", "1.2.0-rc.1" }), " "))   // 1.2.0-rc.1 1.2.0 1.10.0
+```
+
+- Versions are SemVer 2.0.0's grammar exactly: three numbers without
+  leading zeros, then an optional `-` prerelease and `+` build, each of
+  dot-separated identifiers of letters, digits and hyphens (a numeric
+  prerelease identifier has no leading zero). A `v` or `=` before the
+  version, and spaces around it, are not part of one. The numbers, and
+  numeric identifiers, are at most 2^53 - 1, the largest a number holds
+  exactly.
+- Precedence is the specification's (section 11): the numbers in turn; a
+  version with a prerelease below the same version without one; then the
+  prerelease identifiers in order, numbers by value, below text, and text
+  by its ASCII order (`Z` before `a`), more identifiers above fewer when
+  the ones before are the same. Build metadata plays no part.
+- Ranges follow npm's grammar. A comparator is `<`, `<=`, `>`, `>=` or `=`
+  (or none) and a version, spaces between them allowed; comparators
+  separated by spaces must all hold, and sets separated by `||` are
+  alternatives. A partial version or one with `x`, `X` or `*` for a number
+  stands for all the versions it names: `1.2` and `1.2.x` are
+  `>=1.2.0 <1.3.0-0`, `*` (or nothing) any version, `>1.2` `>=1.3.0`,
+  `<=1.2` `<1.3.0-0`. A prerelease of `-0` is the lowest there is, so
+  `<1.3.0-0` leaves out the prereleases of 1.3.0 as well as 1.3.0.
+- `~` keeps the minor version when one is given, the major otherwise:
+  `~1.2.3` is `>=1.2.3 <1.3.0-0`, `~1.2` is `>=1.2.0 <1.3.0-0`, `~1` is
+  `>=1.0.0 <2.0.0-0`. `^` keeps the left-most part that is not 0:
+  `^1.2.3` is `>=1.2.3 <2.0.0-0`, `^0.2.3` is `>=0.2.3 <0.3.0-0`, `^0.0.3`
+  is `>=0.0.3 <0.0.4-0`, and of a partial version, the parts given
+  (`^0.0` is `>=0.0.0 <0.1.0-0`, `^1.x` is `>=1.0.0 <2.0.0-0`).
+- A hyphen range `A - B` is `>=A <=B`, its set's only part, spaces around
+  the `-`: a partial version on the left has its missing numbers as 0
+  (`1.2 - 2.3.4` is `>=1.2.0 <=2.3.4`), and on the right takes in all it
+  names (`1.2.3 - 2.3` is `>=1.2.3 <2.4.0-0`).
+- A prerelease version is in a range only when a comparator of the same
+  set has a prerelease of the same major.minor.patch, as npm has it:
+  `1.2.3-beta.4` satisfies `^1.2.3-beta.2`, while `1.3.0-beta` does not
+  satisfy `^1.2.3`, nor `1.2.3-beta` `*`. A prerelease is then something
+  a range asks for by name, not an update it takes in. Each set is tried
+  on its own, so `1.2.3-beta` satisfies `1.2.3-beta || *`.
+- Build metadata in a range is ignored. What npm reads only in its loose
+  mode (`v1.2.3`, `~>1.2`, `1.2.3beta`) and its `includePrerelease` option
+  are not part of this module.
+- `increment` gives text, its build metadata left off. `"major"`,
+  `"minor"` and `"patch"` raise that number and set those after it to 0,
+  but a prerelease of a version that is already the next one becomes it:
+  `1.2.3` and `2.0.0-rc.1` both go to `2.0.0` with `"major"`, `1.2.0-1`
+  goes to `1.2.0` with `"minor"`, `1.2.3-4` to `1.2.3` with `"patch"`.
+  `"prerelease"` raises the last numeric prerelease identifier
+  (`1.2.3-alpha.9.beta` to `1.2.3-alpha.10.beta`), adds `.0` when there is
+  none (`1.2.3-beta` to `1.2.3-beta.0`), and of a version without a
+  prerelease makes the next patch's first (`1.2.4` to `1.2.5-0`).
+  `"premajor"`, `"preminor"` and `"prepatch"` raise that number, set those
+  after it to 0 and start a prerelease: `1.2.3` to `2.0.0-0`, `1.3.0-0`,
+  `1.2.4-0`. With an `identifier` (one identifier: `"rc"`, `"beta"`) the
+  prerelease of the four `pre` releases starts with it: what follows
+  `rc.` is kept when it was already `rc.<number>` (`1.2.3-rc.1` to
+  `1.2.3-rc.2`), and otherwise it is `rc.0` (`1.2.3-alpha.1` to
+  `1.2.3-rc.0`, `1.2.3` to `1.2.4-rc.0`). The identifier is ignored for
+  `"major"`, `"minor"` and `"patch"`.
 
 ### `@std/random`
 

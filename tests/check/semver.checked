@@ -1,0 +1,33 @@
+semver.cluau:6:7: Value of type 'Version?' could be nil
+semver.cluau:7:27: Expected this to be '"major" | "minor" | "patch" | "premajor" | "preminor" | "prepatch" | "prerelease"', but got '"micro"'; none of the union options are compatible
+semver.cluau:8:1: Expected this to be 'Version', but got 'string'
+semver.cluau:9:1: Expected this to be exactly '{number}', but got '{string}'
+caused by:
+  Property '[indexer value]' is not compatible.
+Expected this to be exactly 'number', but got 'string'
+semver.cluau:10:1: Expected this to be 'Version?', but got 'string?'
+caused by:
+  Not all union options are compatible.
+Expected this to be 'Version?', but got 'string'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be 'Version', but got 'string'
+semver.cluau:12:1: Expected this to be 'string?', but got 'Version?'
+caused by:
+  Not all union options are compatible.
+Expected this to be 'string?', but got 'Version'
+caused by:
+  None of the union options are compatible. For example:
+Expected this to be 'string', but got 'Version'
+semver.cluau:13:27: Expected this to be 'Range | string', but got 'number'; none of the union options are compatible
+semver.cluau:14:16: Expected this to be 'Version | string', but got 'number'; none of the union options are compatible
+semver.cluau:14:19: Expected this to be 'Version | string', but got 'number'; none of the union options are compatible
+semver.cluau:15:15: Expected this to be 'Version', but got 'string'
+semver.cluau:16:1: Expected this to be 'string', but got 'Range'
+semver.cluau:17:1: Expected this to be 'boolean', but got 'number'
+semver.cluau:19:1: Expected this to be 'number', but got 'string'
+semver.cluau:20:1: Expected this to be 'number', but got 'number?'
+semver.cluau:20:38: Expected this to be 'string', but got 'number'
+semver.cluau:21:12: Expected this to be 'string', but got 'number'
+cluau check: 16 error(s), 0 warning(s)
+exit: 1

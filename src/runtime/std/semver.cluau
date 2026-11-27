@@ -1,0 +1,893 @@
+// @std/semver: Semantic Versioning 2.0.0 (https://semver.org): versions
+// read and written, ordered by precedence, incremented, and matched against
+// ranges in npm's grammar (https://github.com/npm/node-semver#ranges).
+//
+//   const semver = require("@std/semver")
+//   const v = semver.parse("1.4.0-beta.2+build.7")    // { major = 1, minor = 4, patch = 0, prerelease = { "beta", 2 }, build = { "build", "7" } }
+//   semver.compare("1.0.0-rc.1", "1.0.0")            // -1
+//   semver.increment("1.4.0-beta.2", "prerelease")   // "1.4.0-beta.3"
+//   semver.satisfies("1.4.2", "^1.2.0 || ~2.0.1")    // true
+//   semver.maxSatisfying({ "1.2.3", "1.9.0", "2.0.0" }, "<2")   // "1.9.0"
+//
+// The functions take a version as text or as a Version table, except
+// `format`, which takes a table, and give back text where npm does.
+
+export type Version = {
+	major: number,
+	minor: number,
+	patch: number,
+	// Its identifiers in order: numeric ones as numbers, others as strings.
+	prerelease: { string | number },
+	build: { string },
+}
+export type Operator = "<" | "<=" | ">" | ">=" | "="
+export type Comparator = { operator: Operator, version: Version }
+// A version satisfies a range when it satisfies every comparator of one of
+// its sets; a set with no comparators is any version.
+export type Range = { sets: { { Comparator } } }
+export type Release = "major" | "minor" | "patch" | "premajor" | "preminor" | "prepatch" | "prerelease"
+export type SortOptions = { descending: boolean? }
+
+type Identifier = string | number
+
+// A version's numbers, and its numeric identifiers, are at most 2^53 - 1:
+// past it a number does not hold every whole number.
+const kLargest = 9007199254740991
+
+// Text that is an identifier's characters, none missing.
+function Characters(text: string): boolean {
+	return string.find(text, "^[0-9A-Za-z%-]+$") != nil
+}
+
+function Digits(text: string): boolean {
+	return string.find(text, "^[0-9]+$") != nil
+}
+
+// A numeric identifier ("0", or digits not starting with 0, up to 2^53 - 1)
+// as its number; or nil, and why it is not one.
+function Numeric(text: string): (number?, string?) {
+	if (!Digits(text)) {
+		return nil, "is not a number"
+	}
+	if (#text > 1 && string.sub(text, 1, 1) == "0") {
+		return nil, "has a number with a leading zero"
+	}
+	const n = tonumber(text) :: number
+	if (#text > 16 || n > kLargest) {
+		return nil, "has a number past 2^53 - 1"
+	}
+	return n, nil
+}
+
+function Prerelease(text: string): { Identifier }? {
+	const out: { Identifier } = {}
+	for (_, part in string.split(text, ".")) {
+		if (!Characters(part)) {
+			return nil
+		}
+		if (Digits(part)) {
+			const n = Numeric(part)
+			if (n == nil) {
+				return nil
+			}
+			table.insert(out, n)
+		} else {
+			table.insert(out, part)
+		}
+	}
+	return out
+}
+
+function Build(text: string): { string }? {
+	const out: { string } = {}
+	for (_, part in string.split(text, ".")) {
+		if (!Characters(part)) {
+			return nil
+		}
+		table.insert(out, part)
+	}
+	return out
+}
+
+// What follows a version's numbers: an optional -prerelease, then an
+// optional +build (nil when it is neither).
+function Qualifier(text: string): ({ Identifier }?, { string }?) {
+	let rest = text
+	let prerelease: { Identifier } = {}
+	let build: { string } = {}
+	if (string.sub(rest, 1, 1) == "-") {
+		const plus = string.find(rest, "+", 1, true)
+		const pre = Prerelease(string.sub(rest, 2, (plus ?? #rest + 1) - 1))
+		if (pre == nil) {
+			return nil, nil
+		}
+		prerelease = pre
+		rest = if (plus != nil) string.sub(rest, plus) else ""
+	}
+	if (string.sub(rest, 1, 1) == "+") {
+		const meta = Build(string.sub(rest, 2))
+		if (meta == nil) {
+			return nil, nil
+		}
+		build = meta
+		rest = ""
+	}
+	if (rest != "") {
+		return nil, nil
+	}
+	return prerelease, build
+}
+
+// The version `text` is, by SemVer 2.0.0's grammar exactly (no "v", no
+// spaces, no leading zeros); nil when it is not one.
+function Parse(text: string): Version? {
+	const major, minor, patch, rest = string.match(text, "^([0-9]+)%.([0-9]+)%.([0-9]+)(.*)$")
+	if (major == nil || minor == nil || patch == nil || rest == nil) {
+		return nil
+	}
+	const a = Numeric(major)
+	const b = Numeric(minor)
+	const c = Numeric(patch)
+	if (a == nil || b == nil || c == nil) {
+		return nil
+	}
+	const prerelease, build = Qualifier(rest)
+	if (prerelease == nil || build == nil) {
+		return nil
+	}
+	return { major = a, minor = b, patch = c, prerelease = prerelease, build = build }
+}
+
+// Why a table given as a Version is not one (nil when it is).
+function Problem(v: Version): string? {
+	const t = (v :: unknown) :: { [string]: unknown }
+	for (_, field in { "major", "minor", "patch" }) {
+		const n = t[field]
+		if (type(n) != "number" || n != math.floor(n) || n < 0 || n > kLargest) {
+			return `a Version's {field} is a whole number from 0 to 2^53 - 1, not {repr(n)}`
+		}
+	}
+	const prerelease = t.prerelease
+	if (prerelease != nil) {
+		if (type(prerelease) != "table") {
+			return `a Version's prerelease is a list of identifiers, not {repr(prerelease)}`
+		}
+		for (_, item in prerelease :: { unknown }) {
+			const numeric = type(item) == "number" && item == math.floor(item) && item >= 0 && item <= kLargest
+			const text = type(item) == "string" && Characters(item) && !Digits(item)
+			if (!numeric && !text) {
+				return `{repr(item)} is not a prerelease identifier (a whole number, or text of letters, digits and hyphens with a letter or hyphen in it)`
+			}
+		}
+	}
+	const build = t.build
+	if (build != nil) {
+		if (type(build) != "table") {
+			return `a Version's build is a list of identifiers, not {repr(build)}`
+		}
+		for (_, item in build :: { unknown }) {
+			if (type(item) != "string" || !Characters(item)) {
+				return `{repr(item)} is not a build identifier (text of letters, digits and hyphens)`
+			}
+		}
+	}
+	return nil
+}
+
+// A table given as a Version, with an empty prerelease and build where it
+// has none.
+function Filled(v: Version): Version {
+	const t = (v :: unknown) :: { [string]: unknown }
+	if (t.prerelease != nil && t.build != nil) {
+		return v
+	}
+	return { major = v.major, minor = v.minor, patch = v.patch, prerelease = v.prerelease ?? {}, build = v.build ?? {} }
+}
+
+// `value` as a Version, or why it is not one.
+function Read(value: string | Version): (Version?, string?) {
+	if (type(value) == "string") {
+		const v = Parse(value)
+		if (v == nil) {
+			return nil, `'{value}' is not a version (major.minor.patch, with an optional -prerelease and +build)`
+		}
+		return v, nil
+	}
+	if (type(value) != "table") {
+		return nil, `expected a version (text or a Version), not a {type(value)}`
+	}
+	const why = Problem(value)
+	if (why != nil) {
+		return nil, why
+	}
+	return Filled(value), nil
+}
+
+// `value` as a Version, or an error from semver.<name> (raised at the line
+// that called it).
+function Need(name: string, value: string | Version): Version {
+	const v, why = Read(value)
+	if (v == nil) {
+		error(`semver.{name}: {why}`, 3)
+	}
+	return v
+}
+
+function Sign(a: number, b: number): number {
+	return if (a < b) -1 else if (a > b) 1 else 0
+}
+
+// Two prerelease identifiers: numbers by value, below text, and text by
+// its bytes (ASCII order).
+function CompareIdentifiers(a: Identifier, b: Identifier): number {
+	if (type(a) == "number") {
+		return if (type(b) == "number") Sign(a, b) else -1
+	}
+	if (type(b) == "number") {
+		return 1
+	}
+	return if (a < b) -1 else if (a > b) 1 else 0
+}
+
+// Precedence (SemVer 2.0.0, section 11): the numbers, then a version with
+// a prerelease below the one without, then the prerelease identifiers in
+// order, more of them above fewer. Build metadata plays no part.
+function Compare(a: Version, b: Version): number {
+	const core = if (a.major != b.major) Sign(a.major, b.major) else if (a.minor != b.minor) Sign(a.minor, b.minor) else Sign(a.patch, b.patch)
+	if (core != 0) {
+		return core
+	}
+	const x = a.prerelease
+	const y = b.prerelease
+	if (#x == 0 || #y == 0) {
+		return Sign(#y, #x)
+	}
+	for (i = 1, math.max(#x, #y)) {
+		const p = x[i]
+		const q = y[i]
+		if (p == nil) {
+			return -1
+		}
+		if (q == nil) {
+			return 1
+		}
+		const order = CompareIdentifiers(p, q)
+		if (order != 0) {
+			return order
+		}
+	}
+	return 0
+}
+
+function Format(v: Version): string {
+	let text = `{v.major}.{v.minor}.{v.patch}`
+	if (#v.prerelease > 0) {
+		const parts: { string } = {}
+		for (_, id in v.prerelease) {
+			table.insert(parts, tostring(id))
+		}
+		text ..= "-" .. table.concat(parts, ".")
+	}
+	if (#v.build > 0) {
+		text ..= "+" .. table.concat(v.build, ".")
+	}
+	return text
+}
+
+// ---- versions --------------------------------------------------------
+
+// The version `text` is (nil when it is not one by SemVer 2.0.0's grammar).
+function parse(text: string): Version? {
+	if (type(text) != "string") {
+		error(`semver.parse: expected a string, not a {type(text)}`, 2)
+	}
+	return Parse(text)
+}
+
+function isValid(text: string): boolean {
+	if (type(text) != "string") {
+		error(`semver.isValid: expected a string, not a {type(text)}`, 2)
+	}
+	return Parse(text) != nil
+}
+
+// A Version as text: major.minor.patch, then -prerelease and +build.
+function format(version: Version): string {
+	return Format(Need("format", version))
+}
+
+// -1, 0 or 1 as `a` has lower, the same or higher precedence than `b`.
+function compare(a: string | Version, b: string | Version): number {
+	return Compare(Need("compare", a), Need("compare", b))
+}
+
+function lessThan(a: string | Version, b: string | Version): boolean {
+	return Compare(Need("lessThan", a), Need("lessThan", b)) < 0
+}
+
+function greaterThan(a: string | Version, b: string | Version): boolean {
+	return Compare(Need("greaterThan", a), Need("greaterThan", b)) > 0
+}
+
+// Whether two versions have the same precedence (their build metadata may
+// differ).
+function equals(a: string | Version, b: string | Version): boolean {
+	return Compare(Need("equals", a), Need("equals", b)) == 0
+}
+
+// A new list of the versions from lowest to highest (or the reverse), the
+// ones of the same precedence in the order they were in.
+function Sort(list: { string | Version }, options: SortOptions?): { string | Version } {
+	if (type(list) != "table") {
+		error(`semver.sort: expected a list of versions, not a {type(list)}`, 3)
+	}
+	const keyed: { { version: Version, at: number } } = {}
+	for (i, item in ipairs(list)) {
+		const v, why = Read(item)
+		if (v == nil) {
+			error(`semver.sort: item {i}: {why}`, 3)
+		}
+		table.insert(keyed, { version = v, at = i })
+	}
+	const descending = options != nil && options.descending == true
+	table.sort(keyed, function(p: { version: Version, at: number }, q: { version: Version, at: number }): boolean {
+		const order = Compare(p.version, q.version)
+		if (order != 0) {
+			return if (descending) order > 0 else order < 0
+		}
+		return p.at < q.at
+	})
+	const out: { string | Version } = table.create(#keyed)
+	for (i, k in ipairs(keyed)) {
+		out[i] = list[k.at]
+	}
+	return out
+}
+
+// An identifier given to increment, as it goes in a prerelease.
+function IdentifierOf(identifier: string): Identifier {
+	if (type(identifier) != "string") {
+		error(`semver.increment: the identifier is text, not a {type(identifier)}`, 3)
+	}
+	if (!Characters(identifier)) {
+		error(`semver.increment: '{identifier}' is not a prerelease identifier (letters, digits and hyphens)`, 3)
+	}
+	if (Digits(identifier)) {
+		const n = Numeric(identifier)
+		if (n == nil) {
+			error(`semver.increment: '{identifier}' is not a prerelease identifier (a number has no leading zero and is at most 2^53 - 1)`, 3)
+		}
+		return n
+	}
+	return identifier
+}
+
+// npm's "pre" step: the last numeric identifier goes up by 1 (or a 0 is
+// added after the others, or is the prerelease when there is none); then,
+// with an identifier, a prerelease that does not start with it (followed by
+// a number) becomes it and 0.
+function Pre(v: Version, identifier: Identifier?) {
+	const pre = v.prerelease
+	if (#pre == 0) {
+		table.insert(pre, 0)
+	} else {
+		let raised = false
+		for (i = #pre, 1, -1) {
+			const id = pre[i]
+			if (type(id) == "number") {
+				pre[i] = id + 1
+				raised = true
+				break
+			}
+		}
+		if (!raised) {
+			table.insert(pre, 0)
+		}
+	}
+	if (identifier != nil) {
+		if (CompareIdentifiers(pre[1], identifier) != 0 || type(pre[2]) != "number") {
+			v.prerelease = { identifier, 0 }
+		}
+	}
+}
+
+const kReleases: { [string]: boolean } = {
+	major = true,
+	minor = true,
+	patch = true,
+	premajor = true,
+	preminor = true,
+	prepatch = true,
+	prerelease = true,
+}
+
+// The version after `version` for a release of that kind, as npm's
+// `semver.inc` makes it (its build metadata left off).
+function increment(version: string | Version, release: Release, identifier: string?): string {
+	const v = Need("increment", version)
+	if (type(release) != "string" || !kReleases[release]) {
+		error(`semver.increment: the release is "major", "minor", "patch", "premajor", "preminor", "prepatch" or "prerelease", not {repr(release)}`, 2)
+	}
+	const id: Identifier? = if (identifier != nil && string.sub(release, 1, 3) == "pre") IdentifierOf(identifier) else nil
+	const out: Version = { major = v.major, minor = v.minor, patch = v.patch, prerelease = table.clone(v.prerelease), build = {} }
+	const released = #out.prerelease == 0
+	switch (release) {
+		case "major":
+			// 1.2.3 and 2.0.0-rc.1 both become 2.0.0.
+			if (out.minor != 0 || out.patch != 0 || released) {
+				out.major += 1
+			}
+			out.minor = 0
+			out.patch = 0
+			out.prerelease = {}
+		case "minor":
+			if (out.patch != 0 || released) {
+				out.minor += 1
+			}
+			out.patch = 0
+			out.prerelease = {}
+		case "patch":
+			if (released) {
+				out.patch += 1
+			}
+			out.prerelease = {}
+		case "premajor":
+			out.major += 1
+			out.minor = 0
+			out.patch = 0
+			out.prerelease = {}
+			Pre(out, id)
+		case "preminor":
+			out.minor += 1
+			out.patch = 0
+			out.prerelease = {}
+			Pre(out, id)
+		case "prepatch":
+			out.patch += 1
+			out.prerelease = {}
+			Pre(out, id)
+		default:
+			if (released) {
+				out.patch += 1
+			}
+			Pre(out, id)
+	}
+	if (out.major > kLargest || out.minor > kLargest || out.patch > kLargest) {
+		error(`semver.increment: the {release} after {Format(v)} has a number past 2^53 - 1`, 2)
+	}
+	for (_, part in out.prerelease) {
+		if (type(part) == "number" && part > kLargest) {
+			error(`semver.increment: the {release} after {Format(v)} has a number past 2^53 - 1`, 2)
+		}
+	}
+	return Format(out)
+}
+
+// ---- ranges ----------------------------------------------------------
+
+// A version as a range writes it: a number, or nil for x, X or * (or one
+// left out), and after the first nil all are nil.
+type Partial = { major: number?, minor: number?, patch: number?, prerelease: { Identifier } }
+
+function Of(major: number, minor: number, patch: number, prerelease: { Identifier }?): Version {
+	return { major = major, minor = minor, patch = patch, prerelease = prerelease ?? {}, build = {} }
+}
+
+function Comp(operator: Operator, version: Version): Comparator {
+	return { operator = operator, version = version }
+}
+
+// A partial version (npm's `partial`: 1, 1.2, 1.2.3-pre+build, 1.x, *),
+// or why `text` is not one.
+function ReadPartial(text: string): (Partial?, string?) {
+	const head, qualifier = string.match(text, "^([^%-+]*)(.*)$")
+	if (head == nil || qualifier == nil) {
+		return nil, "is not a version"
+	}
+	const parts = string.split(head, ".")
+	if (#parts > 3) {
+		return nil, "has more than three numbers"
+	}
+	const numbers: { number? } = {}
+	let wild = false
+	for (i, part in parts) {
+		if (part == "x" || part == "X" || part == "*") {
+			wild = true
+		} else if (part == "") {
+			return nil, "is missing a number"
+		} else {
+			const n, why = Numeric(part)
+			if (n == nil) {
+				return nil, if (Digits(part)) why else "is not a version, a partial version (1.2) or an x-range (1.x)"
+			}
+			if (!wild) {
+				numbers[i] = n
+			}
+		}
+	}
+	let prerelease: { Identifier } = {}
+	if (qualifier != "") {
+		if (#parts < 3) {
+			return nil, "has a prerelease or build after fewer than three numbers"
+		}
+		const pre, build = Qualifier(qualifier)
+		if (pre == nil || build == nil) {
+			return nil, "has a malformed prerelease or build"
+		}
+		prerelease = pre
+	}
+	if (numbers[1] == nil) {
+		return { major = nil, minor = nil, patch = nil, prerelease = {} }, nil
+	}
+	if (numbers[2] == nil) {
+		return { major = numbers[1], minor = nil, patch = nil, prerelease = {} }, nil
+	}
+	if (numbers[3] == nil) {
+		return { major = numbers[1], minor = numbers[2], patch = nil, prerelease = {} }, nil
+	}
+	return { major = numbers[1], minor = numbers[2], patch = numbers[3], prerelease = prerelease }, nil
+}
+
+// The comparators a partial with an operator (or none) stands for, as npm
+// has them. A prerelease of -0 is the lowest a version can have, so
+// <2.0.0-0 leaves out 2.0.0's prereleases as well as 2.0.0.
+function Expand(operator: string, p: Partial): { Comparator } {
+	const major = p.major
+	const minor = p.minor
+	const patch = p.patch
+	if (major == nil) {
+		// >* and <* are no version; *, =*, >=* and <=* are any.
+		return if (operator == ">" || operator == "<") { Comp("<", Of(0, 0, 0, { 0 })) } else {}
+	}
+	if (operator == "~") {
+		if (minor == nil) {
+			return { Comp(">=", Of(major, 0, 0)), Comp("<", Of(major + 1, 0, 0, { 0 })) }
+		}
+		return { Comp(">=", Of(major, minor, patch ?? 0, p.prerelease)), Comp("<", Of(major, minor + 1, 0, { 0 })) }
+	}
+	if (operator == "^") {
+		if (minor == nil) {
+			return { Comp(">=", Of(major, 0, 0)), Comp("<", Of(major + 1, 0, 0, { 0 })) }
+		}
+		const low = Of(major, minor, patch ?? 0, p.prerelease)
+		if (major != 0) {
+			return { Comp(">=", low), Comp("<", Of(major + 1, 0, 0, { 0 })) }
+		}
+		if (minor != 0 || patch == nil) {
+			return { Comp(">=", low), Comp("<", Of(0, minor + 1, 0, { 0 })) }
+		}
+		return { Comp(">=", low), Comp("<", Of(0, 0, patch + 1, { 0 })) }
+	}
+	if (patch != nil && minor != nil) {
+		const exact = Of(major, minor, patch, p.prerelease)
+		return { Comp((if (operator == "") "=" else operator) :: Operator, exact) }
+	}
+	if (operator == "" || operator == "=") {
+		if (minor == nil) {
+			return { Comp(">=", Of(major, 0, 0)), Comp("<", Of(major + 1, 0, 0, { 0 })) }
+		}
+		return { Comp(">=", Of(major, minor, 0)), Comp("<", Of(major, minor + 1, 0, { 0 })) }
+	}
+	// >1 is >=2.0.0 and >1.2 is >=1.3.0; <=1 is <2.0.0-0 and <=1.2 is
+	// <1.3.0-0; >=1.2 is >=1.2.0 and <1.2 is <1.2.0-0.
+	if (operator == ">" || operator == "<=") {
+		const next = if (minor == nil) Of(major + 1, 0, 0) else Of(major, minor + 1, 0)
+		if (operator == ">") {
+			return { Comp(">=", next) }
+		}
+		return { Comp("<", Of(next.major, next.minor, 0, { 0 })) }
+	}
+	if (operator == ">=") {
+		return { Comp(">=", Of(major, minor ?? 0, 0)) }
+	}
+	return { Comp("<", Of(major, minor ?? 0, 0, { 0 })) }
+}
+
+// A hyphen range's comparators: from the first version (its x parts as 0)
+// to the second (an x part takes in all of that part's versions).
+function Hyphen(from: Partial, to: Partial): { Comparator } {
+	const out: { Comparator } = {}
+	const fromMajor = from.major
+	if (fromMajor != nil) {
+		table.insert(out, Comp(">=", Of(fromMajor, from.minor ?? 0, from.patch ?? 0, from.prerelease)))
+	}
+	const toMajor = to.major
+	const toMinor = to.minor
+	const toPatch = to.patch
+	if (toMajor != nil) {
+		if (toMinor == nil) {
+			table.insert(out, Comp("<", Of(toMajor + 1, 0, 0, { 0 })))
+		} else if (toPatch == nil) {
+			table.insert(out, Comp("<", Of(toMajor, toMinor + 1, 0, { 0 })))
+		} else {
+			table.insert(out, Comp("<=", Of(toMajor, toMinor, toPatch, to.prerelease)))
+		}
+	}
+	return out
+}
+
+type Token = { operator: string, text: string }
+
+// A set with each comparator once (where it first came), or only <0.0.0-0
+// when it has that, which no version satisfies: as npm writes sets out.
+function Tidy(set: { Comparator }): { Comparator } {
+	const seen: { [string]: boolean } = {}
+	const out: { Comparator } = {}
+	for (_, c in set) {
+		const key = c.operator .. Format(c.version)
+		if (key == "<0.0.0-0") {
+			return { c }
+		}
+		if (!seen[key]) {
+			seen[key] = true
+			table.insert(out, c)
+		}
+	}
+	return out
+}
+
+// One set of a range (the text between ||s): its comparators, or why it
+// is not one.
+function ReadSet(text: string): ({ Comparator }?, string?) {
+	const tokens: { Token } = {}
+	let at = 1
+	while (true) {
+		at = (string.find(text, "[^%s]", at) :: number?) ?? #text + 1
+		if (at > #text) {
+			break
+		}
+		const operator = string.match(text, "^[<>]=?", at) ?? string.match(text, "^[=~^]", at) ?? ""
+		at += #operator
+		if (operator != "") {
+			at = (string.find(text, "[^%s]", at) :: number?) ?? #text + 1
+		}
+		const piece = string.match(text, "^[^%s]+", at) ?? ""
+		if (piece == "") {
+			return nil, `'{operator}' has no version after it`
+		}
+		at += #piece
+		table.insert(tokens, { operator = operator, text = piece })
+	}
+	for (i, token in tokens) {
+		if (token.operator == "" && token.text == "-") {
+			if (#tokens != 3 || i != 2 || tokens[1].operator != "" || tokens[3].operator != "") {
+				return nil, "a hyphen range (1.2 - 2.3.4) has one version on each side of the ' - ' and nothing else in its set"
+			}
+		}
+	}
+	const out: { Comparator } = {}
+	const partials: { Partial } = {}
+	for (_, token in tokens) {
+		if (token.text != "-") {
+			const p, why = ReadPartial(token.text)
+			if (p == nil) {
+				return nil, `'{token.operator}{token.text}' {why}`
+			}
+			table.insert(partials, p)
+		}
+	}
+	if (#tokens == 3 && tokens[2].text == "-") {
+		return Tidy(Hyphen(partials[1], partials[2])), nil
+	}
+	for (i, token in tokens) {
+		for (_, c in Expand(token.operator, partials[i])) {
+			table.insert(out, c)
+		}
+	}
+	return Tidy(out), nil
+}
+
+function ReadRange(text: string): (Range?, string?) {
+	const sets: { { Comparator } } = {}
+	for (_, part in string.split(text, "||")) {
+		const set, why = ReadSet(part)
+		if (set == nil) {
+			return nil, why
+		}
+		table.insert(sets, set)
+	}
+	return { sets = sets }, nil
+}
+
+const kOperators: { [string]: boolean } = { ["<"] = true, ["<="] = true, [">"] = true, [">="] = true, ["="] = true }
+
+// Why a table given as a Range is not one (nil when it is).
+function RangeProblem(range: Range): string? {
+	const sets = ((range :: unknown) :: { [string]: unknown }).sets
+	if (type(sets) != "table") {
+		return "a Range's sets are a list of lists of comparators"
+	}
+	for (_, set in sets :: { unknown }) {
+		if (type(set) != "table") {
+			return "a Range's sets are a list of lists of comparators"
+		}
+		for (_, c in set :: { unknown }) {
+			if (type(c) != "table") {
+				return `a comparator is a table, not {repr(c)}`
+			}
+			const operator = (c :: { [string]: unknown }).operator
+			if (type(operator) != "string" || !kOperators[operator]) {
+				return `a comparator's operator is "<", "<=", ">", ">=" or "=", not {repr(operator)}`
+			}
+			const version = (c :: { [string]: unknown }).version
+			if (type(version) != "table") {
+				return `a comparator's version is a Version, not {repr(version)}`
+			}
+			const why = Problem(version :: Version)
+			if (why != nil) {
+				return why
+			}
+		}
+	}
+	return nil
+}
+
+// `range` as a Range (a table given as one copied, its versions filled),
+// or an error from semver.<name>, raised `level` calls up (at the line that
+// called the semver function).
+function NeedRange(name: string, range: string | Range, level: number = 3): Range {
+	if (type(range) == "string") {
+		const r, why = ReadRange(range)
+		if (r == nil) {
+			error(`semver.{name}: '{range}' is not a range: {why}`, level)
+		}
+		return r
+	}
+	if (type(range) != "table") {
+		error(`semver.{name}: expected a range (text or a Range), not a {type(range)}`, level)
+	}
+	const why = RangeProblem(range)
+	if (why != nil) {
+		error(`semver.{name}: {why}`, level)
+	}
+	const sets: { { Comparator } } = {}
+	for (_, set in range.sets) {
+		const copy: { Comparator } = {}
+		for (_, c in set) {
+			table.insert(copy, Comp(c.operator, Filled(c.version)))
+		}
+		table.insert(sets, copy)
+	}
+	return { sets = sets }
+}
+
+function Holds(c: Comparator, v: Version): boolean {
+	const order = Compare(v, c.version)
+	switch (c.operator) {
+		case "<":
+			return order < 0
+		case "<=":
+			return order <= 0
+		case ">":
+			return order > 0
+		case ">=":
+			return order >= 0
+		default:
+			return order == 0
+	}
+}
+
+// Whether `v` satisfies every comparator in `set`. A prerelease version
+// does only when one of them has a prerelease of the same major.minor.patch
+// (npm's rule: a range that names no prerelease of 1.2.3 does not take in
+// 1.2.3-alpha, nor a prerelease of any other version).
+function SetHolds(set: { Comparator }, v: Version): boolean {
+	for (_, c in set) {
+		if (!Holds(c, v)) {
+			return false
+		}
+	}
+	if (#v.prerelease == 0) {
+		return true
+	}
+	for (_, c in set) {
+		const w = c.version
+		if (#w.prerelease > 0 && w.major == v.major && w.minor == v.minor && w.patch == v.patch) {
+			return true
+		}
+	}
+	return false
+}
+
+function Satisfies(range: Range, v: Version): boolean {
+	for (_, set in range.sets) {
+		if (SetHolds(set, v)) {
+			return true
+		}
+	}
+	return false
+}
+
+// The range `text` is, as sets of comparators: what ~, ^, x-ranges, partial
+// versions and hyphen ranges stand for written out. A malformed range is an
+// error saying what is wrong.
+function parseRange(text: string): Range {
+	if (type(text) != "string") {
+		error(`semver.parseRange: expected a string, not a {type(text)}`, 2)
+	}
+	const r, why = ReadRange(text)
+	if (r == nil) {
+		error(`semver.parseRange: '{text}' is not a range: {why}`, 2)
+	}
+	return r
+}
+
+// A range as npm writes one out: its comparators joined by spaces, its
+// sets by " || ", a set of any version as "*".
+function formatRange(range: string | Range): string {
+	const r = NeedRange("formatRange", range)
+	const sets: { string } = {}
+	for (_, set in r.sets) {
+		const parts: { string } = {}
+		for (_, c in set) {
+			table.insert(parts, (if (c.operator == "=") "" else c.operator) .. Format(c.version))
+		}
+		table.insert(sets, if (#parts == 0) "*" else table.concat(parts, " "))
+	}
+	return table.concat(sets, " || ")
+}
+
+function satisfies(version: string | Version, range: string | Range): boolean {
+	const v = Need("satisfies", version)
+	return Satisfies(NeedRange("satisfies", range), v)
+}
+
+// The highest (or lowest) of the list's versions that satisfies the range,
+// as the list has it; nil when none does. Items that are not versions are
+// passed over.
+function Extreme(name: string, list: { string | Version }, range: string | Range, sign: number): (string | Version)? {
+	if (type(list) != "table") {
+		error(`semver.{name}: expected a list of versions, not a {type(list)}`, 3)
+	}
+	const r = NeedRange(name, range, 4)
+	let best: (string | Version)? = nil
+	let bestVersion: Version? = nil
+	for (_, item in ipairs(list)) {
+		const v = Read(item)
+		if (v != nil && Satisfies(r, v) && (bestVersion == nil || Compare(v, bestVersion) * sign > 0)) {
+			best = item
+			bestVersion = v
+		}
+	}
+	return best
+}
+
+function MaxSatisfying(list: { string | Version }, range: string | Range): (string | Version)? {
+	return Extreme("maxSatisfying", list, range, 1)
+}
+
+function MinSatisfying(list: { string | Version }, range: string | Range): (string | Version)? {
+	return Extreme("minSatisfying", list, range, -1)
+}
+
+function SortList(list: { string | Version }, options: SortOptions?): { string | Version } {
+	return Sort(list, options)
+}
+
+// The list functions give back what the list holds: text from a list of
+// text, Versions from a list of Versions.
+type SortText = (list: { string }, options: SortOptions?) -> { string }
+type SortVersions = (list: { Version }, options: SortOptions?) -> { Version }
+type SortEither = (list: { string | Version }, options: SortOptions?) -> { string | Version }
+type Sorter = SortText & SortVersions & SortEither
+type PickText = (list: { string }, range: string | Range) -> string?
+type PickVersion = (list: { Version }, range: string | Range) -> Version?
+type PickEither = (list: { string | Version }, range: string | Range) -> (string | Version)?
+type Picker = PickText & PickVersion & PickEither
+
+return {
+	parse = parse,
+	isValid = isValid,
+	format = format,
+	compare = compare,
+	lessThan = lessThan,
+	greaterThan = greaterThan,
+	equals = equals,
+	sort = (SortList :: unknown) :: Sorter,
+	increment = increment,
+	parseRange = parseRange,
+	formatRange = formatRange,
+	satisfies = satisfies,
+	maxSatisfying = (MaxSatisfying :: unknown) :: Picker,
+	minSatisfying = (MinSatisfying :: unknown) :: Picker,
+}
