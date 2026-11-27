@@ -84,7 +84,7 @@ Name: cluau
 Version: $version
 Release: 1
 Summary: $summary
-License: LicenseRef-cluau
+License: LicenseRef-OddFishSociety
 URL: https://github.com/odd-fish-society/cluau
 # A release build, packaged as it is: no debug package, nothing stripped.
 %global debug_package %{nil}
