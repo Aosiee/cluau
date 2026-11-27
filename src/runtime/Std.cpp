@@ -3236,6 +3236,8 @@ namespace cluau::runtime::detail {
 
 		OpenJobs(L);
 		lua_setfield(L, -2, "_jobs");
+		OpenEntropy(L);
+		lua_setfield(L, -2, "_entropy");
 
 		lua_setfield(L, LUA_REGISTRYINDEX, kStdRegistry);
 
@@ -3271,7 +3273,7 @@ namespace cluau::runtime::detail {
 #ifdef CLUAU_HAS_SQLITE
 										 + ", @std/sqlite"
 #endif
-										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv, @std/toml, @std/collections, @std/log, @std/test";
+										 + ", @std/server, @std/websocket, @std/tar, @std/task, @std/args, @std/csv, @std/toml, @std/collections, @std/log, @std/uuid, @std/semver, @std/test";
 		return names.c_str();
 	}
 

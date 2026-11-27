@@ -165,6 +165,12 @@ return m :: {
 	register: (tasks: { [thread]: unknown }, runUntilJob: (id: number) -> ()) -> (),
 }
 )LUAU" },
+				{ "_entropy", R"LUAU(
+local m: any = nil
+return m :: {
+	bytes: (count: number) -> string,
+}
+)LUAU" },
 				{ "net", R"LUAU(
 export type Socket = {
 	tls: boolean,

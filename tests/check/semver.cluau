@@ -1,0 +1,22 @@
+// Mistakes with @std/semver and @std/uuid that cluau check reports.
+const semver = require("@std/semver")
+const uuid = require("@std/uuid")
+
+const v = semver.parse("1.2.3")
+print(v.major)                                                   // nil when the text is not a version
+semver.increment("1.2.3", "micro")                               // not a kind of release
+const next: semver.Version = semver.increment("1.2.3", "patch")  // text
+const sorted: { number } = semver.sort({ "1.0.0", "0.9.0" })     // a list of what it is given
+const best: semver.Version? = semver.maxSatisfying({ "1.0.0" }, "*")   // text, from a list of text
+const versions: { semver.Version } = { semver.parse("1.0.0") :: semver.Version }
+const top: string? = semver.minSatisfying(versions, "^1")        // a Version, from a list of them
+semver.satisfies("1.2.3", 3)                                     // a range is text or a Range
+semver.compare(1, 2)                                             // versions are text or Versions
+semver.format("1.2.3")                                           // format takes a Version
+const range: string = semver.parseRange(">=1")                   // a Range
+const order: boolean = semver.compare("1.0.0", "2.0.0")          // -1, 0 or 1
+
+const id: number = uuid.v7()                                     // text
+const version: number = uuid.version(id)                         // nil when it is not a UUID
+uuid.parse(5)
+print(next, sorted, best, top, range, order)
