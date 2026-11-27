@@ -1,0 +1,35 @@
+// The standard modules keep their own functions to themselves: requiring
+// them adds no global a script would see (or could replace by a function of
+// its own with the same name).
+const globals = _G :: { [unknown]: unknown } // allow-any: the global table
+const before: { [string]: boolean } = {}
+for (name in pairs(globals)) {
+	before[tostring(name)] = true
+}
+const modules: { unknown } = {
+	require("@std/args"),
+	require("@std/collections"),
+	require("@std/csv"),
+	require("@std/log"),
+	require("@std/semver"),
+	require("@std/task"),
+	require("@std/test"),
+	require("@std/toml"),
+	require("@std/url"),
+	require("@std/uuid"),
+}
+const added: { string } = {}
+for (name in pairs(globals)) {
+	if (!before[tostring(name)]) {
+		table.insert(added, tostring(name))
+	}
+}
+table.sort(added)
+print("globals added:", #added, table.concat(added, " "), #modules)
+
+// A script's own function of a module's helper's name changes nothing in the module.
+function Escaped(): string {
+	return "mine"
+}
+const toml = require("@std/toml")
+print(toml.encode({ key = "a \"quoted\" value" }))

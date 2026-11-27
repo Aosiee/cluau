@@ -1,0 +1,4 @@
+globals added:	0		10
+key = "a \"quoted\" value"
+
+exit: 0
