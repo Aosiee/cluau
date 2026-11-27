@@ -5,11 +5,19 @@ const compress = require("@std/compress")
 const fs = require("@std/fs")
 const path = require("@std/path")
 
+// Two stored entries, written at a fixed time of day: miniz reads a
+// central entry's method and time together, so it checks a stored entry's
+// sizes itself only for one written at midnight, which would change which
+// check reports a damaged archive below.
 function made(): string {
 	const w = zip.create()
 	w:add("aa", string.rep("x", 1000), { level = 0 })
 	w:add("ab", string.rep("y", 1000), { level = 0 })
-	return w:finish() :: string
+	let bytes = w:finish() :: string
+	for (_, at in central(bytes)) {
+		bytes = patch(bytes, at + 12, string.pack("<I2", 0x6000)) // 12:00
+	}
+	return bytes
 }
 
 // Where each central directory entry of an archive starts (one with no
