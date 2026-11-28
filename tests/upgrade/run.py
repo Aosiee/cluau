@@ -31,7 +31,13 @@ def run(command, env=None):
     for name in ("CLUAU_REPOSITORY", "CLUAU_DOWNLOAD_URL", "CLUAU_RELEASE_KEYS"):
         full.pop(name, None)
     full.update(env or {})
-    return subprocess.run(command, capture_output=True, text=True, env=full, timeout=120)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, env=full, timeout=120)
+    except subprocess.TimeoutExpired as timedOut:
+        # What it said before it stopped answering: where it hung.
+        def text(data):
+            return data.decode(errors="replace") if isinstance(data, bytes) else (data or "")
+        return subprocess.CompletedProcess(command, -1, text(timedOut.stdout), text(timedOut.stderr) + "\n(timed out after 120 s)")
 
 
 def query(code):
