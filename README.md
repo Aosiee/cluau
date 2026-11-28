@@ -251,6 +251,12 @@ cluau was written for [TinyEngine](https://github.com/Aosiee) (its gameplay
 scripts) and its build tool Kiln (build manifests), and has no dependency on
 either.
 
+## Contributing
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers reporting a problem, proposing a
+change, building and testing, and how the maintainers land changes and
+make releases.
+
 ## Licence
 
 cluau is released under the Odd Fish Society License ([`LICENSE`](LICENSE)), which is
