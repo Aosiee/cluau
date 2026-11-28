@@ -130,10 +130,11 @@ Releases from 0.34.0 on are signed: `SHA256SUMS.minisig` is a
 checks it, and installs nothing it does not check out. The installers check
 it too, with `minisign` when it is installed, or else with OpenSSL 3 on
 Linux and macOS; without either, they say the signature was not checked and
-go by the checksum alone. To check a download by hand:
+go by the checksum alone. To check a download by hand (with the key that
+signs releases, `FE00BF095F7CAF01`):
 
 ```sh
-minisign -V -m SHA256SUMS -P <a key from installer/release-keys.pub>
+minisign -V -m SHA256SUMS -P RWQBr3xfCb8A/i1eiFedWHHCz4NetYI9ok4cXDXXqyN9ZOLeo1eq30cD
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 

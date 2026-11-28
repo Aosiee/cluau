@@ -2,3 +2,9 @@
 # every release; the second is a spare, kept offline, that takes over if the
 # first ever has to be replaced. `cluau upgrade` and the installers trust
 # exactly these (a test checks that the installers carry the same ones).
+
+untrusted comment: minisign public key FE00BF095F7CAF01 (signs releases)
+RWQBr3xfCb8A/i1eiFedWHHCz4NetYI9ok4cXDXXqyN9ZOLeo1eq30cD
+
+untrusted comment: minisign public key CF8832A71AEE4792 (spare, kept offline)
+RWSSR+4apzKIzwmg3BteW5k39DoO6uD65LamUlAngfyEXS1irNt1zVJZ

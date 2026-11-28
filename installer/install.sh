@@ -47,6 +47,8 @@ marker="# added by the cluau installer"
 # The release keys, as installer/release-keys.pub has them (a test checks
 # that they match).
 release_keys="${CLUAU_RELEASE_KEYS-
+RWQBr3xfCb8A/i1eiFedWHHCz4NetYI9ok4cXDXXqyN9ZOLeo1eq30cD
+RWSSR+4apzKIzwmg3BteW5k39DoO6uD65LamUlAngfyEXS1irNt1zVJZ
 }"
 # The first release that is signed: an earlier one installs on its
 # checksum alone.
