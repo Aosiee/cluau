@@ -24,6 +24,9 @@ Each release's notes. A release's tag message is its section here.
   installed; an earlier, unsigned one installs on its checksum alone.
 - Monocypher 4.0.3 (Ed25519 and BLAKE2b) is fetched for `cluau upgrade`
   (`-DCLUAU_UPGRADE=OFF` leaves both out).
+- On Windows, `process.run`, `exec` and `spawn` of a file that is not a
+  program (a text file named `.exe`) are an error at once. They used to
+  wait for ever on a message box Windows opened and nobody could see.
 
 ## 0.33.2: the Odd Fish Society License
 

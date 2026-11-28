@@ -646,10 +646,24 @@ namespace cluau::runtime::detail {
 			const std::wstring cwd = Wide(request.Cwd);
 			std::fflush(stdout);
 			std::fflush(stderr);
-			const DWORD flags = CREATE_SUSPENDED | (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT) | (handing ? EXTENDED_STARTUPINFO_PRESENT : 0);
-			if (!CreateProcessW(application.empty() ? nullptr : application.c_str(), line.data(), nullptr, nullptr, handing, flags,
-					env.empty() ? nullptr : env.data(), cwd.empty() ? nullptr : cwd.c_str(), &startup, &started.Process))
+			// The child starts with Windows' default error mode, not this
+			// thread's. This thread's is set so that a file Windows cannot run
+			// (not a program at all) is an error here, not a message box that
+			// waits for someone to close it while CreateProcess waits too.
+			const DWORD flags = CREATE_SUSPENDED | CREATE_DEFAULT_ERROR_MODE | (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT) |
+				(handing ? EXTENDED_STARTUPINFO_PRESENT : 0);
+			DWORD errorMode = 0;
+			const BOOL quiet = SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &errorMode);
+			const BOOL created = CreateProcessW(application.empty() ? nullptr : application.c_str(), line.data(), nullptr, nullptr, handing, flags,
+				env.empty() ? nullptr : env.data(), cwd.empty() ? nullptr : cwd.c_str(), &startup, &started.Process);
+			const DWORD createError = GetLastError();
+			if (quiet)
+				SetThreadErrorMode(errorMode, nullptr);
+			if (!created)
+			{
+				SetLastError(createError);
 				return fail();
+			}
 			// The job holds it and what it starts; where it cannot be put in
 			// one (a job that allows none inside), a kill ends the child alone.
 			started.Job = CreateJobObjectW(nullptr, nullptr);
