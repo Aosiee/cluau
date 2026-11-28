@@ -1,6 +1,7 @@
 # cluau's installer for Windows: downloads a release, checks it against the
-# release's SHA256SUMS, installs `cluau` for the current user and puts it on
-# the user's PATH. No administrator rights are needed.
+# release's SHA256SUMS (and that file's signature), installs `cluau` for the
+# current user and puts it on the user's PATH. No administrator rights are
+# needed.
 #
 #   irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm https://github.com/odd-fish-society/cluau/releases/latest/download/install.ps1))) -Uninstall
@@ -23,6 +24,13 @@
 # gives the latest release. CLUAU_DOWNLOAD_URL replaces a release's
 # download address (a URL or a local directory holding the release's
 # files), for mirrors and for testing a release before it is published.
+#
+# Releases from 0.34.0 on are signed: SHA256SUMS.minisig is a minisign
+# signature of SHA256SUMS by one of the release keys below, checked with
+# minisign when it is installed (Windows has no Ed25519 of its own to
+# check it with); without minisign, the installer says so and goes by the
+# checksum alone. CLUAU_RELEASE_KEYS (minisign public keys, separated by
+# spaces) are trusted in place of these.
 
 param(
     [string]$Version = $(if ($env:CLUAU_VERSION) { $env:CLUAU_VERSION } else { 'latest' }),
@@ -51,6 +59,13 @@ $Docs = 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'syntax.md', 'scriptin
 $FileTypeKey = 'Software\Classes\.cluau'
 $ProgIdKey = 'Software\Classes\cluau.script'
 $ProgId = 'cluau.script'
+# The release keys, as installer/release-keys.pub has them (a test checks
+# that they match).
+$ReleaseKeys = if ($null -ne $env:CLUAU_RELEASE_KEYS) { $env:CLUAU_RELEASE_KEYS } else { @'
+'@ }
+# The first release that is signed: an earlier one installs on its checksum
+# alone.
+$SignedSince = [version]'0.34.0'
 
 function Say([string]$Message) { Write-Host "cluau: $Message" }
 function Fail([string]$Message) { throw "cluau: $Message" }
@@ -93,6 +108,9 @@ function Get-OldName([string]$Path) {
 # when they are no longer running.
 function Remove-OldCommands {
     Get-ChildItem -Force -Path $BinDir -Filter 'cluau.exe*.old' -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
+    # And a new command an interrupted `cluau upgrade` left beside it.
+    Get-ChildItem -Force -Path $BinDir -Filter 'cluau.new*.exe' -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
 }
 
@@ -237,12 +255,66 @@ function Get-ReleaseFile([string]$Name, [string]$To) {
     }
 }
 
+# The same, for a file a release may not have: false when it has not.
+function Get-ReleaseFileIfThere([string]$Name, [string]$To) {
+    if ($Base -match '^https?://') {
+        try { Invoke-WebRequest -UseBasicParsing "$Base/$Name" -OutFile $To; return $true }
+        catch { return $false }
+    }
+    $from = Join-Path $Base $Name
+    if (-not (Test-Path $from)) { return $false }
+    Copy-Item $from $To
+    return $true
+}
+
+# Checks the release's SHA256SUMS against its SHA256SUMS.minisig, or says
+# why it cannot (and stops when the release should be signed and is not).
+function Test-Signature {
+    $sums = Join-Path $Work 'SHA256SUMS'
+    $signature = Join-Path $Work 'SHA256SUMS.minisig'
+    # Signed from $SignedSince on (a version this cannot read, a release
+    # candidate's say, is taken to be from then on).
+    $old = $Version -match '^v?(\d+)\.(\d+)\.(\d+)$' -and [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])" -lt $SignedSince
+    if (-not (Get-ReleaseFileIfThere 'SHA256SUMS.minisig' $signature)) {
+        if ($old) {
+            Say "cluau $Version is from before releases were signed: going by its checksum alone"
+            return
+        }
+        Fail "cluau $Version has no SHA256SUMS.minisig, its signature: not installing it"
+    }
+    $keys = @($ReleaseKeys -split '\s+' | Where-Object { $_ })
+    if ($keys.Count -eq 0) {
+        if ($old) {
+            Say 'this installer has no release key to check the signature with: going by the checksum alone'
+            return
+        }
+        Fail "this installer carries no release key, so it cannot check cluau $Version's signature: use the installer from a release"
+    }
+    $minisign = Get-Command minisign -ErrorAction SilentlyContinue
+    if (-not $minisign) {
+        Say 'the signature was not checked (that needs minisign): going by the checksum alone'
+        return
+    }
+    $comment = $null
+    foreach ($key in $keys) {
+        $ErrorActionPreference = 'Continue'
+        $output = & $minisign.Source -V -Q -m $sums -x $signature -P $key 2>$null
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($code -eq 0) { $comment = (@($output) -join "`n").Trim(); break }
+    }
+    if ($null -eq $comment) { Fail "SHA256SUMS is not signed by a release key (minisign): not installing cluau $Version" }
+    if ($comment -ne "cluau $Version") { Fail "SHA256SUMS is signed as `"$comment`", not `"cluau $Version`": not installing it" }
+    Say "the release's signature checks out (minisign)"
+}
+
 $Work = Join-Path ([IO.Path]::GetTempPath()) ("cluau-install-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $Work | Out-Null
 try {
     Say "downloading cluau $Version ($Platform)"
     Get-ReleaseFile $Archive (Join-Path $Work $Archive)
     Get-ReleaseFile 'SHA256SUMS' (Join-Path $Work 'SHA256SUMS')
+    Test-Signature
 
     $line = Get-Content (Join-Path $Work 'SHA256SUMS') | Where-Object { $_ -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($Archive))$" } | Select-Object -First 1
     if (-not $line) { Fail "SHA256SUMS has no line for $Archive" }

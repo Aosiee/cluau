@@ -1,7 +1,7 @@
 #!/bin/sh
 # cluau's installer for Linux and macOS: downloads a release, checks it
-# against the release's SHA256SUMS, installs the `cluau` command and puts it
-# on PATH.
+# against the release's SHA256SUMS (and that file's signature), installs the
+# `cluau` command and puts it on PATH.
 #
 #   curl -fsSL https://github.com/odd-fish-society/cluau/releases/latest/download/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --version v0.7.0
@@ -20,6 +20,13 @@
 # release. CLUAU_DOWNLOAD_URL replaces a release's download address (a URL
 # or a local directory holding the release's files), for mirrors and for
 # testing a release before it is published.
+#
+# Releases from 0.34.0 on are signed: SHA256SUMS.minisig is a minisign
+# signature of SHA256SUMS by one of the release keys below. The signature
+# is checked with minisign when it is installed, or else with OpenSSL 3;
+# with neither, the installer says so and goes by the checksum alone.
+# CLUAU_RELEASE_KEYS (minisign public keys, separated by spaces) are
+# trusted in place of these.
 
 set -eu
 
@@ -37,6 +44,13 @@ download_url="${CLUAU_DOWNLOAD_URL:-}"
 modify_path=1
 uninstall=0
 marker="# added by the cluau installer"
+# The release keys, as installer/release-keys.pub has them (a test checks
+# that they match).
+release_keys="${CLUAU_RELEASE_KEYS-
+}"
+# The first release that is signed: an earlier one installs on its
+# checksum alone.
+signed_since="0.34.0"
 
 say() { printf 'cluau: %s\n' "$*"; }
 fail() {
@@ -166,7 +180,7 @@ if [ "$uninstall" = 1 ]; then
 		rm -f "$bin_dir/cluau"
 		removed=1
 	fi
-	rm -f "$bin_dir/.cluau.new"
+	rm -f "$bin_dir/.cluau.new" "$bin_dir"/.cluau.new.*
 	if [ -d "$doc_dir" ]; then
 		rm -rf "$doc_dir"
 		removed=1
@@ -236,6 +250,14 @@ get() {
 	esac
 }
 
+# The same, for a file a release may not have: false when it has not.
+get_if_there() {
+	case "$base" in
+	http://* | https://* | file://*) fetch "$base/$1" "$2" 2>/dev/null ;;
+	*) cp "$base/$1" "$2" 2>/dev/null ;;
+	esac
+}
+
 if [ "$version" = "latest" ]; then
 	[ -z "$download_url" ] || fail "CLUAU_DOWNLOAD_URL needs a version (--version vX.Y.Z)"
 	# GitHub's API, or a Forgejo or Gitea server's (both answer tag_name).
@@ -262,6 +284,108 @@ else
 	fail "checking the download needs sha256sum or shasum"
 fi
 
+# Whether version $1 (X.Y.Z) comes before version $2.
+version_before() {
+	[ "$(printf '%s\n%s\n' "$1" "$2" | awk -F. '{ printf "%09d%09d%09d\n", $1, $2, $3 }' | sort | head -n 1)" != \
+		"$(printf '%s\n' "$2" | awk -F. '{ printf "%09d%09d%09d\n", $1, $2, $3 }')" ]
+}
+
+# The bytes of standard base64 text (its own command: sizes differ between
+# systems' base64 tools).
+from_base64() { openssl base64 -d -A; }
+
+# Whether SHA256SUMS ($1) is signed by $2 (a minisign public key) in $3
+# (the .minisig), with OpenSSL 3: the signature is Ed25519, of the file's
+# BLAKE2b-512 hash ("ED") or of the file itself ("Ed"); the trusted comment
+# is signed with it. Prints the trusted comment.
+verify_openssl() {
+	v="$work/verify"
+	rm -rf "$v"
+	mkdir "$v"
+	tr -d '\r' <"$3" >"$v/sig"
+	sed -n 2p "$v/sig" | tr -d '\n' | from_base64 >"$v/sig.bin" 2>/dev/null || return 1
+	sed -n 4p "$v/sig" | tr -d '\n' | from_base64 >"$v/global.bin" 2>/dev/null || return 1
+	comment="$(sed -n 3p "$v/sig")"
+	case "$comment" in
+	"trusted comment: "*) comment="${comment#trusted comment: }" ;;
+	*) return 1 ;;
+	esac
+	printf '%s' "$2" | from_base64 >"$v/key.bin" 2>/dev/null || return 1
+	[ "$(wc -c <"$v/sig.bin" | tr -d ' ')" = 74 ] && [ "$(wc -c <"$v/key.bin" | tr -d ' ')" = 42 ] || return 1
+	dd if="$v/sig.bin" of="$v/algorithm" bs=1 count=2 2>/dev/null
+	dd if="$v/sig.bin" of="$v/sig.id" bs=1 skip=2 count=8 2>/dev/null
+	dd if="$v/sig.bin" of="$v/ed25519" bs=1 skip=10 count=64 2>/dev/null
+	dd if="$v/key.bin" of="$v/key.id" bs=1 skip=2 count=8 2>/dev/null
+	cmp -s "$v/sig.id" "$v/key.id" || return 1
+	# The public key as OpenSSL reads it: DER's Ed25519 prefix, then the key.
+	printf '\060\052\060\005\006\003\053\145\160\003\041\000' >"$v/key.der"
+	dd if="$v/key.bin" bs=1 skip=10 count=32 2>/dev/null >>"$v/key.der"
+	openssl pkey -pubin -inform DER -in "$v/key.der" -out "$v/key.pem" 2>/dev/null || return 1
+	case "$(cat "$v/algorithm")" in
+	ED) openssl dgst -blake2b512 -binary "$1" >"$v/message" 2>/dev/null || return 1 ;;
+	Ed) cp "$1" "$v/message" ;;
+	*) return 1 ;;
+	esac
+	openssl pkeyutl -verify -pubin -inkey "$v/key.pem" -rawin -in "$v/message" -sigfile "$v/ed25519" >/dev/null 2>&1 || return 1
+	{
+		cat "$v/ed25519"
+		printf '%s' "$comment"
+	} >"$v/signed-comment"
+	openssl pkeyutl -verify -pubin -inkey "$v/key.pem" -rawin -in "$v/signed-comment" -sigfile "$v/global.bin" >/dev/null 2>&1 || return 1
+	printf '%s\n' "$comment"
+}
+
+# Checks the release's SHA256SUMS against its SHA256SUMS.minisig, or says
+# why it cannot (and stops when the release should be signed and is not).
+check_signature() {
+	number="${version#v}"
+	signed=1
+	if ! get_if_there "SHA256SUMS.minisig" "$work/SHA256SUMS.minisig"; then
+		if version_before "$number" "$signed_since"; then
+			say "cluau $version is from before releases were signed: going by its checksum alone"
+			return 0
+		fi
+		fail "cluau $version has no SHA256SUMS.minisig, its signature: not installing it"
+	fi
+	if [ -z "$(printf '%s' "$release_keys" | tr -d ' \n\t\r')" ]; then
+		if version_before "$number" "$signed_since"; then
+			say "this installer has no release key to check the signature with: going by the checksum alone"
+			return 0
+		fi
+		fail "this installer carries no release key, so it cannot check cluau $version's signature: use the installer from a release"
+	fi
+	comment=""
+	tool=""
+	if command -v minisign >/dev/null 2>&1; then
+		tool="minisign"
+		for key in $release_keys; do
+			if comment="$(minisign -V -Q -m "$work/SHA256SUMS" -x "$work/SHA256SUMS.minisig" -P "$key" 2>/dev/null)"; then
+				break
+			fi
+			comment=""
+		done
+	else
+		case "$(openssl version 2>/dev/null)" in
+		"OpenSSL "[3-9]*)
+			tool="OpenSSL"
+			for key in $release_keys; do
+				if comment="$(verify_openssl "$work/SHA256SUMS" "$key" "$work/SHA256SUMS.minisig")"; then
+					break
+				fi
+				comment=""
+			done
+			;;
+		esac
+	fi
+	if [ -z "$tool" ]; then
+		say "the signature was not checked (that needs minisign, or OpenSSL 3): going by the checksum alone"
+		return 0
+	fi
+	[ -n "$comment" ] || fail "SHA256SUMS is not signed by a release key ($tool): not installing cluau $version"
+	[ "$comment" = "cluau $version" ] || fail "SHA256SUMS is signed as \"$comment\", not \"cluau $version\": not installing it"
+	say "the release's signature checks out ($tool)"
+}
+
 work="$(mktemp -d)"
 # Whatever happens, nothing half-made is left: a download still running,
 # the downloads, and a new command not yet in place.
@@ -278,6 +402,7 @@ trap 'cleanup; exit 143' TERM
 say "downloading cluau $version ($platform)"
 get "$archive" "$work/$archive"
 get "SHA256SUMS" "$work/SHA256SUMS"
+check_signature
 expected="$(grep "[[:space:]]\*\{0,1\}$archive\$" "$work/SHA256SUMS" | cut -d ' ' -f 1 | head -n 1)"
 [ -n "$expected" ] || fail "SHA256SUMS has no line for $archive"
 actual="$(sha256 "$work/$archive")"

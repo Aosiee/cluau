@@ -171,6 +171,16 @@ return m :: {
 	bytes: (count: number) -> string,
 }
 )LUAU" },
+				{ "_release", R"LUAU(
+local m: any = nil
+return m :: {
+	verify: (signature: string | buffer, data: string | buffer, keys: { string }) -> string,
+	makeExecutable: (path: string) -> (),
+	keys: { string },
+	target: string,
+	version: string,
+}
+)LUAU" },
 				{ "net", R"LUAU(
 export type Socket = {
 	tls: boolean,
@@ -467,6 +477,9 @@ return m :: {
 #endif
 #ifndef CLUAU_HAS_SQLITE
 						 "sqlite",
+#endif
+#ifndef CLUAU_HAS_UPGRADE
+						 "_release",
 #endif
 						 "" })
 					all.erase(name);

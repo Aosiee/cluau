@@ -52,6 +52,13 @@ namespace {
 			return "local c = require('@std/csv') return function(s) pcall(c.parse, s) pcall(c.records, s) end";
 		if (target == "toml")
 			return "local t = require('@std/toml') return function(s) local ok, v = pcall(t.decode, s) if ok then pcall(t.encode, v) end end";
+		if (target == "minisig")
+			// The input as a signature, and as a public key (a release's
+			// SHA256SUMS.minisig comes from the network).
+			return "local r = require('@std/_release') return function(s)\n"
+				   "  pcall(r.verify, s, 'data', { 'RWQBAgMEBQYHCAOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4' })\n"
+				   "  pcall(r.verify, 'untrusted comment: x\\nRUQBAgMEBQYHCA==\\ntrusted comment: x\\nAA==\\n', s, { s })\n"
+				   "end";
 		if (target == "yaml")
 			return "local y = require('@std/yaml') return function(s) local ok, v = pcall(y.decodeAll, s) if ok then pcall(y.encode, v) end end";
 		if (target == "regex")

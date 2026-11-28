@@ -104,6 +104,9 @@ namespace {
 		"                                           run a script and report where its time went\n"
 		"       cluau init | add <repository>[@ref] | remove <name> | install | update [name...] | list\n"
 		"                                           packages from Git repositories (cluau.toml, cluau.lock, cluau_modules/)\n"
+		"       cluau upgrade [--version vX.Y.Z] [--check]\n"
+		"                                           replace this cluau with the latest release (or the one named),\n"
+		"                                           once its signature and checksum check out\n"
 		"       cluau check [--loose] [--lint] [--module <@alias/name>=<file>]... <script.cluau>...\n"
 		"                                           type-check scripts (and the modules they require) without running them\n"
 		"       cluau lsp [--module <@alias/name>=<file>]...\n"
@@ -928,6 +931,14 @@ static int Main(int argc, char** argv)
 		cluau::runtime::Runtime runtime(RunOptions(argc, argv, 1));
 		return runtime.RunSource("require(\"@std/_packages\").main(require(\"@std/process\").args)", "cluau");
 	}
+#ifdef CLUAU_HAS_UPGRADE
+	if (first == "upgrade")
+	{
+		// Written in cluau (src/runtime/std/_upgrade.cluau).
+		cluau::runtime::Runtime runtime(RunOptions(argc, argv, 1));
+		return runtime.RunSource("require(\"@std/_upgrade\").main(require(\"@std/process\").args)", "cluau");
+	}
+#endif
 	if (first.empty() || first == "-i")
 	{
 		if (first.empty() && !CLUAU_ISATTY(0))

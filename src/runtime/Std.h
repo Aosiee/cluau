@@ -87,6 +87,12 @@ namespace cluau::runtime::detail {
 	// in every build (@std/crypto has them only when it is built).
 	void OpenEntropy(lua_State* L);
 
+	// Pushes @std/_release's table, for `cluau upgrade` (when the runtime is
+	// built with it): `verify` (a minisign signature), `makeExecutable`,
+	// `keys` (the release keys), `target` (the release build this is) and
+	// `version`.
+	void OpenRelease(lua_State* L);
+
 	// Fills `out` with `size` bytes from the operating system's random
 	// source (false when it gave none).
 	bool SystemRandom(void* out, size_t size);

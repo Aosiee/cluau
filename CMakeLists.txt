@@ -215,6 +215,39 @@ if(CLUAU_BUILD_RUNTIME)
         endif()
     endif()
 
+    # `cluau upgrade`: Monocypher (Ed25519 and BLAKE2b, for the releases'
+    # minisign signatures), fetched at a release and built here. It needs
+    # @std/http, @std/crypto and @std/compress too.
+    option(CLUAU_UPGRADE "Build `cluau upgrade` (fetches Monocypher)" ON)
+    if(CLUAU_UPGRADE AND NOT (CLUAU_HTTP AND CLUAU_CRYPTO AND CLUAU_COMPRESS))
+        message(STATUS "cluau: no `cluau upgrade` (it needs CLUAU_HTTP, CLUAU_CRYPTO and CLUAU_COMPRESS)")
+        set(CLUAU_UPGRADE OFF)
+    endif()
+    if(CLUAU_UPGRADE)
+        include(FetchContent)
+        enable_language(C)
+        FetchContent_Declare(monocypher
+            URL https://monocypher.org/download/monocypher-4.0.3.tar.gz
+            URL_HASH SHA256=8cc9bc341a66249016db9bd70e9142d8d0aef9945973744b1ac05dbc55d8ee66)
+        FetchContent_MakeAvailable(monocypher) # sources only: its makefile is not CMake
+        add_library(cluau_monocypher STATIC ${monocypher_SOURCE_DIR}/src/monocypher.c
+            ${monocypher_SOURCE_DIR}/src/optional/monocypher-ed25519.c)
+        target_include_directories(cluau_monocypher PUBLIC ${monocypher_SOURCE_DIR}/src ${monocypher_SOURCE_DIR}/src/optional)
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(cluau_monocypher PRIVATE -w)
+        endif()
+        # The release keys (installer/release-keys.pub), as C strings.
+        set(cluau_keys_file ${CMAKE_CURRENT_SOURCE_DIR}/installer/release-keys.pub)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${cluau_keys_file})
+        include(cmake/release_keys.cmake)
+        cluau_release_keys(${cluau_keys_file} cluau_key_lines)
+        set(cluau_keys_inc "")
+        foreach(line ${cluau_key_lines})
+            string(APPEND cluau_keys_inc "\"${line}\",\n")
+        endforeach()
+        file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cluau_release_keys.inc CONTENT "${cluau_keys_inc}")
+    endif()
+
     # @std/regex: PCRE2 (Perl-compatible regular expressions), fetched at a
     # release and linked statically, 8-bit with Unicode, without its JIT.
     option(CLUAU_REGEX "Build @std/regex (fetches PCRE2)" ON)
@@ -255,6 +288,12 @@ if(CLUAU_BUILD_RUNTIME)
         target_sources(cluau_runtime PRIVATE src/runtime/Compress.cpp)
         target_link_libraries(cluau_runtime PRIVATE cluau_miniz)
         target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_COMPRESS)
+    endif()
+    if(CLUAU_UPGRADE)
+        target_sources(cluau_runtime PRIVATE src/runtime/Release.cpp)
+        target_link_libraries(cluau_runtime PRIVATE cluau_monocypher)
+        target_include_directories(cluau_runtime PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+        target_compile_definitions(cluau_runtime PRIVATE CLUAU_HAS_UPGRADE)
     endif()
     if(CLUAU_SQLITE)
         target_sources(cluau_runtime PRIVATE src/runtime/Sqlite.cpp)
@@ -336,6 +375,9 @@ if(CLUAU_BUILD_RUNTIME)
     # Luau's parser for `cluau convert --verify`.
     target_link_libraries(cluau PRIVATE cluau_runtime Luau.Ast)
     target_compile_definitions(cluau PRIVATE CLUAU_HAS_RUNTIME)
+    if(CLUAU_UPGRADE)
+        target_compile_definitions(cluau PRIVATE CLUAU_HAS_UPGRADE)
+    endif()
     if(CLUAU_BUILD_TESTS)
         # The runtime's API as a host uses it (host modules, the sandbox).
         add_executable(cluau_runtime_tests tests/main.cpp tests/runtime_tests.cpp)
@@ -353,6 +395,9 @@ if(CLUAU_BUILD_RUNTIME)
             endif()
             if(CLUAU_REGEX)
                 list(APPEND cluau_fuzz_targets regex)
+            endif()
+            if(CLUAU_UPGRADE)
+                list(APPEND cluau_fuzz_targets minisig)
             endif()
             foreach(target ${cluau_fuzz_targets})
                 add_executable(fuzz_${target} tests/fuzz/fuzz.cpp)
@@ -421,8 +466,17 @@ if(CLUAU_BUILD_RUNTIME)
                 add_test(NAME http:local
                     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/http/run.py $<TARGET_FILE:cluau>)
                 set_tests_properties(http:local PROPERTIES TIMEOUT 180)
+                # `cluau upgrade` against releases signed here (tests/upgrade/run.py).
+                if(CLUAU_UPGRADE)
+                    add_test(NAME upgrade:local
+                        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/upgrade/run.py $<TARGET_FILE:cluau>)
+                    set_tests_properties(upgrade:local PROPERTIES TIMEOUT 300)
+                endif()
             endif()
         endif()
+        # The installers trust the release keys `cluau upgrade` does.
+        add_test(NAME release-keys
+            COMMAND ${CMAKE_COMMAND} -DDIR=${CMAKE_CURRENT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_release_keys.cmake)
         # THIRD_PARTY_NOTICES.md holds the licences of exactly the pinned
         # releases: a build that fetched all of them checks it.
         if(CLUAU_HTTP AND CLUAU_REGEX AND CLUAU_COMPRESS AND NOT CLUAU_LUAU_DIR AND NOT CLUAU_LUAU_VERSION
@@ -445,6 +499,7 @@ if(CLUAU_BUILD_RUNTIME)
         # only when needed) is left out with it.
         set(cluau_std_needs_tar CLUAU_COMPRESS)
         set(cluau_std_needs_websocket CLUAU_CRYPTO)
+        set(cluau_std_needs__upgrade CLUAU_UPGRADE)
         foreach(module ${CLUAU_STD_SOURCES})
             get_filename_component(name ${module} NAME_WE)
             set(cluau_test_missing "")

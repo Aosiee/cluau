@@ -44,6 +44,7 @@ print(repr(counter.Counts))
 | `cluau lsp` | the language server, for editors (see [Editors](#editors)) |
 | `cluau debug` | the debugger, for editors (see [Debugging](#debugging)) |
 | `cluau --sandbox script.cluau` | a script without file, network or process access (see [The sandbox](#the-sandbox)) |
+| `cluau upgrade [--version vX.Y.Z] [--check]` | replaces this cluau with the latest release, or the one named (see Installing in the README) |
 
 The arguments after the script are `process.args`. A script's first line
 may be `#!/usr/bin/env cluau`, so a script marked executable runs by itself

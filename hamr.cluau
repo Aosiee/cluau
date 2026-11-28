@@ -273,7 +273,7 @@ suite:step("fuzz", {
 		ctx:run({ "cmake", "-S", ".", "-B", "build-fuzz", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo", "-DCLUAU_BUILD_TESTS=ON",
 			"-DCLUAU_FUZZ=ON", "-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++", `-DCMAKE_C_FLAGS={flags}`, `-DCMAKE_CXX_FLAGS={flags}`,
 			"-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined" })
-		const targets = { "translate", "gunzip", "inflate", "zip", "base64", "json", "csv", "toml", "yaml", "regex" }
+		const targets = { "translate", "gunzip", "inflate", "zip", "base64", "json", "csv", "toml", "yaml", "regex", "minisig" }
 		const build = { "cmake", "--build", "build-fuzz", "-j", tostring(host.cores()), "--target" }
 		for (_, target in targets) {
 			table.insert(build, `fuzz_{target}`)

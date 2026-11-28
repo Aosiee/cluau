@@ -2,6 +2,29 @@
 
 Each release's notes. A release's tag message is its section here.
 
+## 0.34.0: signed releases and `cluau upgrade`
+
+- Releases are signed. A release's `SHA256SUMS` comes with
+  `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/)
+  signature by a release key; `installer/release-keys.pub` holds the keys
+  (the one that signs, and a spare kept offline in case it ever has to be
+  replaced). The release workflow will not publish a release unsigned.
+- `cluau upgrade` replaces the running cluau with the latest release
+  (`--version vX.Y.Z`: that one, an earlier one too; `--check`: only say
+  whether there is a newer one). It installs nothing until the release's
+  `SHA256SUMS` is signed by a release key for that very release, the
+  download matches its checksum, and the new command runs here; on Windows
+  the running `cluau.exe` steps aside for the new one. A cluau that
+  Homebrew, winget or the system's package manager installed is left to
+  it. `CLUAU_REPOSITORY` and `CLUAU_DOWNLOAD_URL` work as for the
+  installers, and `CLUAU_RELEASE_KEYS` names other keys to trust.
+- The installers check the signature too: with `minisign` when it is
+  installed, or else with OpenSSL 3 (Linux and macOS). A release from
+  0.34.0 on whose signature is missing or does not check out is not
+  installed; an earlier, unsigned one installs on its checksum alone.
+- Monocypher 4.0.3 (Ed25519 and BLAKE2b) is fetched for `cluau upgrade`
+  (`-DCLUAU_UPGRADE=OFF` leaves both out).
+
 ## 0.33.2: the Odd Fish Society License
 
 Licensing only; the language, the tools and the standard library are

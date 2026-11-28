@@ -838,6 +838,14 @@ PCRE2 independently.
 (<https://sqlite.org/copyright.html>): it needs no notice, and is named
 here so that the list is complete.
 
+## Monocypher
+
+Ed25519 and BLAKE2b, with which `cluau upgrade` checks a release's minisign
+signature. <https://monocypher.org>. Monocypher is offered under CC0 1.0 or
+the 2-clause BSD licence; cluau takes it under CC0, which dedicates it to
+the public domain: it needs no notice, and is named here so that the list
+is complete.
+
 ## miniz
 
 `@std/compress`, `@std/zip`, and gzip in `@std/tar`.

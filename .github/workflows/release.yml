@@ -319,16 +319,61 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Checksums
+      # Signed with a key made for this test, and trusted in its place
+      # (CLUAU_RELEASE_KEYS): by minisign itself on one runner, so that the
+      # installers and `cluau upgrade` are tried on what minisign writes;
+      # elsewhere by tests/upgrade/minisign.py.
+      - name: Checksums, signed with a test key
         shell: bash
-        run: (cd dist && sha256sum * > SHA256SUMS 2>/dev/null || shasum -a 256 * > SHA256SUMS)
+        run: |
+          # (The signed job's files, if they are here yet, are not this test's.)
+          rm -f dist/SHA256SUMS dist/SHA256SUMS.minisig dist/install.sh dist/install.ps1
+          (cd dist && sha256sum * > SHA256SUMS 2>/dev/null || shasum -a 256 * > SHA256SUMS)
+          if [ "${{ matrix.os }}" = ubuntu-26.04 ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq minisign > /dev/null
+            minisign -G -W -p "$RUNNER_TEMP/test.pub" -s "$RUNNER_TEMP/test.key"
+          fi
+          echo "CLUAU_RELEASE_KEYS=$(bash .github/sign-test.sh --public)" >> "$GITHUB_ENV"
+          bash .github/sign-test.sh dist/SHA256SUMS "cluau $TAG"
+
+      # minisign on Windows (its own build, checked by its hash), for
+      # install.ps1's check of the signature.
+      - name: minisign
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'minisign.zip'
+          Invoke-WebRequest -UseBasicParsing https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip -OutFile $zip
+          if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne '37B600344E20C19314B2E82813DB2BFDCC408B77B876F7727889DBD46D539479') { throw 'minisign-0.12-win64.zip is not the one expected' }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Add-Content $env:GITHUB_PATH (Join-Path $env:RUNNER_TEMP 'minisign-win64\x86_64')
 
       - name: install.sh
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          CLUAU_DOWNLOAD_URL="$PWD/dist" CLUAU_VERSION="$TAG" sh installer/install.sh --prefix "$RUNNER_TEMP/cluau"
+          CLUAU_DOWNLOAD_URL="$PWD/dist" CLUAU_VERSION="$TAG" sh installer/install.sh --prefix "$RUNNER_TEMP/cluau" | tee install.txt
           test -s "$RUNNER_TEMP/cluau/share/doc/cluau/THIRD_PARTY_NOTICES.md"
+          # The signature is checked: by minisign where it is installed, by
+          # OpenSSL 3 on the other Linux runner (macOS may have neither).
+          if [ "$(uname -s)" = Linux ]; then
+            grep -q "signature checks out" install.txt
+          fi
+          # Changed after signing: refused.
+          cp -r dist "$RUNNER_TEMP/tampered"
+          echo "0000000000000000000000000000000000000000000000000000000000000000  extra" >> "$RUNNER_TEMP/tampered/SHA256SUMS"
+          if CLUAU_DOWNLOAD_URL="$RUNNER_TEMP/tampered" CLUAU_VERSION="$TAG" sh installer/install.sh --prefix "$RUNNER_TEMP/tampered-install" 2> tampered.txt; then
+            if [ "$(uname -s)" = Linux ]; then
+              echo "the installer took a SHA256SUMS changed after signing"
+              exit 1
+            fi
+          fi
+          cat tampered.txt
+          # `cluau upgrade` replaces the installed command (with the same
+          # release: the one there is to upgrade to).
+          CLUAU_DOWNLOAD_URL="$PWD/dist" "$RUNNER_TEMP/cluau/bin/cluau" upgrade --version "$TAG" | tee upgrade.txt
+          grep -q "to $TAG" upgrade.txt
+          "$RUNNER_TEMP/cluau/bin/cluau" --version | grep -q "${TAG#v}"
           printf '#!/usr/bin/env cluau\nprint("ran from", require("@std/process").platform)\n' > "$RUNNER_TEMP/hello.cluau"
           chmod +x "$RUNNER_TEMP/hello.cluau"
           (cd / && PATH="$RUNNER_TEMP/cluau/bin:$PATH" "$RUNNER_TEMP/hello.cluau")
@@ -344,6 +389,7 @@ jobs:
           printf '#!/bin/sh\necho "needs a newer system" >&2\nexit 1\n' > "$broken/$bad/cluau"
           chmod +x "$broken/$bad/cluau"
           (cd "$broken" && tar -czf "$bad.tar.gz" "$bad" && { sha256sum "$bad.tar.gz" 2>/dev/null || shasum -a 256 "$bad.tar.gz"; } > SHA256SUMS)
+          bash .github/sign-test.sh "$broken/SHA256SUMS" "cluau v99.0.0"
           if CLUAU_DOWNLOAD_URL="$broken" CLUAU_VERSION=v99.0.0 sh installer/install.sh --prefix "$RUNNER_TEMP/cluau" 2> broken.txt; then
             echo "the installer took a command that does not run"
             exit 1
@@ -363,9 +409,25 @@ jobs:
           # The .cluau key may hold another program's entries, which stay.
           New-Item -Force 'HKCU:\Software\Classes\.cluau\OpenWithProgids' | Out-Null
           Set-ItemProperty 'HKCU:\Software\Classes\.cluau\OpenWithProgids' -Name 'other.program' -Value ''
-          ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -AddToPathExt
+          ./installer/install.ps1 -Version $env:TAG -InstallDir $dir -AddToPathExt 6>&1 | Tee-Object -FilePath install.txt
+          if (-not (Select-String -Quiet 'signature checks out \(minisign\)' install.txt)) { throw 'install.ps1 did not check the signature' }
           & (Join-Path $dir 'bin\cluau.exe') -e 'print("ran from", require("@std/process").platform)'
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Changed after signing: refused.
+          $tampered = Join-Path $env:RUNNER_TEMP 'tampered'
+          Copy-Item -Recurse dist $tampered
+          Add-Content (Join-Path $tampered 'SHA256SUMS') '0000000000000000000000000000000000000000000000000000000000000000  extra'
+          $env:CLUAU_DOWNLOAD_URL = $tampered
+          $failed = $false
+          try { ./installer/install.ps1 -Version $env:TAG -InstallDir (Join-Path $env:RUNNER_TEMP 'tampered-install') -NoModifyPath } catch { $failed = $true; Write-Host $_ }
+          $env:CLUAU_DOWNLOAD_URL = "$PWD\dist"
+          if (-not $failed) { throw 'the installer took a SHA256SUMS changed after signing' }
+          # `cluau upgrade` replaces the installed command, which is running
+          # (with the same release: the one there is to upgrade to).
+          $upgraded = & (Join-Path $dir 'bin\cluau.exe') upgrade --version $env:TAG
+          $upgraded
+          if ($LASTEXITCODE -ne 0 -or -not ($upgraded -match "to $env:TAG")) { throw 'cluau upgrade did not upgrade' }
+          if (-not ((& (Join-Path $dir 'bin\cluau.exe') --version) -match $env:TAG.TrimStart('v'))) { throw 'the upgraded command does not run' }
           if (-not (Test-Path (Join-Path $dir 'doc\THIRD_PARTY_NOTICES.md'))) { throw 'the install has no THIRD_PARTY_NOTICES.md' }
           # Again over itself (an update), then an update whose command does
           # not run here, which changes nothing.
@@ -376,6 +438,8 @@ jobs:
           Set-Content -Path (Join-Path $bad 'cluau.exe') -Value 'not a program'
           Compress-Archive -Path $bad -DestinationPath "$bad.zip"
           "$((Get-FileHash -Algorithm SHA256 "$bad.zip").Hash.ToLowerInvariant())  cluau-v99.0.0-windows-x86_64.zip" | Set-Content (Join-Path $broken 'SHA256SUMS')
+          python tests/upgrade/minisign.py sign 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f (Join-Path $broken 'SHA256SUMS') 'cluau v99.0.0'
+          if ($LASTEXITCODE -ne 0) { throw 'cannot sign the broken release' }
           $env:CLUAU_DOWNLOAD_URL = $broken
           $failed = $false
           try { ./installer/install.ps1 -Version v99.0.0 -InstallDir $dir -NoModifyPath } catch { $failed = $true; Write-Host $_ }
@@ -407,8 +471,101 @@ jobs:
           if ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq (Join-Path $dir 'bin') }) { throw 'the uninstall left cluau on the user PATH' }
           if ([Environment]::GetEnvironmentVariable('PATHEXT', 'User') -match '\.CLUAU') { throw 'the uninstall left .CLUAU in PATHEXT' }
 
+  # The release's SHA256SUMS, over everything it publishes, signed with the
+  # release key: the secret MINISIGN_SECRET_KEY, a minisign secret key made
+  # without a password (minisign -G -W), whose public key is the first in
+  # installer/release-keys.pub. Only a run that publishes uses it (in the
+  # `release` environment, which can hold the secret and allow only tags);
+  # a dry run signs with a key made for it, so that no signature by the
+  # release key exists for a build that is not a release. Either way the
+  # signature is then checked as `cluau upgrade` checks it: the Linux build
+  # upgrades a copy of itself from these files, with the release keys it
+  # carries (in a dry run, the test key).
+  signed:
+    name: signed checksums
+    needs: [build, packages, vscode]
+    if: github.event_name == 'push' || inputs.publish
+    environment: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ env.REF }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cp installer/install.sh installer/install.ps1 dist/
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set: a release is not published unsigned"
+            exit 1
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign > /dev/null
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/release.key"
+          minisign -S -s "$RUNNER_TEMP/release.key" -m dist/SHA256SUMS -t "cluau $TAG" < /dev/null
+          rm -f "$RUNNER_TEMP/release.key"
+
+      - name: Check the signature
+        run: |
+          mkdir -p "$RUNNER_TEMP/check/bin"
+          tar -xzf "dist/cluau-$TAG-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/cluau-$TAG-linux-x86_64/cluau" "$RUNNER_TEMP/check/bin/"
+          CLUAU_DOWNLOAD_URL="$PWD/dist" "$RUNNER_TEMP/check/bin/cluau" upgrade --version "$TAG"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed
+          path: |
+            dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
+            dist/install.sh
+            dist/install.ps1
+
+  # A dry run's stand-in for `signed`: the same, with a test key.
+  signed-dry-run:
+    name: signed checksums (test key)
+    needs: [build, packages, vscode]
+    if: github.event_name != 'push' && !inputs.publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ env.REF }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums, signed with a test key
+        run: |
+          cp installer/install.sh installer/install.ps1 dist/
+          (cd dist && sha256sum * > SHA256SUMS)
+          bash .github/sign-test.sh dist/SHA256SUMS "cluau $TAG"
+          echo "CLUAU_RELEASE_KEYS=$(bash .github/sign-test.sh --public)" >> "$GITHUB_ENV"
+
+      - name: Check the signature
+        run: |
+          mkdir -p "$RUNNER_TEMP/check/bin"
+          tar -xzf "dist/cluau-$TAG-linux-x86_64.tar.gz" -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/cluau-$TAG-linux-x86_64/cluau" "$RUNNER_TEMP/check/bin/"
+          CLUAU_DOWNLOAD_URL="$PWD/dist" "$RUNNER_TEMP/check/bin/cluau" upgrade --version "$TAG"
+
   release:
-    needs: [build, configurations, packages, installers, vscode]
+    needs: [build, configurations, packages, installers, vscode, signed]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -456,9 +613,9 @@ jobs:
             echo '```'
             echo
             echo "Downloads: the \`cluau\` command line (run, check, test and profile scripts, the REPL, the language server, the debugger, translate, convert) for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64), with the licence, the README, the syntax guide and the scripting guide; Debian and RPM packages for Linux (\`.deb\`, \`.rpm\`); the installers; and the VS Code extension (\`cluau-vscode-$TAG.vsix\`$stores). To embed the translator, build from source (no dependencies)."
+            echo
+            echo "\`SHA256SUMS\` lists every download's checksum, and \`SHA256SUMS.minisig\` is its [minisign](https://jedisct1.github.io/minisign/) signature by a release key (\`installer/release-keys.pub\`): the installers and \`cluau upgrade\` check both."
           } > notes.md
-          cp installer/install.sh installer/install.ps1 dist/
-          (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Publish
         env:

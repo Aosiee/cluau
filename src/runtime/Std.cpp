@@ -3285,6 +3285,13 @@ namespace cluau::runtime::detail {
 		lua_setfield(L, -2, "_jobs");
 		OpenEntropy(L);
 		lua_setfield(L, -2, "_entropy");
+#ifdef CLUAU_HAS_UPGRADE
+		if (!sandbox)
+		{
+			OpenRelease(L);
+			lua_setfield(L, -2, "_release");
+		}
+#endif
 
 		lua_setfield(L, LUA_REGISTRYINDEX, kStdRegistry);
 

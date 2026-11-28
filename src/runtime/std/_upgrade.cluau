@@ -1,0 +1,389 @@
+// `cluau upgrade`: replaces the running cluau with another release (the
+// latest, unless --version names one), downloaded from the repository's
+// releases. Nothing is replaced until the release's SHA256SUMS is signed by
+// one of the release keys this cluau carries (installer/release-keys.pub),
+// the download matches its line there, and the new cluau runs here. A cluau
+// a package manager installed is left to it.
+
+const fs = require("@std/fs")
+const path = require("@std/path")
+const process = require("@std/process")
+const io = require("@std/io")
+const http = require("@std/http")
+const json = require("@std/json")
+const crypto = require("@std/crypto")
+const semver = require("@std/semver")
+const tar = require("@std/tar")
+const zip = require("@std/zip")
+const release = require("@std/_release")
+
+const kUsage = [[usage: cluau upgrade [--version vX.Y.Z] [--check]
+
+  --version vX.Y.Z   the release to install (default: the latest; an earlier one too)
+  --check            say whether there is a newer release, and change nothing
+
+CLUAU_REPOSITORY names the repository the releases come from (its web address;
+https://github.com/odd-fish-society/cluau unless it names another, such as a
+Forgejo or Gitea server's), and CLUAU_DOWNLOAD_URL replaces a release's download
+address (a URL, or a local directory holding the release's files).
+CLUAU_RELEASE_KEYS, minisign public keys separated by spaces, are trusted in
+place of the release keys this cluau carries.
+]]
+
+// The guides and licences a release holds, beside the command.
+const kDocs = { "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "syntax.md", "scripting.md" }
+
+// The new command while it is not in place yet, removed if the upgrade
+// stops before then.
+let leftover: string? = nil
+
+function Cleanup() {
+	if (leftover != nil) {
+		const file = leftover
+		leftover = nil
+		pcall(fs.remove, file)
+	}
+}
+
+function Fail(message: string): never {
+	io.writeError(`cluau: {message}\n`)
+	Cleanup()
+	return process.exit(1)
+}
+
+function Say(message: string) {
+	io.write(`cluau: {message}\n`)
+}
+
+// Runs `run`: the error it raised, as text, or nil when it raised none.
+function Try(run: () -> ()): string? {
+	const ok, problem = pcall(run :: () -> ...unknown)
+	return if (ok) nil else tostring(problem)
+}
+
+function Windows(): boolean {
+	return process.platform == "windows"
+}
+
+// The repository's address, and its server's API for the latest release
+// (GitHub's, or a Forgejo or Gitea server's, which answer the same).
+function Repository(): (string, string) {
+	let address = process.env("CLUAU_REPOSITORY") ?? "https://github.com/odd-fish-society/cluau"
+	while (string.sub(address, -1) == "/") {
+		address = string.sub(address, 1, -2)
+	}
+	const server, owner, name = string.match(address, "^(.-)/([^/]+)/([^/]+)$")
+	if (server == nil || owner == nil || name == nil || !string.find(server, "^https?://[^/]")) {
+		Fail(`CLUAU_REPOSITORY is not a repository's address (https://host/owner/name): {address}`)
+	}
+	let api = `{server}/api/v1/repos/{owner}/{name}/releases/latest`
+	if (server == "https://github.com") {
+		api = `https://api.github.com/repos/{owner}/{name}/releases/latest`
+	}
+	return address, api
+}
+
+function Latest(api: string): string {
+	const ok, response = pcall(http.get, api, { headers = { Accept = "application/vnd.github+json" }, timeout = 60 })
+	if (!ok) {
+		Fail(`cannot find the latest release ({api}): {response}`)
+	}
+	const answer = response :: { ok: boolean, status: number, body: string }
+	if (!answer.ok) {
+		Fail(`cannot find the latest release ({api} answered {answer.status})`)
+	}
+	const decoded, value = pcall(json.decode, answer.body)
+	const tag = if (decoded && type(value) == "table") (value :: { [string]: unknown }).tag_name else nil
+	if (type(tag) != "string") {
+		Fail(`cannot find the latest release ({api} named none)`)
+	}
+	return tag :: string
+}
+
+// A release's file, from its download address or a local directory, as
+// text (nil when it is not there).
+function Fetch(base: string, name: string): string? {
+	if (string.find(base, "^https?://")) {
+		const ok, response = pcall(http.get, `{base}/{name}`, { timeout = 600 })
+		if (!ok) {
+			Fail(`cannot download {base}/{name}: {response}`)
+		}
+		const answer = response :: { ok: boolean, status: number, body: string }
+		if (answer.status == 404) {
+			return nil
+		}
+		if (!answer.ok) {
+			Fail(`cannot download {base}/{name} (the server answered {answer.status})`)
+		}
+		return answer.body
+	}
+	const file = path.join(base, name)
+	if (!fs.isFile(file)) {
+		return nil
+	}
+	return fs.read(file)
+}
+
+// Whether a package manager installed the cluau at `exe`: then it upgrades
+// it, and this is how to.
+function PackageManager(exe: string): string? {
+	const at = string.gsub(exe, "\\", "/")
+	if (string.find(at, "/Cellar/", 1, true) || string.find(at, "^/opt/homebrew/")) {
+		return "Homebrew installed it: upgrade it with `brew upgrade cluau`"
+	}
+	if (string.find(at, "/WinGet/Packages/", 1, true)) {
+		return "winget installed it: upgrade it with `winget upgrade cluau`"
+	}
+	if (string.find(at, "^/usr/s?bin/") || string.find(at, "^/s?bin/")) {
+		return "the system's package manager installed it: upgrade it with that (apt, dnf)"
+	}
+	return nil
+}
+
+// What `<program> --version` prints, or nil and why it does not run.
+function RunsHere(program: string): (string?, string?) {
+	let ran = { code = 0, output = "", error = "" }
+	const failed = Try(function() {
+		const result = process.run({ program, "--version" }, { stderr = "capture", timeout = 60 })
+		ran = { code = result.code, output = result.output, error = result.error }
+	})
+	if (failed != nil) {
+		return nil, failed
+	}
+	if (ran.code != 0) {
+		const why = string.gsub(ran.error ?? "", "%s+$", "")
+		return nil, if (why != "") why else `it exited with status {ran.code}`
+	}
+	return (string.gsub(ran.output, "%s+$", "")), nil
+}
+
+// A path beside `exe` that nothing is at.
+function Free(stem: string, suffix: string): string {
+	let candidate = stem .. suffix
+	let n = 1
+	while (fs.exists(candidate)) {
+		candidate = `{stem}.{n}{suffix}`
+		n += 1
+	}
+	return candidate
+}
+
+function main(args: { string }) {
+	let wanted: string? = nil
+	let check = false
+	let i = 2 // args[1] is "upgrade"
+	while (i <= #args) {
+		const arg = args[i]
+		if (arg == "--version") {
+			if (args[i + 1] == nil) {
+				Fail("--version needs a release (vX.Y.Z)")
+			}
+			wanted = args[i + 1]
+			i += 2
+		} else if (arg == "--check") {
+			check = true
+			i += 1
+		} else if (arg == "-h" || arg == "--help") {
+			io.write(kUsage)
+			return
+		} else {
+			io.writeError(kUsage)
+			process.exit(2)
+		}
+	}
+
+	const platform = release.target
+	if (platform == "") {
+		Fail("there is no release build for this system: build cluau from source")
+	}
+	const exe = fs.realpath(process.executable)
+	const manager = PackageManager(exe)
+	if (manager != nil) {
+		Fail(`{exe} is not this command's to replace: {manager}`)
+	}
+	const repository, api = Repository()
+	const download = process.env("CLUAU_DOWNLOAD_URL")
+	if (download != nil && wanted == nil) {
+		Fail("CLUAU_DOWNLOAD_URL needs a version (--version vX.Y.Z)")
+	}
+
+	const current = `v{release.version}`
+	let tag = wanted ?? Latest(api)
+	if (string.sub(tag, 1, 1) != "v") {
+		tag = `v{tag}`
+	}
+	if (!semver.isValid(string.sub(tag, 2))) {
+		Fail(`{tag} is not a release's version (vX.Y.Z)`)
+	}
+	const order = semver.compare(string.sub(tag, 2), release.version)
+	if (wanted == nil && order == 0) {
+		Say(`cluau {current} is the latest release`)
+		return
+	}
+	if (wanted == nil && order < 0) {
+		Say(`cluau {current} is newer than the latest release ({tag}): nothing to do`)
+		return
+	}
+	if (check) {
+		if (order == 0) {
+			Say(`this is cluau {current}`)
+		} else {
+			Say(`cluau {tag} is available (this is {current}): \`cluau upgrade{if (wanted == nil) "" else ` --version {tag}`}\` installs it`)
+		}
+		return
+	}
+
+	let keys: { string } = release.keys
+	const given = process.env("CLUAU_RELEASE_KEYS")
+	if (given != nil) {
+		keys = {}
+		for (key in string.gmatch(given, "%S+")) {
+			table.insert(keys, key)
+		}
+	}
+	if (#keys == 0) {
+		Fail("this cluau carries no release key to check a release with: install the release with the installer instead")
+	}
+
+	const base = download ?? `{repository}/releases/download/{tag}`
+	Say(`downloading cluau {tag} ({platform})`)
+	const sums = Fetch(base, "SHA256SUMS")
+	if (sums == nil) {
+		Fail(`{tag} has no SHA256SUMS at {base}`)
+	}
+	const signature = Fetch(base, "SHA256SUMS.minisig")
+	if (signature == nil) {
+		Fail(`{tag} is not signed (it has no SHA256SUMS.minisig), so \`cluau upgrade\` cannot check it: install it with the installer instead`)
+	}
+	const verified, comment = pcall(release.verify, signature :: string, sums :: string, keys)
+	if (!verified) {
+		Fail(`not installing {tag}: its SHA256SUMS does not check out ({comment})`)
+	}
+	if (comment != `cluau {tag}`) {
+		Fail(`not installing {tag}: its SHA256SUMS is signed as "{comment}", not "cluau {tag}"`)
+	}
+
+	const archive = `cluau-{tag}-{platform}.{if (Windows()) "zip" else "tar.gz"}`
+	let expected: string? = nil
+	for (line in string.gmatch(sums :: string, "[^\n]+")) {
+		const hash, name = string.match(line, "^(%x+)%s+%*?(.-)%s*$")
+		if (name == archive && hash != nil && #hash == 64) {
+			expected = string.lower(hash)
+		}
+	}
+	if (expected == nil) {
+		Fail(`{tag}'s SHA256SUMS has no line for {archive}`)
+	}
+	const data = Fetch(base, archive)
+	if (data == nil) {
+		Fail(`{tag} has no {archive} at {base}`)
+	}
+	const actual = crypto.hash("sha256", data :: string)
+	if (actual != expected) {
+		Fail(`not installing {tag}: {archive} does not match its checksum (expected {expected}, got {actual})`)
+	}
+
+	// The command and the guides, out of the archive.
+	const folder = `cluau-{tag}-{platform}`
+	const program = if (Windows()) "cluau.exe" else "cluau"
+	let entry: (name: string) -> string = function(name: string): string {
+		return ""
+	}
+	const notArchive = Try(function() {
+		if (Windows()) {
+			const opened = zip.fromString(data :: string)
+			entry = function(name: string): string {
+				return opened:read(name)
+			}
+		} else {
+			const opened = tar.fromString(data :: string)
+			entry = function(name: string): string {
+				return opened:read(name)
+			}
+		}
+	})
+	if (notArchive != nil) {
+		Fail(`{archive} is not an archive: {notArchive}`)
+	}
+	let command = ""
+	if (Try(function() {
+		command = entry(`{folder}/{program}`)
+	}) != nil) {
+		Fail(`{archive} holds no {program}`)
+	}
+
+	// The new command goes beside the old one and runs from there before
+	// anything is replaced (a temporary directory may not allow running
+	// programs).
+	const binDir = path.dirname(exe)
+	// A new command an earlier upgrade left beside the old one (stopped by
+	// Ctrl-C), and on Windows old commands that no longer run.
+	for (_, name in fs.list(binDir)) {
+		if (string.find(name, "^%.cluau%.new") || string.find(name, "^cluau%.new.*%.exe$") || string.find(name, "^cluau%.exe.*%.old$")) {
+			Try(function() {
+				fs.remove(path.join(binDir, name))
+			})
+		}
+	}
+	const staged = if (Windows()) Free(path.join(binDir, "cluau.new"), ".exe") else Free(path.join(binDir, ".cluau.new"), "")
+	leftover = staged
+	const notWritten = Try(function() {
+		fs.write(staged, command)
+	})
+	if (notWritten != nil) {
+		Fail(`cannot write the new command beside {exe} ({notWritten}): run \`cluau upgrade\` as a user who can write there (with sudo, say)`)
+	}
+	release.makeExecutable(staged)
+	const version, why = RunsHere(staged)
+	if (version == nil) {
+		Fail(`cluau {tag} does not run on this system ({why}): nothing was changed`)
+	}
+	if (version != `cluau {string.sub(tag, 2)}`) {
+		Fail(`{archive} holds {version}, not cluau {string.sub(tag, 2)}: nothing was changed`)
+	}
+
+	if (Windows()) {
+		// A running program cannot be replaced on Windows, but it can be
+		// renamed: the old command steps aside (and is removed once it no
+		// longer runs, by the next upgrade or install).
+		const old = Free(exe, ".old")
+		const aside = Try(function() {
+			fs.rename(exe, old)
+		})
+		if (aside != nil) {
+			Fail(`cannot move the running {exe} aside for the new one: {aside}`)
+		}
+		const failure = Try(function() {
+			fs.rename(staged, exe)
+		})
+		if (failure != nil) {
+			Try(function() {
+				fs.rename(old, exe)
+			})
+			Fail(`cannot put the new command in place: {failure}`)
+		}
+		pcall(fs.remove, old)
+	} else {
+		// A rename over the old command: one that is running goes on running.
+		const failure = Try(function() {
+			fs.rename(staged, exe)
+		})
+		if (failure != nil) {
+			Fail(`cannot put the new command in place: {failure}`)
+		}
+	}
+	leftover = nil
+
+	// The guides, where the installers put them (when they are there).
+	const docDir = if (Windows()) path.join(path.dirname(binDir), "doc") else path.join(path.dirname(binDir), "share", "doc", "cluau")
+	if (fs.isDir(docDir)) {
+		for (_, doc in kDocs) {
+			Try(function() {
+				fs.write(path.join(docDir, doc), entry(`{folder}/{doc}`))
+			})
+		}
+	}
+	Say(`upgraded {exe} from cluau {current} to {tag}`)
+}
+
+return { main = main }

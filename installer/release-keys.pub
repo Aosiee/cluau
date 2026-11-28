@@ -1,0 +1,4 @@
+# The minisign public keys cluau's releases are signed with. The first signs
+# every release; the second is a spare, kept offline, that takes over if the
+# first ever has to be replaced. `cluau upgrade` and the installers trust
+# exactly these (a test checks that the installers carry the same ones).

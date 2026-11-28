@@ -117,8 +117,27 @@ directory. Neither needs administrator rights.
   in for `-Version` and `-InstallDir` with the `irm ... | iex` form (and
   `CLUAU_VERSION` and `CLUAU_PREFIX` for `install.sh`'s options).
 
-Run an installer again to update: a new release whose `cluau --version`
-does not run on the system leaves the installed one as it was. The installers are
+To update, run `cluau upgrade` (`--check` only says whether there is a
+newer release; `--version vX.Y.Z` installs that one, an earlier one too),
+or run an installer again. Either way, a new release whose `cluau --version`
+does not run on the system leaves the installed one as it was. A cluau the
+Debian or RPM package installed is updated with apt or dnf instead.
+
+Releases from 0.34.0 on are signed: `SHA256SUMS.minisig` is a
+[minisign](https://jedisct1.github.io/minisign/) signature of the release's
+`SHA256SUMS`, by one of the keys in
+[`installer/release-keys.pub`](installer/release-keys.pub). `cluau upgrade`
+checks it, and installs nothing it does not check out. The installers check
+it too, with `minisign` when it is installed, or else with OpenSSL 3 on
+Linux and macOS; without either, they say the signature was not checked and
+go by the checksum alone. To check a download by hand:
+
+```sh
+minisign -V -m SHA256SUMS -P <a key from installer/release-keys.pub>
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+The installers are
 [`installer/install.sh`](installer/install.sh) and
 [`installer/install.ps1`](installer/install.ps1). There are release builds
 for Linux (x86_64 and arm64; any distribution with glibc 2.28 or later:
@@ -146,7 +165,8 @@ Each version is a tag (`vX.Y.Z`), and each tag is a
 [release](https://github.com/odd-fish-society/cluau/releases) with the `cluau` tool
 (scripts, the REPL, check, translate, convert) built for Linux (x86-64 and arm64),
 macOS (arm64 and x86-64) and Windows (x86-64), its tests run on each, both installers
-tried against the release's own packages on each, and a `SHA256SUMS` file.
+tried against the release's own packages on each, and a `SHA256SUMS` file with
+its minisign signature.
 A host that embeds the translator pins a tag and builds from source.
 
 ## Building
@@ -191,6 +211,7 @@ out, with the modules on it:
 | `CLUAU_SQLITE` | `@std/sqlite` | SQLite |
 | `CLUAU_REGEX` | `@std/regex` | PCRE2 |
 | `CLUAU_COMPRESS` | `@std/compress`, `@std/zip` (and gzip in `@std/tar`) | miniz |
+| `CLUAU_UPGRADE` | `cluau upgrade` (which needs `CLUAU_HTTP`, `CLUAU_CRYPTO` and `CLUAU_COMPRESS` too) | Monocypher |
 
 Each is on by default; `-DCLUAU_HTTP=OFF` (and so on) turns one off. TLS in
 `@std/net` is built when either `CLUAU_HTTP` or `CLUAU_CRYPTO` is on; with
@@ -239,9 +260,9 @@ Society libraries can credit them together, on one line or several, such as "Use
 cluau and wisp - Copyright (c) 2026 Odd Fish Society / Felipe Lara". No logo or splash
 screen is required.
 
-The `cluau` tool contains Luau, isocline, libcurl, Mbed TLS, PCRE2, SQLite
-and miniz, each under its own licence (MIT, the curl licence, Apache 2.0,
-BSD, public domain): [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
+The `cluau` tool contains Luau, isocline, libcurl, Mbed TLS, PCRE2, SQLite,
+miniz and Monocypher, each under its own licence (MIT, the curl licence,
+Apache 2.0, BSD, public domain): [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
 holds their notices, and the release downloads, the packages and the
 installers ship it beside the tool. The translator library alone
 (`cluau_translator`) contains none of them.
