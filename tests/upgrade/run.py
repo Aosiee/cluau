@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import zipfile
 
+sys.dont_write_bytecode = True  # no __pycache__ in the source tree
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from minisign import Key  # noqa: E402
 
